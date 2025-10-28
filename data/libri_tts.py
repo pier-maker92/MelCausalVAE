@@ -1,19 +1,15 @@
 import os
-import warnings
+import sys
 
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
-os.environ["TRANSFORMERS_VERBOSITY"] = "error"
-os.environ["DATASETS_VERBOSITY"] = "error"
-warnings.filterwarnings("ignore")
-import torch
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import argparse
 import numpy as np
 from tqdm import tqdm
 from collections import defaultdict
-from transformers import AutoTokenizer
 from torch.utils.data import DataLoader
 from datasets import load_dataset, concatenate_datasets
-from audio_dataset import SimpleAudioDataset
+from data.audio_dataset import SimpleAudioDataset, DataCollator
+from modules.melspecEncoder import MelSpectrogramEncoder, MelSpectrogramConfig
 
 # Specify custom cache directory
 cache_dir = "/home/ec2-user/dataset_cache"
@@ -44,6 +40,7 @@ class LibriTTS(SimpleAudioDataset):
         partitions_per_destination = defaultdict(list)
         for dataset in datasets:
             for partition in dataset:
+                # print(f"partition: {partition}, destination: {self._partition_to_destination(partition)}")
                 partitions_per_destination[self._partition_to_destination(partition)].append(dataset[partition])
 
         for destination in partitions_per_destination:
@@ -54,30 +51,60 @@ class LibriTTS(SimpleAudioDataset):
             )
 
     def _partition_to_destination(self, partition_name):
-        if partition_name.split(".")[0] in ["train"]:
+        if "train" in partition_name:
             return "train"
-        elif partition_name.split(".")[0] in ["dev", "test"]:
+        elif "dev" in partition_name or "test" in partition_name:
             return "test"
+
+    def __len__(self):
+        return len(self.dataset)
 
     def __getitem__(self, idx):
         data_dict = {}
         data = self.train_dataset[idx]
-        self._process_audio_output(data_dict, data)
+        self._process_audio_output(data_dict, data["audio"])
+        return data_dict
+
+
+class TrainWrapperLibriTTS(SimpleAudioDataset):
+    def __init__(self, dataset: LibriTTS):
+        super().__init__()
+        self.dataset = dataset.train_dataset
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        data_dict = {}
+        data = self.dataset[idx]
+        self._process_audio_output(data_dict, data["audio"])
+        return data_dict
+
+
+class TestWrapperLibriTTS(SimpleAudioDataset):
+    def __init__(self, dataset: LibriTTS):
+        super().__init__()
+        self.dataset = dataset.test_dataset
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        data_dict = {}
+        data = self.dataset[idx]
+        self._process_audio_output(data_dict, data["audio"])
         return data_dict
 
 
 # parser = argparse.ArgumentParser()
 # parser.add_argument("-b", "--batch_size", type=int, default=1)
 # parser.add_argument("-s", "--stats", action="store_true", default=False)
-# parser.add_argument("-n", "--num_samples", type=int, default=100000)
+# parser.add_argument("-n", "--num_samples", type=int, default=10000)
 # args = parser.parse_args()
 # if __name__ == "__main__":
-#     # tokenizer
-#     tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.1-8B-Instruct")
-#     tokenizer.pad_token = tokenizer.eos_token
 #     # data collator
-#     data_collator = DataCollatorForSupervisedDataset(tokenizer=tokenizer)
-#     dataset = LJSpeech(tokenizer=tokenizer, conversation_version="llama_3_1")
+#     data_collator = DataCollator()
+#     dataset = LibriTTS()
 #     dataloader = DataLoader(
 #         dataset,
 #         batch_size=args.batch_size,
@@ -98,7 +125,7 @@ class LibriTTS(SimpleAudioDataset):
 #                 means.append(feature[~mask].mean())
 #                 stds.append(feature[~mask].std())
 #             counter += args.batch_size
-#             if counter >= args.num_samples:
+#             if counter >= args.num_samples or counter >= len(dataloader):
 #                 break
 #             pbar.update(args.batch_size)
 #         pbar.close()

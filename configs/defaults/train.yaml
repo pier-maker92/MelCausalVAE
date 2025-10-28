@@ -1,15 +1,15 @@
 training:
   output_dir: outputs/ConvformerMelVae
-  num_epochs: 10
-  batch_size: 8
+  num_train_epochs: 10
+  per_device_train_batch_size: 8
   gradient_accumulation_steps: 1
-  learning_rate: 1.0e-4
+  learning_rate: 1e-4
   max_grad_norm: 1.0
-  warmup_steps: 1000
-  save_steps: 5000
-  eval_steps: 5000
-  logging_steps: 100
-  max_length: null
+  warmup_ratio: 0.01
+  save_steps: null
+  eval_steps: null
+  evaluation_strategy: "steps"
+  logging_steps: 1
   seed: 42
   fp16: false
   bf16: false
@@ -19,3 +19,9 @@ training:
   report_to: none
   wandb_project: convformer-mel-vae-warmup
   wandb_run_name: null
+  lr_scheduler_type: "cosine"
+  max_grad_norm: 0.2
+  bf16: true
+  fp16: false
+  resume_from_checkpoint: null
+  per_device_eval_batch_size: 4

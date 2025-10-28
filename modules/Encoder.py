@@ -8,18 +8,84 @@ from dataclasses import dataclass
 
 
 @dataclass
-class ConvformerEncoderConfig:
+class SigmaVAEencoderConfig:
+    logvar_layer: bool = True
+    kl_loss_weight: float = 1e-3
+    target_std: Optional[float] = None
+    use_sofplus: Optional[bool] = None
+    kl_loss_warmup_steps: int = 1000
+
+
+@dataclass
+class ConvformerEncoderConfig(SigmaVAEencoderConfig):
     compress_factor_C: int = 8
     tf_heads: int = 8
     tf_layers: int = 4
     drop_p: float = 0.1
     latent_dim: int = 64
-    logvar_layer: bool = True
     n_residual_blocks: int = 3
-    kl_loss_weight: float = 1e-3
-    target_std: Optional[float] = None
-    use_sofplus: Optional[bool] = None
-    kl_loss_warmup_steps: int = 1000
+
+
+class SigmaVAEEncoder(nn.Module):
+    def __init__(self, config: SigmaVAEencoderConfig):
+        super().__init__()
+        self.config = config
+        self.std_activation = nn.Softplus() if self.config.use_sofplus else nn.Identity()
+
+    def forward(self, **kwargs):
+        pass
+
+    def reparameterize(self, mu: torch.FloatTensor, logvar: Optional[torch.FloatTensor]) -> torch.FloatTensor:
+        eps = torch.randn_like(mu)
+        if logvar is None:
+            std = self.sample_scalar_std(mu)
+            while std.dim() < mu.dim():
+                std = std.unsqueeze(1)
+        else:
+            std = torch.exp(0.5 * logvar)
+        return mu + eps * std
+
+    def kl_divergence(
+        self, mu: torch.FloatTensor, logvar: Optional[torch.FloatTensor], padding_mask: torch.BoolTensor
+    ) -> torch.FloatTensor:
+        if logvar is None:
+            # Compute in fp32 for numerical stability
+            mu_valid = mu[~padding_mask].float()
+            return F.mse_loss(mu_valid, torch.zeros_like(mu_valid)).to(mu.dtype)
+        # Compute KL divergence in fp32 for numerical stability with fp16
+        mu_valid = mu[~padding_mask].float()
+        logvar_valid = logvar[~padding_mask].float()
+        kl = -0.5 * torch.sum(1 + logvar_valid - mu_valid.pow(2) - logvar_valid.exp())
+        return kl.to(mu.dtype)
+
+    def sample_scalar_std(self, mu: torch.FloatTensor) -> torch.FloatTensor:
+        return self.std_activation(torch.randn(mu.shape[0], dtype=mu.dtype, device=mu.device) * self.config.target_std)
+
+    def _resize_padding_mask(self, padding_mask: torch.BoolTensor, target_length: int) -> torch.BoolTensor:
+        padding_mask = (
+            F.interpolate(
+                padding_mask.unsqueeze(1).float(),
+                size=target_length,
+                mode="linear",
+                align_corners=False,
+            ).squeeze(1)
+            > 0.5  # Use threshold instead of .bool()
+        )
+        return padding_mask
+
+    def get_kl_cosine_schedule(self, step):
+        """
+        Returns the scaled KL loss weight following a cosine schedule
+        ranging from 0 to self.kl_loss_weight over total_steps.
+        Once step surpasses total_steps, stays at self.kl_loss_weight.
+        """
+        if self.config.kl_loss_warmup_steps == 0:
+            return self.config.kl_loss_weight
+        if step >= self.config.kl_loss_warmup_steps:
+            return self.config.kl_loss_weight
+        # Cosine schedule: start at 0, increase to kl_loss_weight in total_steps
+        cosine = 0.5 * (1 - math.cos(math.pi * step / self.config.kl_loss_warmup_steps))
+        return self.config.kl_loss_weight * cosine
 
 
 # ---------- utils ----------
@@ -137,7 +203,10 @@ class CausalTransformerTail(nn.Module):
     def forward(self, tokens):  # [B, T_tok, d_model]
         L = tokens.size(1)
         causal_mask = torch.triu(torch.ones(L, L, dtype=torch.bool, device=tokens.device), diagonal=1)
-        return self.enc(tokens, mask=causal_mask)
+        # Enable flash attention via SDPA backend
+        with torch.nn.attention.sdpa_kernel(torch.nn.attention.SDPBackend.FLASH_ATTENTION):
+            return self.enc(tokens, mask=causal_mask)
+        # return self.enc(tokens, mask=causal_mask)
 
 
 # TransformerEncoder with causal masking via is_causal for left-only attention [web:84][web:92]
@@ -145,7 +214,7 @@ class CausalTransformerTail(nn.Module):
 # ---------- full model as specified ----------
 
 
-class ConvformerEncoder(nn.Module):
+class ConvformerEncoder(SigmaVAEEncoder):
     """
     Spec:
       - Start with 3 causal conv2d blocks (dilations 1,2,4) that reach 512 channels and reduce frequency to 64.
@@ -156,9 +225,8 @@ class ConvformerEncoder(nn.Module):
     """
 
     def __init__(self, config: ConvformerEncoderConfig):
-        super().__init__()
-        # get config
-        self.config = config
+        super().__init__(config)
+
         compress_factor_C = config.compress_factor_C
         tf_heads = config.tf_heads
         tf_layers = config.tf_layers
@@ -205,42 +273,8 @@ class ConvformerEncoder(nn.Module):
         self.mu = nn.Linear(512, latent_dim)
         if config.logvar_layer:
             self.logvar = nn.Linear(512, latent_dim)
-        else:
-            self.std_activation = nn.Softplus() if self.config.use_sofplus else nn.Identity()
 
-    def reparameterize(self, mu, logvar):
-        eps = torch.randn_like(mu)
-        if logvar is None:
-            std = self.sample_scalar_std(mu.shape[0])
-            while std.dim() < mu.dim():
-                std = std.unsqueeze(1)
-        else:
-            std = torch.exp(0.5 * logvar)
-        return mu + eps * std
-
-    def get_kl_cosine_schedule(self, step):
-        """
-        Returns the scaled KL loss weight following a cosine schedule
-        ranging from 0 to self.kl_loss_weight over total_steps.
-        Once step surpasses total_steps, stays at self.kl_loss_weight.
-        """
-        if self.config.kl_loss_warmup_steps == 0:
-            return self.config.kl_loss_weight
-        if step >= self.config.kl_loss_warmup_steps:
-            return self.config.kl_loss_weight
-        # Cosine schedule: start at 0, increase to kl_loss_weight in total_steps
-        cosine = 0.5 * (1 - math.cos(math.pi * step / self.config.kl_loss_warmup_steps))
-        return self.config.kl_loss_weight * cosine
-
-    def kl_divergence(self, mu, logvar):
-        if logvar is None:
-            return F.mse_loss(mu, torch.zeros_like(mu))
-        return -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-
-    def sample_scalar_std(self, batch_size: int):
-        return self.std_activation(torch.randn(batch_size) * self.config.target_std)
-
-    def forward(self, x: torch.FloatTensor, **kwargs):  # x: [B, T, 100]
+    def forward(self, x: torch.FloatTensor, padding_mask: torch.BoolTensor, **kwargs):  # x: [B, T, 100]
         B, T, F = x.shape
         x = self.in_freq_proj(x)
         x = x.unsqueeze(1)  # [B, 1, T, 100]
@@ -267,7 +301,9 @@ class ConvformerEncoder(nn.Module):
         z = self.reparameterize(mu, logvar)
         kl_loss = None
         if kwargs.get("step", None) is not None:
-            kl_loss = self.kl_divergence(mu, logvar) * self.get_kl_cosine_schedule(step)
+            kl_loss = self.kl_divergence(
+                mu, logvar, self._resize_padding_mask(padding_mask, mu.shape[1])
+            ) * self.get_kl_cosine_schedule(kwargs["step"])
 
         return z, kl_loss
 

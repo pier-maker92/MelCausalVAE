@@ -9,6 +9,7 @@ from transformers import PretrainedConfig
 from torchaudio.transforms import MelSpectrogram
 
 
+@dataclass
 class MelSpectrogramConfig(PretrainedConfig):
     model_type = "mel_spectrogram"
 
@@ -19,7 +20,7 @@ class MelSpectrogramConfig(PretrainedConfig):
         hop_length: int = 256,
         n_mels: int = 100,
         padding: str = "center",
-        normalize: bool = False,
+        normalize: bool = True,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -38,9 +39,6 @@ class MelSpectrogramEncoder(torch.nn.Module):
     def __init__(
         self,
         config: MelSpectrogramConfig,
-        torch_dtype: Optional[torch.dtype] = None,
-        attn_implementation: Optional[str] = None,
-        device: Optional[torch.device] = None,
         **kwargs,
     ):
         super().__init__()
@@ -57,15 +55,14 @@ class MelSpectrogramEncoder(torch.nn.Module):
             n_mels=self.n_mels,
             center=self.padding == "center",
             power=1,
-        ).to(device)
-        self.device = device
-        self.std = 2.4729244709014893
-        self.mean = -1.5013275146484375
+        )
+        self.std = 2.0798065662384033
+        self.mean = -0.9009257555007935
         self.normalize = config.normalize
 
     def forward(self, audios_srs: List[Tuple[torch.FloatTensor, int]], **kwargs):
         audios, sampling_rates = zip(*audios_srs)
-        audios = [audio.to(self.device) for audio in audios]
+        # audios = [audio.unsqueeze(0) for audio in audios if audio.dim() == 1]
         unique_sampling_rates = set(sampling_rates)
         if len(unique_sampling_rates) > 1:
             raise ValueError(
@@ -102,12 +99,15 @@ class MelSpectrogramEncoder(torch.nn.Module):
                 device=audios[0].device,
             )
 
-        # Apply mel transform to padded audio
+        # Apply mel transform to padded audio (always in fp32 for stability)
         self.mel_transform.mel_scale.fb = self.mel_transform.mel_scale.fb.to(torch.float32)
-        mel_spec = self.mel_transform(padded_audios.to(torch.float32).to(self.device))
-        mel_spec = mel_spec.to(dtype)
-        mel_spec = torch.log(mel_spec + 1e-9)
+
+        mel_spec = self.mel_transform(padded_audios.to(torch.float32))
+        # Keep in fp32 for log operation to avoid fp16 underflow
+        mel_spec = torch.log(mel_spec + 1e-6)
         mel_spec = einops.rearrange(mel_spec, "b c t -> b t c")
+        # Convert to target dtype after log operation
+        mel_spec = mel_spec.to(dtype)
 
         padding_mask = (
             torch.nn.functional.interpolate(

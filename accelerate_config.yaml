@@ -1,0 +1,12 @@
+compute_environment: LOCAL_MACHINE
+distributed_type: MULTI_GPU  # Change to NO for single GPU, MULTI_GPU for multi-GPU
+mixed_precision: bf16  # Options: no, fp16, bf16
+num_processes: 1  # Number of GPUs to use
+gpu_ids: all  # Use 'all' or specify like '0,1' for specific GPUs
+machine_rank: 0
+main_process_ip: null
+main_process_port: null
+num_machines: 1
+downcast_bf16: 'no'
+use_cpu: false
+

@@ -1,16 +1,16 @@
-from hmac import digest_size
 import os
 import json
-import random
 import torch
-from typing import Optional
+import random
+from dataclasses import dataclass
 import torchaudio.transforms as T
 from torch.utils.data import Dataset
-from transformers import AutoTokenizer
+from typing import Optional, Sequence, Dict
 
 
 class SimpleAudioDataset(Dataset):
     def __init__(self):
+        pass
 
     def _process_audio(self, audio: torch.Tensor, sr: int, target_sr: int):
         if target_sr is not None:  # handle resampling
@@ -38,6 +38,7 @@ class SimpleAudioDataset(Dataset):
             target_sr=24000,  # FIXME: hardcoded
         )
         data_dict.update({"audio_output": [audio_output], "audio_output_sr": [sr_output]})
+
 
 @dataclass
 class DataCollator(object):
