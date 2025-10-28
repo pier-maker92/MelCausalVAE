@@ -1,3 +1,7 @@
+import os
+import sys
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import math
 import torch
 import torch.nn as nn
@@ -5,6 +9,7 @@ from typing import Optional
 from einops import rearrange
 import torch.nn.functional as F
 from dataclasses import dataclass
+from modules.flash_attn_encoder import FlashTransformerEncoder
 
 
 @dataclass
@@ -31,6 +36,7 @@ class SigmaVAEEncoder(nn.Module):
         super().__init__()
         self.config = config
         self.std_activation = nn.Softplus() if self.config.use_sofplus else nn.Identity()
+        self.kl_loss_weight = float(config.kl_loss_weight)
 
     def forward(self, **kwargs):
         pass
@@ -40,7 +46,7 @@ class SigmaVAEEncoder(nn.Module):
         if logvar is None:
             std = self.sample_scalar_std(mu)
             while std.dim() < mu.dim():
-                std = std.unsqueeze(1)
+                std = std.unsqueeze(-1)
         else:
             std = torch.exp(0.5 * logvar)
         return mu + eps * std
@@ -59,7 +65,9 @@ class SigmaVAEEncoder(nn.Module):
         return kl.to(mu.dtype)
 
     def sample_scalar_std(self, mu: torch.FloatTensor) -> torch.FloatTensor:
-        return self.std_activation(torch.randn(mu.shape[0], dtype=mu.dtype, device=mu.device) * self.config.target_std)
+        return self.std_activation(
+            torch.randn(mu.shape[0], mu.shape[1], dtype=mu.dtype, device=mu.device) * self.config.target_std
+        )
 
     def _resize_padding_mask(self, padding_mask: torch.BoolTensor, target_length: int) -> torch.BoolTensor:
         padding_mask = (
@@ -80,12 +88,12 @@ class SigmaVAEEncoder(nn.Module):
         Once step surpasses total_steps, stays at self.kl_loss_weight.
         """
         if self.config.kl_loss_warmup_steps == 0:
-            return self.config.kl_loss_weight
+            return self.kl_loss_weight
         if step >= self.config.kl_loss_warmup_steps:
-            return self.config.kl_loss_weight
+            return self.kl_loss_weight
         # Cosine schedule: start at 0, increase to kl_loss_weight in total_steps
         cosine = 0.5 * (1 - math.cos(math.pi * step / self.config.kl_loss_warmup_steps))
-        return self.config.kl_loss_weight * cosine
+        return self.kl_loss_weight * cosine
 
 
 # ---------- utils ----------
@@ -190,23 +198,21 @@ class CausalDownsamplingBlock(nn.Module):
 class CausalTransformerTail(nn.Module):
     def __init__(self, d_model=512, nheads=8, nlayers=4, drop_p=0.1):
         super().__init__()
-        layer = nn.TransformerEncoderLayer(
-            d_model=d_model,
-            nhead=nheads,
-            dim_feedforward=d_model * 4,
-            dropout=drop_p,
-            batch_first=True,
-            norm_first=True,
-        )
-        self.enc = nn.TransformerEncoder(layer, num_layers=nlayers)
+        # layer = nn.TransformerEncoderLayer(
+        #     d_model=d_model,
+        #     nhead=nheads,
+        #     dim_feedforward=d_model * 4,
+        #     dropout=drop_p,
+        #     batch_first=True,
+        #     norm_first=True,
+        # )
+        # self.enc = nn.TransformerEncoder(layer, num_layers=nlayers)
+        self.enc = FlashTransformerEncoder(d_model=d_model, nhead=nheads, nlayers=nlayers, drop_p=drop_p)
 
     def forward(self, tokens):  # [B, T_tok, d_model]
-        L = tokens.size(1)
-        causal_mask = torch.triu(torch.ones(L, L, dtype=torch.bool, device=tokens.device), diagonal=1)
-        # Enable flash attention via SDPA backend
-        with torch.nn.attention.sdpa_kernel(torch.nn.attention.SDPBackend.FLASH_ATTENTION):
-            return self.enc(tokens, mask=causal_mask)
-        # return self.enc(tokens, mask=causal_mask)
+        # L = tokens.size(1)
+        # causal_mask = torch.triu(torch.ones(L, L, dtype=torch.bool, device=tokens.device), diagonal=1)
+        return self.enc(tokens, causal=True)
 
 
 # TransformerEncoder with causal masking via is_causal for left-only attention [web:84][web:92]
@@ -274,7 +280,7 @@ class ConvformerEncoder(SigmaVAEEncoder):
         if config.logvar_layer:
             self.logvar = nn.Linear(512, latent_dim)
 
-    def forward(self, x: torch.FloatTensor, padding_mask: torch.BoolTensor, **kwargs):  # x: [B, T, 100]
+    def forward(self, x: torch.FloatTensor, padding_mask: torch.BoolTensor = None, **kwargs):  # x: [B, T, 100]
         B, T, F = x.shape
         x = self.in_freq_proj(x)
         x = x.unsqueeze(1)  # [B, 1, T, 100]

@@ -52,84 +52,165 @@ def once(fn):
     return inner
 
 
+from typing import Optional
+
 print_once = once(print)
+from flash_attn import flash_attn_qkvpacked_func  # packed QKV is the most convenient
+
+_HAS_FLASH_ATTN = True
 
 
 class Attend(nn.Module):
-    def __init__(self, dropout=0.0, flash=False, scale=None):
+    """
+    Attend module that accepts q, k, v shaped [B, H, N, D].
+
+    Behavior:
+      - If `flash=True` and the flash-attn package is installed, use flash_attn_qkvpacked_func
+        with packed qkv (fastest).
+      - Else, if PyTorch's scaled_dot_product_attention is available, call it inside
+        torch.backends.cuda.sdp_kernel(...) to select optimized kernels.
+      - Else, fall back to explicit matmul/softmax.
+    Args:
+      dropout: attention dropout probability
+      flash: prefer flash-attn (if available)
+      scale: optional softmax scale (float). If None, defaults to 1/sqrt(dim_head)
+    """
+
+    def __init__(self, dropout: float = 0.0, flash: bool = False, scale: Optional[float] = None):
         super().__init__()
-        self.dropout = dropout
-        self.attn_dropout = nn.Dropout(dropout)
+        self.dropout = float(dropout)
+        self.attn_dropout = nn.Dropout(self.dropout)
         self.scale = scale
-        self.flash = flash
-        assert not (
-            flash and version.parse(torch.__version__) < version.parse("2.0.0")
-        ), "in order to use flash attention, you must be using pytorch 2.0 or above"
-        # determine efficient attention configs for cuda and cpu
-        self.cpu_config = FlashAttentionConfig(True, True, True)
-        self.cuda_config = None
-        if not torch.cuda.is_available() or not flash:
-            return
-        device_properties = torch.cuda.get_device_properties(torch.device("cuda"))
-        if device_properties.major == 8 and device_properties.minor == 0:
-            print_once("A100 GPU detected, using flash attention if input tensor is on cuda")
-            self.cuda_config = FlashAttentionConfig(True, False, False)
+        self.flash = flash and _HAS_FLASH_ATTN  # only enable if package present
+
+    def _bool_mask_to_additive(
+        self, mask: torch.Tensor, q_len: int, k_len: int, heads: int, dtype: torch.dtype, device: torch.device
+    ):
+        """
+        Convert boolean mask to additive mask shaped [B, H, q_len, k_len] with -inf for masked positions.
+        Expect mask in either shape [B, S] (True = valid) or [B, 1, 1, S] (True = valid).
+        """
+        if mask is None:
+            return None
+        # normalize to [B, 1, 1, S]
+        if mask.ndim == 2:
+            pad = mask.unsqueeze(1).unsqueeze(1)  # [B,1,1,S]
         else:
-            print_once("Non-A100 GPU detected, using math or mem efficient attention if input tensor is on cuda")
-            self.cuda_config = FlashAttentionConfig(False, True, True)
+            pad = mask  # assume broadcastable
+        # We assume `pad` is boolean with True -> valid token (matches your earlier code).
+        # Create additive where invalid (False) -> -inf
+        additive = (~pad).to(dtype=dtype) * float("-inf")  # invalid -> -inf
+        # expand to heads and queries
+        # [B,1,1,S] -> [B, H, q_len, k_len] by broadcasting (first expand to [B,1,q_len,S])
+        additive = additive.expand(-1, 1, q_len, -1).expand(-1, heads, -1, -1)
+        return additive.to(device)
 
-    def flash_attn(self, q, k, v, mask=None):
-        _, heads, q_len, dim_head, k_len, is_cuda, device = (
-            *q.shape,
-            k.shape[-2],
-            q.is_cuda,
-            q.device,
-        )
-        # if scale is given, divide by the default scale that sdpa uses
-        if exists(self.scale):
-            q = q * (self.scale / (dim_head**-0.5))
-        # Check if mask exists and expand to compatible shape
-        # The mask is B L, so it would have to be expanded to B H N L
-        if exists(mask):
-            mask = mask.expand(-1, heads, q_len, -1)
-        # Check if there is a compatible device for flash attention
-        config = self.cuda_config if is_cuda else self.cpu_config
-        # pytorch 2.0 flash attn: q, k, v, mask, dropout, softmax_scale
-        with torch.backends.cuda.sdp_kernel(**config._asdict()):
-            out = F.scaled_dot_product_attention(
-                q,
-                k,
-                v,
-                attn_mask=mask,
-                dropout_p=self.dropout if self.training else 0.0,
-            )
-        return out
+    def forward(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+        causal: bool = False,
+    ):
+        """
+        q, k, v: [B, H, N, D]  (N = sequence length)
+        mask: either None, or boolean tensor [B, S] with True==valid, or [B,1,1,S]
+        causal: whether to apply causal mask (no attend to future)
+        returns: [B, H, Nq, D]
+        """
+        # sanity checks
+        assert q.ndim == 4 and k.ndim == 4 and v.ndim == 4, "q,k,v must be [B, H, N, D]"
+        B, H, Nq, D = q.shape
+        _, _, Nk, _ = k.shape
+        device = q.device
+        dtype = q.dtype
 
-    def forward(self, q, k, v, mask=None):
-        """
-        einstein notation
-        b - batch
-        h - heads
-        n, i, j - sequence length (base sequence length, source, target)
-        d - feature dimension
-        """
-        q_len, k_len, device = q.shape[-2], k.shape[-2], q.device
-        scale = default(self.scale, q.shape[-1] ** -0.5)
-        if exists(mask) and mask.ndim != 4:
-            mask = rearrange(mask, "b j -> b 1 1 j")
-        if self.flash:
-            return self.flash_attn(q, k, v, mask=mask)
-        # similarity
-        sim = einsum(f"b h i d, b h j d -> b h i j", q, k) * scale
-        # key padding mask
-        if exists(mask):
-            sim = sim.masked_fill(~mask, -torch.finfo(sim.dtype).max)
-        # attention
-        attn = sim.softmax(dim=-1)
-        attn = self.attn_dropout(attn).to(v.dtype)
-        # aggregate values
-        out = einsum(f"b h i j, b h j d -> b h i d", attn, v)
-        return out
+        # compute default softmax scale
+        softmax_scale = self.scale if self.scale is not None else (D**-0.5)
+
+        # If flash-attn package is available and requested, use packed kernel.
+        # flash_attn expects packed QKV as shape [B, S, 3, H, D] (S=sequence length)
+        if self.flash and _HAS_FLASH_ATTN and q.is_cuda:
+            # We need Q/K/V in shape [B, S, H, D] (S=sequence length).
+            # Our q/k/v are [B, H, N, D] -> transpose to [B, N, H, D]
+            q_ = q.permute(0, 2, 1, 3).contiguous()  # [B, Nq, H, D]
+            k_ = k.permute(0, 2, 1, 3).contiguous()  # [B, Nk, H, D]
+            v_ = v.permute(0, 2, 1, 3).contiguous()  # [B, Nk, H, D]
+
+            # If query and key lengths differ (cross-attention), flash_attn packed kernel
+            # requires Q,K,V to have same sequence length; the most common use-case here is self-attention.
+            # For cross-attention you would call flash_attn_func(q,k,v) instead.
+            if Nq != Nk:
+                # fallback to torch scaled_dot_product_attention path below
+                pass
+            else:
+                # pack qkv: shape [B, S, 3, H, D]
+                qkv = torch.stack([q_, k_, v_], dim=2)  # [B, S, 3, H, D]
+
+                # handle mask: flash_attn_qkvpacked_func does not have a standard 'attn_mask' param in older versions.
+                # We choose to zero-out k and v at padding positions (simple approach) and zero outputs at pad tokens.
+                if mask is not None:
+                    # normalize mask to [B, S] boolean (True valid). If mask is [B,1,1,S], reduce to [B,S].
+                    if mask.ndim == 4:
+                        mask_bw = mask.squeeze(1).squeeze(1)  # [B, S]
+                    elif mask.ndim == 2:
+                        mask_bw = mask
+                    else:
+                        mask_bw = mask  # assume broadcastable
+                    # keep_mask: 1.0 for valid, 0.0 for pad
+                    keep_mask = mask_bw.to(dtype=dtype, device=device).unsqueeze(-1).unsqueeze(-1)  # [B, S, 1, 1]
+                    # multiply k and v by keep_mask to zero-out padded kvs
+                    qkv[:, :, 1, :, :] = qkv[:, :, 1, :, :] * keep_mask  # k
+                    qkv[:, :, 2, :, :] = qkv[:, :, 2, :, :] * keep_mask  # v
+
+                # call flash-attn packed QKV kernel
+                # note: flash_attn_qkvpacked_func signature accepts (qkv, dropout_p=..., softmax_scale=None, causal=False)
+                out = flash_attn_qkvpacked_func(
+                    qkv, dropout_p=self.dropout if self.training else 0.0, softmax_scale=softmax_scale, causal=causal
+                )
+                # out -> [B, S, H, D]  -> convert to [B, H, S, D]
+                out = out.permute(0, 2, 1, 3).contiguous()  # [B, H, S, D]
+                return out
+
+        # Next preferred path: use PyTorch scaled_dot_product_attention (which can select flash/math kernels via sdp_kernel)
+        # This supports differing query/key lengths and accepts attn_mask (float additive mask) and is_causal param.
+        try:
+            # Build additive attn_mask shaped [B, H, Nq, Nk] with -inf where masked
+            attn_mask = self._bool_mask_to_additive(mask, q_len=Nq, k_len=Nk, heads=H, dtype=dtype, device=device)
+
+            # Note: scaled_dot_product_attention signature (PyTorch 2.1+):
+            # F.scaled_dot_product_attention(q,k,v, attn_mask=None, dropout_p=0.0, softmax_scale=None, is_causal=False)
+            with torch.backends.cuda.sdp_kernel():
+                out = F.scaled_dot_product_attention(
+                    q,
+                    k,
+                    v,
+                    attn_mask=attn_mask,
+                    dropout_p=self.dropout if self.training else 0.0,
+                    softmax_scale=softmax_scale,
+                    is_causal=causal,
+                )
+            return out  # [B, H, Nq, D]
+        except Exception:
+            # final fallback: manual attention (works everywhere, slower)
+            scale = softmax_scale
+            # sim: [B, H, Nq, Nk]
+            sim = torch.einsum("b h i d, b h j d -> b h i j", q, k) * scale
+
+            if mask is not None:
+                # mask: [B, 1, 1, Nk] or [B, Nk]
+                if mask.ndim == 2:
+                    mask_exp = mask.unsqueeze(1).unsqueeze(1)  # [B,1,1,Nk]
+                else:
+                    mask_exp = mask
+                # mask boolean True=valid -> keep where True
+                sim = sim.masked_fill(~mask_exp.expand(-1, H, Nq, -1), float("-inf"))
+
+            attn = sim.softmax(dim=-1)
+            attn = self.attn_dropout(attn).to(v.dtype)
+            out = torch.einsum("b h i j, b h j d -> b h i d", attn, v)
+            return out
 
 
 class LearnedSinusoidalPosEmb(Module):

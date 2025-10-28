@@ -3,15 +3,16 @@ training:
   output_dir: checkpoints/setting1
   num_train_epochs: 3
   learning_rate: 1e-4
-  per_device_train_batch_size: 2
+  per_device_train_batch_size: 4
   report_to: wandb
   wandb_project: convformer-cfm
-  wandb_run_name: exp1
+  wandb_run_name: sigma-vae
   fp16: false
   bf16: true
   save_steps: 1000
   eval_steps: 1000
   save_total_limit: 1
+  gradient_accumulation_steps: 2
 
 convformer:
   compress_factor_C: 8
@@ -20,9 +21,10 @@ convformer:
   latent_dim: 64
   n_residual_blocks: 3
   logvar_layer: false
-  use_sofplus: true
+  use_sofplus: false
   target_std: 1.0
   kl_loss_warmup_steps: 1000
+  kl_loss_weight: 1e-3
 
 cfm:
   unet_dim: 1024

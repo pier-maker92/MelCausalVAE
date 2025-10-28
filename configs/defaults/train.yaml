@@ -25,3 +25,4 @@ training:
   fp16: false
   resume_from_checkpoint: null
   per_device_eval_batch_size: 4
+  gradient_accumulation_steps: 1
