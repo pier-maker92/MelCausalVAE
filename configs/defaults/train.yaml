@@ -1,0 +1,21 @@
+training:
+  output_dir: outputs/ConvformerMelVae
+  num_epochs: 10
+  batch_size: 8
+  gradient_accumulation_steps: 1
+  learning_rate: 1.0e-4
+  max_grad_norm: 1.0
+  warmup_steps: 1000
+  save_steps: 5000
+  eval_steps: 5000
+  logging_steps: 100
+  max_length: null
+  seed: 42
+  fp16: false
+  bf16: false
+  dataloader_num_workers: 4
+  dataloader_pin_memory: false
+  dataloader_drop_last: true
+  report_to: none
+  wandb_project: convformer-mel-vae-warmup
+  wandb_run_name: null

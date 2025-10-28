@@ -1,0 +1,12 @@
+cfm:
+  tempformer_dim: 2048
+  unet_dim: 512
+  unet_depth: 6
+  unet_heads: 8
+  unet_dropout_rate: 0.0
+  audio_latent_dim: 512
+  use_conv_layer: false
+  use_sos_token: false
+  sigma: 1.0e-5
+
+

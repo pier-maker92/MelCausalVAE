@@ -1,0 +1,14 @@
+convformer:
+  compress_factor_C: 8
+  tf_heads: 8
+  tf_layers: 4
+  drop_p: 0.1
+  latent_dim: 64
+  logvar_layer: true
+  n_residual_blocks: 3
+  kl_loss_weight: 1.0e-3
+  target_std: null
+  use_sofplus: null
+  kl_loss_warmup_steps: 1000
+
+

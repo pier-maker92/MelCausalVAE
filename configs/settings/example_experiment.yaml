@@ -1,0 +1,20 @@
+# Only specify values that override defaults in configs/defaults/*.yaml
+training:
+  output_dir: outputs/exp1
+  num_epochs: 20
+  learning_rate: 5.0e-5
+  batch_size: 16
+  report_to_wandb: true
+  wandb_project: convformer-cfm
+  wandb_run_name: exp1-run
+
+convformer:
+  tf_layers: 6
+  latent_dim: 128
+
+cfm:
+  unet_dim: 768
+  unet_depth: 8
+  sigma: 5.0e-6
+
+
