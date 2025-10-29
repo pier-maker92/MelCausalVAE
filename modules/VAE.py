@@ -94,6 +94,8 @@ class VAE(torch.nn.Module):
             guidance_scale=guidance_scale,
             generator=generator,
         )
+        if self.config.mel_spec_config.normalize:
+            reconstructed_mel = reconstructed_mel * self.wav2mel.std + self.wav2mel.mean
 
         return {
             "original_mel": original_mel,

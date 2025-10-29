@@ -188,8 +188,8 @@ class VAEtrainer(Trainer):
                 results = self.model.encode_and_sample(
                     audios_srs=audios_srs,
                     num_steps=4,
-                    temperature=1.0,
-                    guidance_scale=1.0,
+                    temperature=0.1,
+                    guidance_scale=3.5,
                 )
             # Create visualizations
             images = []
@@ -222,6 +222,8 @@ class VAEtrainer(Trainer):
                 features = valid_mel.unsqueeze(0).permute(0, 2, 1).to(torch.bfloat16).to(self.args.device)
                 waveform = vocos.decode(features)  # [1, samples]
                 waveform = waveform.float().squeeze(0).detach().cpu()
+                # normalize waveform to -1 to 1
+                waveform = waveform / (waveform.abs().max() + 1e-8)
                 sr = audios_srs[idx][1]
                 # Log as wandb audio as well
                 audios.append(
@@ -426,7 +428,7 @@ def main():
 
     # Start training
     logger.info("Starting training...")
-    trainer.train()
+    trainer.train(resume_from_checkpoint=training_args.resume_from_checkpoint)
 
     # Save the final model
     trainer.save_model()

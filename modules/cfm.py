@@ -234,6 +234,12 @@ class DiT(torch.nn.Module):
         if cfg_scale == 1.0:
             return cond_out
 
-        final = (cfg_scale * cond_out[:1] + (1 - cfg_scale) * cond_out[1:]).to(context_vector.dtype)
+        uncond_state = self.noise_proj(torch.cat([torch.zeros_like(context_vector), state], dim=-1))
+        uncond_out = self.transformer(
+            x=uncond_state,
+            times=times,
+        )
 
-        return torch.cat([final, final], dim=0)
+        final = (cfg_scale * cond_out + (1 - cfg_scale) * uncond_out).to(context_vector.dtype)
+
+        return final

@@ -4,15 +4,17 @@ training:
   num_train_epochs: 3
   learning_rate: 1e-4
   per_device_train_batch_size: 2
+  per_device_eval_batch_size: 8
   report_to: wandb
   wandb_project: convformer-cfm
-  wandb_run_name: sigma-vae
+  wandb_run_name: sigma-vae-eval
   fp16: false
   bf16: true
   save_steps: 1000
-  eval_steps: 1000
+  eval_steps: 1
   save_total_limit: 1
   gradient_accumulation_steps: 2
+  resume_from_checkpoint: checkpoints/setting1/checkpoint-44000
 
 convformer:
   compress_factor_C: 8
@@ -33,4 +35,4 @@ cfm:
   unet_dropout_rate: 0.1
   use_conv_layer: true
   audio_latent_dim: 64
-  uncond_prob: 0.1
+  uncond_prob: 0.3
