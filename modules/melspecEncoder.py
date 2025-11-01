@@ -74,6 +74,7 @@ class MelSpectrogramEncoder(torch.nn.Module):
         if sr != self.sampling_rate:
             raise ValueError(f"Sampling rate {sr} is not supported by this model. " f"Expected {self.sampling_rate}.")
         dtype = audios[0].dtype
+        device = audios[0].device
         # Get max length for padding
         # Get max length
         if len(audios) > 1:
@@ -98,9 +99,9 @@ class MelSpectrogramEncoder(torch.nn.Module):
                 dtype=torch.bool,
                 device=audios[0].device,
             )
-
+        self.mel_transform.to(device=device, dtype=torch.float32)
         # Apply mel transform to padded audio (always in fp32 for stability)
-        self.mel_transform.mel_scale.fb = self.mel_transform.mel_scale.fb.to(torch.float32)
+        # self.mel_transform.mel_scale.fb.to(torch.float32).to(device=device)
 
         mel_spec = self.mel_transform(padded_audios.to(torch.float32))
         # Keep in fp32 for log operation to avoid fp16 underflow

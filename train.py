@@ -24,7 +24,8 @@ from transformers import (
 
 # data
 from .data.audio_dataset import DataCollator
-from .data.libri_tts import LibriTTS, TrainWrapperLibriTTS, TestWrapperLibriTTS
+from .data.libri_tts import LibriTTS
+from .data.audio_dataset import DatasetWrapper
 
 
 # Set up logging
@@ -374,9 +375,8 @@ def main():
     logger.info(f"Using device: {device}")
 
     # Create AudioDataset
-    dataset = LibriTTS()
-    train_dataset = TrainWrapperLibriTTS(dataset)
-    test_dataset = TestWrapperLibriTTS(dataset)
+    train_dataset = DatasetWrapper(LibriTTS(), "train")
+    test_dataset = DatasetWrapper(LibriTTS(), "test")
 
     # handle wandb - only initialize on main process (rank 0)
     wandb_project = training_cfg.pop("wandb_project", None)

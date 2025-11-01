@@ -191,6 +191,7 @@ class DiT(torch.nn.Module):
             )
             * temperature
         )  # .contiguous()
+        self.transformer.to(device=context_vector.device, dtype=context_vector.dtype)
 
         # ---- time span ----
         t_span = torch.linspace(

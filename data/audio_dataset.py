@@ -52,6 +52,8 @@ class DataCollator(object):
         batch_condition_audios_srs = [None] * len(instances)
         batch_transcription_ids = [None] * len(instances)
         batch_aligned_transcription_ids = [None] * len(instances)
+        batch_transcription = [None] * len(instances)
+        batch_language = [None] * len(instances)
         for i, instance in enumerate(instances):
             if "audio_input" in instance:
                 batch_input_audios_srs[i] = (
@@ -72,6 +74,10 @@ class DataCollator(object):
                 batch_transcription_ids[i] = instance["transcription_ids"]
             if "aligned_transcription_ids" in instance:
                 batch_aligned_transcription_ids[i] = instance["aligned_transcription_ids"]
+            if "transcription" in instance:
+                batch_transcription[i] = instance["transcription"]
+            if "language" in instance:
+                batch_language[i] = instance["language"]
 
         # if not all none add to the batch
         def all_none(batch):
@@ -87,4 +93,46 @@ class DataCollator(object):
             batch["transcription_ids"] = batch_transcription_ids
         if not all_none(batch_aligned_transcription_ids):
             batch["aligned_transcription_ids"] = batch_aligned_transcription_ids
+        if not all_none(batch_transcription):
+            batch["transcription"] = batch_transcription
+        if not all_none(batch_language):
+            batch["language"] = batch_language
         return batch
+
+
+class TrainDatasetWrapper(SimpleAudioDataset):
+    def __init__(self, dataset: SimpleAudioDataset, split: str):
+        super().__init__()
+        assert split in ["train", "test"], "split must be either train or test"
+        self.dataset = getattr(dataset, f"{split}_dataset")
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        data_dict = {}
+        data = self.dataset[idx]
+        self._process_audio_output(data_dict, data["audio"])
+        return data_dict
+
+
+class TestDatasetWrapper(SimpleAudioDataset):
+    def __init__(self, dataset: SimpleAudioDataset, split: str):
+        super().__init__()
+        assert split in ["test", "train"], "split must be test or train"
+        self.dataset = getattr(dataset, f"{split}_dataset")
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        data_dict = {}
+        data = self.dataset[idx]
+        self._process_audio_output(data_dict, data["audio"])
+        self._process_transcription(data_dict, data.get("text_normalized", "transcript"))
+        data_dict["language"] = data.get("language", "en")
+        return data_dict
+
+    def _process_transcription(self, data_dict, transcription):
+        data_dict.update({"transcription": transcription})
+        return data_dict

@@ -4,6 +4,7 @@ from dataclasses import dataclass, asdict
 from .Encoder import ConvformerEncoderConfig, ConvformerEncoder
 from .melspecEncoder import MelSpectrogramEncoder, MelSpectrogramConfig
 from typing import Optional
+import safetensors
 
 
 @dataclass
@@ -44,6 +45,21 @@ class VAE(torch.nn.Module):
         self.wav2mel = MelSpectrogramEncoder(config.mel_spec_config)
         self.decoder.expansion_factor = config.encoder_config.compress_factor_C
 
+    def set_device(self, device: torch.device):
+        self.decoder.to(device=device)
+        self.encoder.to(device=device)
+        self.wav2mel.to(device=device)
+
+    def set_dtype(self, dtype: torch.dtype):
+        self.decoder.to(dtype=dtype)
+        self.encoder.to(dtype=dtype)
+        self.wav2mel.to(dtype=dtype)
+
+    def from_pretrained(self, checkpoint_path: str):
+        state_dict = safetensors.torch.load_file(checkpoint_path)
+        self.load_state_dict(state_dict)
+        print(f"Loaded checkpoint from {checkpoint_path}")
+
     def forward(self, audios_srs, **kwargs):
         encoded_audios = self.wav2mel(audios_srs)
         context_vector, kl_loss = self.encoder(
@@ -61,6 +77,16 @@ class VAE(torch.nn.Module):
             audio_loss=audio_loss,
             kl_loss=kl_loss,
         )
+
+    @torch.no_grad()
+    def encode(self, audios_srs):
+        encoded_audios = self.wav2mel(audios_srs)
+        context_vector, _ = self.encoder(
+            x=encoded_audios.audio_features,
+            padding_mask=encoded_audios.padding_mask,
+            step=None,
+        )
+        return context_vector
 
     @torch.no_grad()
     def encode_and_sample(
@@ -95,6 +121,7 @@ class VAE(torch.nn.Module):
             generator=generator,
         )
         if self.config.mel_spec_config.normalize:
+            original_mel = original_mel * self.wav2mel.std + self.wav2mel.mean
             reconstructed_mel = reconstructed_mel * self.wav2mel.std + self.wav2mel.mean
 
         return {

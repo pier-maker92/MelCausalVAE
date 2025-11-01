@@ -2,14 +2,15 @@ import os
 import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import argparse
 import numpy as np
 from tqdm import tqdm
 from collections import defaultdict
 from torch.utils.data import DataLoader
 from datasets import load_dataset, concatenate_datasets
-from data.audio_dataset import SimpleAudioDataset, DataCollator
 from modules.melspecEncoder import MelSpectrogramEncoder, MelSpectrogramConfig
+from data.audio_dataset import SimpleAudioDataset, DataCollator, TrainDatasetWrapper
 
 # Specify custom cache directory
 cache_dir = "/home/ec2-user/dataset_cache"
@@ -56,45 +57,6 @@ class LibriTTS(SimpleAudioDataset):
         elif "dev" in partition_name or "test" in partition_name:
             return "test"
 
-    def __len__(self):
-        return len(self.dataset)
-
-    def __getitem__(self, idx):
-        data_dict = {}
-        data = self.train_dataset[idx]
-        self._process_audio_output(data_dict, data["audio"])
-        return data_dict
-
-
-class TrainWrapperLibriTTS(SimpleAudioDataset):
-    def __init__(self, dataset: LibriTTS):
-        super().__init__()
-        self.dataset = dataset.train_dataset
-
-    def __len__(self):
-        return len(self.dataset)
-
-    def __getitem__(self, idx):
-        data_dict = {}
-        data = self.dataset[idx]
-        self._process_audio_output(data_dict, data["audio"])
-        return data_dict
-
-
-class TestWrapperLibriTTS(SimpleAudioDataset):
-    def __init__(self, dataset: LibriTTS):
-        super().__init__()
-        self.dataset = dataset.test_dataset
-
-    def __len__(self):
-        return len(self.dataset)
-
-    def __getitem__(self, idx):
-        data_dict = {}
-        data = self.dataset[idx]
-        self._process_audio_output(data_dict, data["audio"])
-        return data_dict
-
 
 # parser = argparse.ArgumentParser()
 # parser.add_argument("-b", "--batch_size", type=int, default=1)
@@ -104,7 +66,7 @@ class TestWrapperLibriTTS(SimpleAudioDataset):
 # if __name__ == "__main__":
 #     # data collator
 #     data_collator = DataCollator()
-#     dataset = LibriTTS()
+#     dataset = DatasetWrapper(LibriTTS(), "train")
 #     dataloader = DataLoader(
 #         dataset,
 #         batch_size=args.batch_size,
