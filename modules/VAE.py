@@ -14,6 +14,15 @@ class VAEOutput:
 
 
 @dataclass
+class VaeEncoderOutput:
+    z: torch.Tensor
+    kl_loss: torch.Tensor
+    padding_mask: torch.Tensor
+    mel_features: torch.Tensor
+    original_padding_mask: torch.Tensor
+
+
+@dataclass
 class VAEConfig:
     """Config for VAE model - needed for DeepSpeed compatibility"""
 
@@ -62,7 +71,7 @@ class VAE(torch.nn.Module):
 
     def forward(self, audios_srs, **kwargs):
         encoded_audios = self.wav2mel(audios_srs)
-        context_vector, kl_loss = self.encoder(
+        convformer_output = self.encoder(
             x=encoded_audios.audio_features,
             padding_mask=encoded_audios.padding_mask,
             step=kwargs.get("training_step", None),
@@ -70,7 +79,7 @@ class VAE(torch.nn.Module):
         audio_loss = self.decoder(
             target=encoded_audios.audio_features,
             target_padding_mask=encoded_audios.padding_mask,
-            context_vector=context_vector,
+            context_vector=convformer_output.z,
         ).loss
 
         return VAEOutput(
@@ -81,12 +90,12 @@ class VAE(torch.nn.Module):
     @torch.no_grad()
     def encode(self, audios_srs):
         encoded_audios = self.wav2mel(audios_srs)
-        context_vector, _ = self.encoder(
+        convformer_output = self.encoder(
             x=encoded_audios.audio_features,
             padding_mask=encoded_audios.padding_mask,
             step=None,
         )
-        return context_vector
+        return convformer_output
 
     @torch.no_grad()
     def encode_and_sample(
@@ -106,7 +115,7 @@ class VAE(torch.nn.Module):
         original_mel = encoded_audios.audio_features
 
         # Encode to latent space
-        context_vector, _ = self.encoder(
+        convformer_output = self.encoder(
             x=original_mel,
             padding_mask=encoded_audios.padding_mask,
             step=None,
@@ -115,7 +124,7 @@ class VAE(torch.nn.Module):
         # Generate mel spectrogram from latent
         reconstructed_mel = self.decoder.generate(
             num_steps=num_steps,
-            context_vector=context_vector,
+            context_vector=convformer_output.z,
             temperature=temperature,
             guidance_scale=guidance_scale,
             generator=generator,
@@ -127,6 +136,6 @@ class VAE(torch.nn.Module):
         return {
             "original_mel": original_mel,
             "reconstructed_mel": reconstructed_mel,
-            "context_vector": context_vector,
+            "context_vector": convformer_output.z,
             "padding_mask": encoded_audios.padding_mask,
         }

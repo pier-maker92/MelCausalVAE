@@ -13,6 +13,13 @@ from modules.flash_attn_encoder import FlashTransformerEncoder
 
 
 @dataclass
+class ConvformerOutput:
+    z: torch.FloatTensor
+    kl_loss: Optional[torch.FloatTensor] = None
+    padding_mask: Optional[torch.BoolTensor] = None
+
+
+@dataclass
 class SigmaVAEencoderConfig:
     logvar_layer: bool = True
     kl_loss_weight: float = 1e-3
@@ -311,7 +318,7 @@ class ConvformerEncoder(SigmaVAEEncoder):
                 mu, logvar, self._resize_padding_mask(padding_mask, mu.shape[1])
             ) * self.get_kl_cosine_schedule(kwargs["step"])
 
-        return z, kl_loss
+        return ConvformerOutput(z=z, kl_loss=kl_loss, padding_mask=padding_mask)
 
 
 @torch.no_grad()
