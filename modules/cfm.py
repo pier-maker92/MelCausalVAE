@@ -21,42 +21,52 @@ class DiTOutput:
 
 @dataclass
 class DiTConfig:
-    model_type = "cfm"
+    audio_latent_dim: int
+    unet_dim: int = 512
+    unet_depth: int = 6
+    unet_heads: int = 8
+    unet_dropout_rate: float = 0.0
+    use_conv_layer: bool = False
+    use_sos_token: bool = False
+    sigma: float = 1e-5
+    expansion_factor: int = 1
+    mel_channels: int = 100
+    uncond_prob: float = 0.0
 
-    def __init__(
-        self,
-        audio_latent_dim: int,
-        unet_dim: int = 512,
-        unet_depth: int = 6,
-        unet_heads: int = 8,
-        unet_dropout_rate: float = 0.0,
-        use_conv_layer: bool = False,
-        use_sos_token: bool = False,
-        sigma: float = 1e-5,
-        expansion_factor: int = 1,
-        mel_channels: int = 100,
-        uncond_prob: float = 0.0,
-    ):
-        """
-        depformer_dim: int - Hidden dimension of the Depth Transformer
-        depformer_dim_feedforward: int - Feedforward dimension of the Depth Transformer
-        depformer_num_heads: int - Number of heads in the Depth Transformer
-        depformer_num_layers: int - Number of layers in the Depth Transformer
-        depformer_casual: bool - Whether the Depth Transformer is causal
-        """
+    # def __init__(
+    #     self,
+    #     audio_latent_dim: int,
+    #     unet_dim: int = 512,
+    #     unet_depth: int = 6,
+    #     unet_heads: int = 8,
+    #     unet_dropout_rate: float = 0.0,
+    #     use_conv_layer: bool = False,
+    #     use_sos_token: bool = False,
+    #     sigma: float = 1e-5,
+    #     expansion_factor: int = 1,
+    #     mel_channels: int = 100,
+    #     uncond_prob: float = 0.0,
+    # ):
+    #     """
+    #     depformer_dim: int - Hidden dimension of the Depth Transformer
+    #     depformer_dim_feedforward: int - Feedforward dimension of the Depth Transformer
+    #     depformer_num_heads: int - Number of heads in the Depth Transformer
+    #     depformer_num_layers: int - Number of layers in the Depth Transformer
+    #     depformer_casual: bool - Whether the Depth Transformer is causal
+    #     """
 
-        # unet specific
-        self.sigma = sigma
-        self.unet_dim = unet_dim
-        self.unet_heads = unet_heads
-        self.unet_depth = unet_depth
-        self.use_sos_token = use_sos_token
-        self.use_conv_layer = use_conv_layer
-        self.audio_latent_dim = audio_latent_dim
-        self.unet_dropout_rate = unet_dropout_rate
-        self.expansion_factor = expansion_factor
-        self.mel_channels = mel_channels
-        self.uncond_prob = uncond_prob
+    #     # unet specific
+    #     self.sigma = sigma
+    #     self.unet_dim = unet_dim
+    #     self.unet_heads = unet_heads
+    #     self.unet_depth = unet_depth
+    #     self.use_sos_token = use_sos_token
+    #     self.use_conv_layer = use_conv_layer
+    #     self.audio_latent_dim = audio_latent_dim
+    #     self.unet_dropout_rate = unet_dropout_rate
+    #     self.expansion_factor = expansion_factor
+    #     self.mel_channels = mel_channels
+    #     self.uncond_prob = uncond_prob
 
 
 class DiT(torch.nn.Module):

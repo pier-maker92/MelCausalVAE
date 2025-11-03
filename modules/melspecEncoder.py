@@ -10,26 +10,31 @@ from torchaudio.transforms import MelSpectrogram
 
 
 @dataclass
-class MelSpectrogramConfig(PretrainedConfig):
-    model_type = "mel_spectrogram"
-
-    def __init__(
-        self,
-        sampling_rate: int = 24000,
-        n_fft: int = 1024,
-        hop_length: int = 256,
-        n_mels: int = 100,
-        padding: str = "center",
-        normalize: bool = True,
-        **kwargs,
-    ):
-        super().__init__(**kwargs)
-        self.sampling_rate = sampling_rate
-        self.n_fft = n_fft
-        self.hop_length = hop_length
-        self.n_mels = n_mels
-        self.padding = padding
-        self.normalize = normalize
+class MelSpectrogramConfig:
+    mel_channels: int = 100
+    sampling_rate: int = 24000
+    n_fft: int = 1024
+    hop_length: int = 256
+    n_mels: int = 100
+    padding: str = "center"
+    normalize: bool = True
+    # def __init__(
+    #     self,
+    #     sampling_rate: int = 24000,
+    #     n_fft: int = 1024,
+    #     hop_length: int = 256,
+    #     n_mels: int = 100,
+    #     padding: str = "center",
+    #     normalize: bool = True,
+    #     **kwargs,
+    # ):
+    #     super().__init__(**kwargs)
+    #     self.sampling_rate = sampling_rate
+    #     self.n_fft = n_fft
+    #     self.hop_length = hop_length
+    #     self.n_mels = n_mels
+    #     self.padding = padding
+    #     self.normalize = normalize
 
 
 class MelSpectrogramEncoder(torch.nn.Module):

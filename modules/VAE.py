@@ -14,15 +14,6 @@ class VAEOutput:
 
 
 @dataclass
-class VaeEncoderOutput:
-    z: torch.Tensor
-    kl_loss: torch.Tensor
-    padding_mask: torch.Tensor
-    mel_features: torch.Tensor
-    original_padding_mask: torch.Tensor
-
-
-@dataclass
 class VAEConfig:
     """Config for VAE model - needed for DeepSpeed compatibility"""
 
@@ -84,18 +75,17 @@ class VAE(torch.nn.Module):
 
         return VAEOutput(
             audio_loss=audio_loss,
-            kl_loss=kl_loss,
+            kl_loss=convformer_output.kl_loss,
         )
 
     @torch.no_grad()
     def encode(self, audios_srs):
         encoded_audios = self.wav2mel(audios_srs)
-        convformer_output = self.encoder(
+        return self.encoder(
             x=encoded_audios.audio_features,
             padding_mask=encoded_audios.padding_mask,
             step=None,
         )
-        return convformer_output
 
     @torch.no_grad()
     def encode_and_sample(

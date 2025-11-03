@@ -17,6 +17,7 @@ class ConvformerOutput:
     z: torch.FloatTensor
     kl_loss: Optional[torch.FloatTensor] = None
     padding_mask: Optional[torch.BoolTensor] = None
+    µ: Optional[torch.FloatTensor] = None
 
 
 @dataclass
@@ -318,7 +319,9 @@ class ConvformerEncoder(SigmaVAEEncoder):
                 mu, logvar, self._resize_padding_mask(padding_mask, mu.shape[1])
             ) * self.get_kl_cosine_schedule(kwargs["step"])
 
-        return ConvformerOutput(z=z, kl_loss=kl_loss, padding_mask=padding_mask)
+        return ConvformerOutput(
+            z=z, kl_loss=kl_loss, padding_mask=self._resize_padding_mask(padding_mask, mu.shape[1]), µ=mu
+        )
 
 
 @torch.no_grad()

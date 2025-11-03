@@ -63,8 +63,10 @@ def load_config(config_path: str) -> Dict[str, Any]:
 def build_model_from_config(
     config_dict: Dict[str, Any], checkpoint_path: Optional[str], device: torch.device
 ) -> Tuple[VAE, Vocos]:
+
     encoder_cfg = ConvformerEncoderConfig(**config_dict["convformer"])  # type: ignore
     decoder_cfg = DiTConfig(**config_dict["cfm"])  # type: ignore
+    decoder_cfg.expansion_factor = encoder_cfg.compress_factor_C
     mel_cfg = MelSpectrogramConfig()  # type: ignore
     vae_cfg = VAEConfig(encoder_config=encoder_cfg, decoder_config=decoder_cfg, mel_spec_config=mel_cfg)
 
@@ -76,7 +78,7 @@ def build_model_from_config(
 
     vocos = Vocos.from_pretrained("charactr/vocos-mel-24khz")
     vocos.to(device)
-    return model, vocos
+    return model, vocos, vae_cfg
 
 
 def mel_to_audio(vocoder: Vocos, mel: torch.Tensor, device: torch.device) -> torch.Tensor:
@@ -357,7 +359,7 @@ def run_single_eval(
     set_seed(base_args.get("seed", 42))
 
     # build model
-    model, vocoder = build_model_from_config(base_args["config_dict"], checkpoint, device)
+    model, vocoder, vae_cfg = build_model_from_config(base_args["config_dict"], checkpoint, device)
 
     evaluator = EvalTTS()
 

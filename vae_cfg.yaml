@@ -1,0 +1,33 @@
+decoder_config:
+  audio_latent_dim: 64
+  expansion_factor: 8
+  mel_channels: 100
+  sigma: 1.0e-05
+  uncond_prob: 0.1
+  unet_depth: 8
+  unet_dim: 1024
+  unet_dropout_rate: 0.1
+  unet_heads: 8
+  use_conv_layer: true
+  use_sos_token: false
+encoder_config:
+  compress_factor_C: 8
+  drop_p: 0.1
+  kl_loss_warmup_steps: 1000
+  kl_loss_weight: 1e-3
+  latent_dim: 64
+  logvar_layer: false
+  n_residual_blocks: 3
+  target_std: 1.0
+  tf_heads: 8
+  tf_layers: 4
+  use_sofplus: false
+mel_spec_config:
+  hop_length: 256
+  mel_channels: 100
+  n_fft: 1024
+  n_mels: 100
+  normalize: true
+  padding: center
+  sampling_rate: 24000
+model_type: VAE
