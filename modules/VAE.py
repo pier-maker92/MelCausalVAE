@@ -79,13 +79,54 @@ class VAE(torch.nn.Module):
         )
 
     @torch.no_grad()
-    def encode(self, audios_srs):
+    def encode(self, audios_srs, return_original_mel: bool = False):
         encoded_audios = self.wav2mel(audios_srs)
-        return self.encoder(
-            x=encoded_audios.audio_features,
-            padding_mask=encoded_audios.padding_mask,
-            step=None,
+        if not return_original_mel:
+            return self.encoder(
+                x=encoded_audios.audio_features,
+                padding_mask=encoded_audios.padding_mask,
+                step=None,
+            )
+        else:
+            return (
+                self.encoder(
+                    x=encoded_audios.audio_features,
+                    padding_mask=encoded_audios.padding_mask,
+                    step=None,
+                ),
+                encoded_audios,
+            )
+
+    @torch.no_grad()
+    def sample(
+        self,
+        num_steps: int = 4,
+        temperature: float = 0.2,
+        guidance_scale: float = 1.0,
+        z: Optional[torch.Tensor] = None,
+        µ: Optional[torch.Tensor] = None,
+        generator: Optional[torch.Generator] = None,
+    ):
+        """
+        Sample from the VAE.
+        """
+        if z is not None:
+            context_vector = z
+        elif µ is not None:
+            context_vector = self.encoder.reparameterize(µ)
+        else:
+            raise ValueError("Either z or µ must be provided")
+
+        reconstructed_mel = self.decoder.generate(
+            num_steps=num_steps,
+            context_vector=context_vector,
+            temperature=temperature,
+            guidance_scale=guidance_scale,
+            generator=generator,
         )
+        if self.config.mel_spec_config.normalize:
+            reconstructed_mel = reconstructed_mel * self.wav2mel.std + self.wav2mel.mean
+        return reconstructed_mel
 
     @torch.no_grad()
     def encode_and_sample(

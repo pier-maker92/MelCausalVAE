@@ -49,7 +49,7 @@ class SigmaVAEEncoder(nn.Module):
     def forward(self, **kwargs):
         pass
 
-    def reparameterize(self, mu: torch.FloatTensor, logvar: Optional[torch.FloatTensor]) -> torch.FloatTensor:
+    def reparameterize(self, mu: torch.FloatTensor, logvar: Optional[torch.FloatTensor] = None) -> torch.FloatTensor:
         eps = torch.randn_like(mu)
         if logvar is None:
             std = self.sample_scalar_std(mu)
