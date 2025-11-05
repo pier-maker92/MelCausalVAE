@@ -88,6 +88,7 @@ class VAE(torch.nn.Module):
                 step=None,
             )
         else:
+            encoded_audios.audio_features = encoded_audios.audio_features * self.wav2mel.std + self.wav2mel.mean
             return (
                 self.encoder(
                     x=encoded_audios.audio_features,
