@@ -10,5 +10,6 @@ cfm:
   uncond_prob: 0.0
   expansion_factor: null
   mel_channels: 100
+  learned_prior: false
 
 

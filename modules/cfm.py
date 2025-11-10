@@ -2,6 +2,7 @@ import os
 import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import math
 import torch
 import random
 import torch.nn as nn
@@ -32,6 +33,8 @@ class DiTConfig:
     expansion_factor: int = 1
     mel_channels: int = 100
     uncond_prob: float = 0.0
+    learned_prior: bool = False
+    use_vp_schedule: bool = False
 
     # def __init__(
     #     self,
@@ -87,10 +90,22 @@ class DiT(torch.nn.Module):
         self.expansion_factor = config.expansion_factor
         self.mel_channels = config.mel_channels
         self.uncond_prob = config.uncond_prob
+        self.learned_prior = config.learned_prior
         # context vector projection
-        self.context_vector_proj = nn.Linear(self.audio_latent_dim, self.unet_dim)
+        self.context_vector_proj = nn.Sequential(
+            nn.Linear(self.audio_latent_dim, self.unet_dim), nn.LayerNorm(self.unet_dim)
+        )
         # noise projection
-        self.noise_proj = nn.Linear(self.unet_dim + self.mel_channels, self.unet_dim)
+        if self.learned_prior:
+            self.noise_proj = nn.Sequential(nn.Linear(self.unet_dim, self.unet_dim), nn.LayerNorm(self.unet_dim))
+            self.prior_proj = nn.Sequential(
+                nn.Linear(self.audio_latent_dim, self.mel_channels), nn.LayerNorm(self.mel_channels)
+            )
+
+        else:
+            self.noise_proj = nn.Sequential(
+                nn.Linear(self.unet_dim + self.mel_channels, self.unet_dim), nn.LayerNorm(self.unet_dim)
+            )
 
         # transformer
         self.transformer = Transformer(
@@ -99,22 +114,84 @@ class DiT(torch.nn.Module):
             heads=self.unet_heads,
             use_conv_layer=self.use_conv_layer,
             audio_latent_dim=self.mel_channels,  # projection to mel
+            is_causal=True,
+            attn_flash=True,
         )
+        self.transformer.to(dtype=torch.bfloat16)
 
-    def handle_context_vector(self, context_vector: torch.FloatTensor):
-        context_vector = self.context_vector_proj(context_vector)
+    def vp_cosine_params(self, t: torch.Tensor, s: float = 0.008):
+        """
+        t: shape (B,) or broadcastable to (B, 1, 1)
+        Returns alpha, sigma, dalpha_dt, dsigma_dt with shapes broadcastable to (B, 1, 1)
+        """
+        # ensure shape (..., 1, 1) for broadcast over sequence and channels
+        if t.ndim == 1:
+            t = t.view(-1, 1, 1)
+        phi = ((1.0 - t) + s) / (1.0 + s) * (math.pi / 2.0)
+        alpha = torch.cos(phi)
+        sigma = torch.sin(phi)
+        c = (math.pi / 2.0) / (1.0 + s)  # dphi/dt = -c
+        dalpha_dt = c * torch.sin(phi)  # -sin(phi)*(-c)
+        dsigma_dt = -c * torch.cos(phi)  #  cos(phi)*(-c)
+        return alpha, sigma, dalpha_dt, dsigma_dt
+
+    def reparameterize(self, mu: torch.FloatTensor, std: Optional[float] = None) -> torch.FloatTensor:
+        eps = torch.randn_like(mu)
+        if std is None:
+            std = self.sample_scalar_std(mu)
+        else:
+            std = torch.ones_like(mu) * std
+        while std.dim() < mu.dim():
+            std = std.unsqueeze(-1)
+        return mu + eps * std
+
+    def sample_scalar_std(self, mu: torch.FloatTensor) -> torch.FloatTensor:
+        return torch.randn(mu.shape[0], mu.shape[1], dtype=mu.dtype, device=mu.device)
+
+    def handle_context_vector(
+        self,
+        context_vector: torch.FloatTensor,
+        target: Optional[torch.FloatTensor] = None,
+        temperature: Optional[float] = None,
+        generator: Optional[torch.Generator] = None,
+        std: Optional[float] = None,
+    ):
+        context_vector = self.reparameterize(context_vector, std=std)
         context_vector = context_vector.repeat_interleave(self.expansion_factor, dim=1)
-        return context_vector
+        if target is not None:
+            min_length = min(context_vector.shape[1], target.shape[1])
+            context_vector = context_vector[:, :min_length, :]
+            target = target[:, :min_length, :]
+
+        if self.learned_prior:
+            prior = self.prior_proj(context_vector)
+        else:
+            temperature = temperature or 1.0
+            prior = (
+                torch.randn(
+                    context_vector.shape[0],
+                    context_vector.shape[1],
+                    self.mel_channels,
+                    dtype=context_vector.dtype,
+                    device=context_vector.device,
+                    generator=generator,
+                )
+                * temperature
+            )
+        return self.context_vector_proj(context_vector), prior
 
     def prepare_flow(
         self,
         target: torch.FloatTensor,
         context_vector: torch.FloatTensor,
+        x0: torch.FloatTensor,
     ):
-        if context_vector.shape[1] != target.shape[1]:
-            context_vector = context_vector[:, : target.shape[1], :]
         if random.random() < self.uncond_prob:
-            context_vector = torch.zeros_like(context_vector)
+            if self.learned_prior:
+                context_vector = torch.randn_like(context_vector)
+            else:
+                context_vector = torch.zeros_like(context_vector)
+        # We need times
         # We need times
         times = torch.rand(
             (target.shape[0],),
@@ -130,7 +207,21 @@ class DiT(torch.nn.Module):
         target = target - (1 - self.sigma) * x0
 
         state = self.noise_proj(torch.cat([context_vector, w], dim=-1))
-        return state, times
+        return state, times, target
+        # tempi e rumore
+        # times = torch.rand((target.shape[0],), dtype=target.dtype, device=target.device)
+        # t = times.view(-1, 1, 1)
+        # eps = torch.randn_like(target)
+
+        # # VP cosine schedule (alpha, sigma) e derivate
+        # alpha, sigma, dalpha, dsigma = self.vp_cosine_params(t, s=0.008)
+
+        # # stato e target velocità
+        # w = alpha * target + sigma * eps  # (B, T, C)
+        # v_target = dalpha * target + dsigma * eps  # (B, T, C)
+
+        # state = self.noise_proj(torch.cat([context_vector, w], dim=-1))
+        # return state, times, v_target
 
     def let_it_flow(
         self,
@@ -138,14 +229,14 @@ class DiT(torch.nn.Module):
         state: torch.FloatTensor,
         target: Optional[torch.FloatTensor] = None,
         flow_mask: Optional[torch.BoolTensor] = None,
-        original_batch_size: Optional[int] = None,
     ):
+        mask_to_loss = ~flow_mask
         v = self.transformer(
             x=state,
             times=times,
+            attention_mask=mask_to_loss,
         )
         loss = None
-        mask_to_loss = ~flow_mask
         if target is not None:
             v_to_loss = v[mask_to_loss].view(-1, self.mel_channels)
             target_to_loss = target[mask_to_loss].view(-1, self.mel_channels)
@@ -161,16 +252,17 @@ class DiT(torch.nn.Module):
         context_vector: torch.FloatTensor,
         **kwargs,
     ):
-        context_vector = self.handle_context_vector(context_vector)
+        context_vector, prior = self.handle_context_vector(context_vector, target)
 
         # ---- flow ----
-        state, times = self.prepare_flow(
+        state, times, v_target = self.prepare_flow(
             target=target,
             context_vector=context_vector,
+            x0=prior,
         )
 
         # ---- get the flow ----
-        loss = self.let_it_flow(times=times, state=state, target=target, flow_mask=target_padding_mask)
+        loss = self.let_it_flow(times=times, state=state, target=v_target, flow_mask=target_padding_mask)
 
         return DiTOutput(
             loss=loss,
@@ -180,37 +272,34 @@ class DiT(torch.nn.Module):
         self,
         num_steps: int,
         context_vector: torch.FloatTensor,
+        padding_mask: Optional[torch.BoolTensor] = None,
         temperature: float = 1.0,
         guidance_scale: float = 1.0,
         generator: Optional[torch.Generator] = None,
+        gamma: float = 1.0,  # griglia concava verso t piccoli
     ):
         cfg_scale = guidance_scale
         # ---- context vector z ----
-        context_vector = self.handle_context_vector(context_vector)
+        context_vector, y0 = self.handle_context_vector(
+            context_vector, temperature=temperature, generator=generator, std=0.1
+        )
         B, T = context_vector.shape[:2]
-        y0 = (
-            torch.randn(
-                (
-                    B,
-                    T,
-                    self.mel_channels,
-                ),
-                device=context_vector.device,
-                dtype=context_vector.dtype,
-                generator=generator,
-            )
-            * temperature
-        )  # .contiguous()
+        if padding_mask is None:
+            if B == 1:
+                padding_mask = torch.zeros(
+                    (1, T),
+                    device=context_vector.device,
+                    dtype=torch.bool,
+                )
+            else:
+                raise ValueError("Padding mask is required for batch size > 1")
+        else:
+            padding_mask = padding_mask.repeat_interleave(self.expansion_factor, dim=1)
         self.transformer.to(device=context_vector.device, dtype=context_vector.dtype)
 
         # ---- time span ----
-        t_span = torch.linspace(
-            0,
-            1,
-            num_steps,
-            device=context_vector.device,
-            dtype=context_vector.dtype,
-        )
+        t_lin = torch.linspace(0, 1, num_steps, device=context_vector.device, dtype=context_vector.dtype)
+        t_span = t_lin**gamma
 
         # ---- ODE ----
         def fn(t, state):
@@ -219,10 +308,11 @@ class DiT(torch.nn.Module):
                 state=state,
                 cfg_scale=cfg_scale,
                 context_vector=context_vector,
+                attention_mask=~padding_mask,
             )
             return features
 
-        odeint_kwargs = dict(atol=1e-5, rtol=1e-5, method="euler")
+        odeint_kwargs = dict(atol=1e-1, rtol=1e-1, method="rk4")
         trajectory = odeint(fn, y0, t_span, **odeint_kwargs)
 
         generated_latents = trajectory[-1]
@@ -235,20 +325,30 @@ class DiT(torch.nn.Module):
         state: torch.FloatTensor,
         cfg_scale: float,
         context_vector: torch.FloatTensor,
+        attention_mask: Optional[torch.BoolTensor] = None,
     ):
         times = times.repeat(state.shape[0])
-        cond_state = self.noise_proj(torch.cat([context_vector, state], dim=-1))
+        cond_state = (
+            self.noise_proj(context_vector)
+            if self.learned_prior
+            else self.noise_proj(torch.cat([context_vector, state], dim=-1))
+        )
         cond_out = self.transformer(
             x=cond_state,
             times=times,
+            attention_mask=attention_mask,
         )
         if cfg_scale == 1.0:
             return cond_out
-
-        uncond_state = self.noise_proj(torch.cat([torch.zeros_like(context_vector), state], dim=-1))
+        uncond_state = (
+            self.noise_proj(torch.cat([torch.zeros_like(context_vector), state], dim=-1))
+            if not self.learned_prior
+            else self.noise_proj(torch.zeros_like(context_vector))
+        )
         uncond_out = self.transformer(
             x=uncond_state,
             times=times,
+            attention_mask=attention_mask,
         )
 
         final = (cfg_scale * cond_out + (1 - cfg_scale) * uncond_out).to(context_vector.dtype)

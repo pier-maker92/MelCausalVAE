@@ -91,7 +91,7 @@ class Transformer(Module):
 
         self.final_norm = RMSNorm(dim)
         self.out_linear = nn.Linear(dim, audio_latent_dim, bias=False)
-        self.is_causal = False
+        self.is_causal = is_causal  # honor ctor arg
 
     @property
     def device(self):
@@ -108,52 +108,21 @@ class Transformer(Module):
             ),
             diagonal=1,
         ).logical_not()
-        # Expand causal mask to match attention mask shape [B, 1, seq_len, seq_len]
         causal_mask = causal_mask.unsqueeze(0).unsqueeze(0)
-        # Combine with existing attention mask
         return attention_mask.unsqueeze(1).unsqueeze(2) & causal_mask
 
     def _get_custom_causal_mask(self, attention_mask: torch.BoolTensor, special_mask: torch.BoolTensor):
-        """
-        Creates a custom causal mask where frames of interest (1 in special_mask) can only attend
-        to themselves and previous non-interest frames (0 in special_mask).
-
-        Args:
-            attention_mask: Regular attention mask of shape [B, seq_len]
-            special_mask: Binary mask of shape [B, seq_len] where 1 indicates frames of interest
-        """
         batch, seq_len = attention_mask.shape
         device = attention_mask.device
-
-        # Create regular causal mask (lower triangular)
         causal_mask = torch.triu(
             torch.ones(seq_len, seq_len, device=device, dtype=torch.bool),
             diagonal=1,
         ).logical_not()
-
-        # Create identity matrix for self-attention of special frames
         identity = torch.eye(seq_len, device=device, dtype=torch.bool)
-
-        # Expand special mask for broadcasting [B, 1, seq_len, 1]
         special_mask_row = special_mask.unsqueeze(1).unsqueeze(-1)
-        # Expand special mask for broadcasting [B, 1, 1, seq_len]
         special_mask_col = special_mask.unsqueeze(1).unsqueeze(1)
-
-        # Create mask where frames of interest can only attend to:
-        # 1. Themselves (via identity matrix)
-        # 2. Non-interest frames (via ~special_mask_col)
         interest_mask = (identity.unsqueeze(0) & special_mask_row & special_mask_col) | (~special_mask_col)
-
-        # Combine masks:
-        # 1. Must respect causality (causal_mask)
-        # 2. Must respect attention_mask
-        # 3. Must respect special frame rules (interest_mask)
-        final_mask = (
-            causal_mask.unsqueeze(0).unsqueeze(0)  # [1, 1, seq_len, seq_len]
-            & attention_mask.unsqueeze(1).unsqueeze(2)  # [B, 1, 1, seq_len]
-            & interest_mask  # [B, 1, seq_len, seq_len]
-        )
-
+        final_mask = causal_mask.unsqueeze(0).unsqueeze(0) & attention_mask.unsqueeze(1).unsqueeze(2) & interest_mask
         return final_mask
 
     def forward(
@@ -165,24 +134,13 @@ class Transformer(Module):
         batch, seq_len, *_ = x.shape
         t = times
 
-        # if not exists(attention_mask):
-        #     attention_mask = torch.ones(
-        #         (batch, seq_len), device=x.device, dtype=torch.bool
-        #     )
-        #  conv layer
+        # conv layer
         if hasattr(self, "conv_embed"):
             x = self.conv_embed(x, mask=attention_mask) + x
 
-        # if self.is_causal:
-        #     assert (
-        #         attention_mask.ndim == 2
-        #     ), "when in causal mode, attention mask must be 2D, it will be automatically expanded to 4D masking the future tokens"
-        #     if exists(flow_mask):
-        #         attention_mask = self._get_custom_causal_mask(
-        #             attention_mask, flow_mask
-        #         )
-        #     else:
-        #         attention_mask = self._get_causal_mask(attention_mask)
+        # Ensure a 2D boolean mask for FlashAttention varlen when needed
+        if attention_mask is None:
+            attention_mask = torch.ones((batch, seq_len), device=x.device, dtype=torch.bool)
 
         # time embedding
         time_emb = self.sinu_pos_emb(t)
@@ -196,7 +154,6 @@ class Transformer(Module):
 
         # keep track of skip connections
         skip_connects = []
-        # rotary embeddings
         positions = seq_len
 
         if self.has_register_tokens:
@@ -209,13 +166,12 @@ class Transformer(Module):
             )
             positions = torch.cat((register_positions, main_positions))
 
-        # FIXME: rotary embeddings are not used
         rotary_emb = self.rotary_emb(positions)
 
         # adaptive rmsnorm
         rmsnorm_kwargs = dict(cond=time_emb)
 
-        # going through the attention layers
+        # layers
         for (
             skip_combiner,
             attn_prenorm,
@@ -223,8 +179,6 @@ class Transformer(Module):
             ff_prenorm,
             ff,
         ) in self.layers:
-            # in the paper, they use a u-net like skip connection
-            # unclear how much this helps, as no ablations or further numbers given besides a brief one-two sentence mention
             if not exists(skip_combiner):
                 skip_connects.append(x)
             else:
@@ -233,7 +187,7 @@ class Transformer(Module):
                 x = skip_combiner(x)
 
             attn_input = attn_prenorm(x, **rmsnorm_kwargs)
-            x = attn(attn_input, mask=attention_mask, rotary_emb=rotary_emb) + x
+            x = attn(attn_input, mask=attention_mask, rotary_emb=rotary_emb, causal=self.is_causal) + x
 
             ff_input = ff_prenorm(x, **rmsnorm_kwargs)
             x = ff(ff_input) + x

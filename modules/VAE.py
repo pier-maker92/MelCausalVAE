@@ -37,13 +37,21 @@ class VAEConfig:
 
 
 class VAE(torch.nn.Module):
-    def __init__(self, config: VAEConfig):
+    def __init__(self, config: VAEConfig, dtype: torch.dtype):
         super().__init__()
         self.config = config
         self.decoder = DiT(config.decoder_config)
         self.encoder = ConvformerEncoder(config.encoder_config)
         self.wav2mel = MelSpectrogramEncoder(config.mel_spec_config)
         self.decoder.expansion_factor = config.encoder_config.compress_factor_C
+        self.dtype = dtype
+        self.set_dtype(dtype)
+
+    def set_dtype(self, dtype: torch.dtype):
+        self.dtype = dtype
+        self.decoder.to(dtype=dtype)
+        self.encoder.to(dtype=dtype)
+        self.wav2mel.to(dtype=dtype)
 
     def set_device(self, device: torch.device):
         self.decoder.to(device=device)
@@ -70,7 +78,7 @@ class VAE(torch.nn.Module):
         audio_loss = self.decoder(
             target=encoded_audios.audio_features,
             target_padding_mask=encoded_audios.padding_mask,
-            context_vector=convformer_output.z,
+            context_vector=convformer_output.µ,  # z
         ).loss
 
         return VAEOutput(
@@ -79,24 +87,26 @@ class VAE(torch.nn.Module):
         )
 
     @torch.no_grad()
+    def denormalize_mel(self, mel: torch.Tensor):
+        return mel * self.wav2mel.std + self.wav2mel.mean
+
+    @torch.no_grad()
+    def normalize_mel(self, mel: torch.Tensor):
+        return (mel - self.wav2mel.mean) / self.wav2mel.std
+
+    @torch.no_grad()
     def encode(self, audios_srs, return_original_mel: bool = False):
         encoded_audios = self.wav2mel(audios_srs)
+        convformer_output = self.encoder(
+            x=encoded_audios.audio_features,
+            padding_mask=encoded_audios.padding_mask,
+            step=None,
+        )
         if not return_original_mel:
-            return self.encoder(
-                x=encoded_audios.audio_features,
-                padding_mask=encoded_audios.padding_mask,
-                step=None,
-            )
+            return convformer_output
         else:
-            encoded_audios.audio_features = encoded_audios.audio_features * self.wav2mel.std + self.wav2mel.mean
-            return (
-                self.encoder(
-                    x=encoded_audios.audio_features,
-                    padding_mask=encoded_audios.padding_mask,
-                    step=None,
-                ),
-                encoded_audios,
-            )
+            encoded_audios.audio_features = self.denormalize_mel(encoded_audios.audio_features)
+            return convformer_output, encoded_audios
 
     @torch.no_grad()
     def sample(
@@ -107,6 +117,7 @@ class VAE(torch.nn.Module):
         z: Optional[torch.Tensor] = None,
         µ: Optional[torch.Tensor] = None,
         generator: Optional[torch.Generator] = None,
+        padding_mask: Optional[torch.BoolTensor] = None,
     ):
         """
         Sample from the VAE.
@@ -120,13 +131,14 @@ class VAE(torch.nn.Module):
 
         reconstructed_mel = self.decoder.generate(
             num_steps=num_steps,
-            context_vector=context_vector,
-            temperature=temperature,
-            guidance_scale=guidance_scale,
             generator=generator,
+            temperature=temperature,
+            padding_mask=padding_mask,
+            context_vector=context_vector,
+            guidance_scale=guidance_scale,
         )
         if self.config.mel_spec_config.normalize:
-            reconstructed_mel = reconstructed_mel * self.wav2mel.std + self.wav2mel.mean
+            reconstructed_mel = self.denormalize_mel(reconstructed_mel)
         return reconstructed_mel
 
     @torch.no_grad()
@@ -137,6 +149,7 @@ class VAE(torch.nn.Module):
         temperature: float = 1.0,
         guidance_scale: float = 1.0,
         generator: Optional[torch.Generator] = None,
+        padding_mask: Optional[torch.BoolTensor] = None,
     ):
         """
         Encode audio to latent space and generate mel spectrogram.
@@ -156,14 +169,15 @@ class VAE(torch.nn.Module):
         # Generate mel spectrogram from latent
         reconstructed_mel = self.decoder.generate(
             num_steps=num_steps,
-            context_vector=convformer_output.z,
+            context_vector=convformer_output.µ,  # z
             temperature=temperature,
             guidance_scale=guidance_scale,
             generator=generator,
+            padding_mask=convformer_output.padding_mask,
         )
         if self.config.mel_spec_config.normalize:
-            original_mel = original_mel * self.wav2mel.std + self.wav2mel.mean
-            reconstructed_mel = reconstructed_mel * self.wav2mel.std + self.wav2mel.mean
+            original_mel = self.denormalize_mel(original_mel)
+            reconstructed_mel = self.denormalize_mel(reconstructed_mel)
 
         return {
             "original_mel": original_mel,

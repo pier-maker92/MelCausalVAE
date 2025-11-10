@@ -25,7 +25,7 @@ from transformers import (
 # data
 from .data.audio_dataset import DataCollator
 from .data.libri_tts import LibriTTS
-from .data.audio_dataset import DatasetWrapper
+from .data.audio_dataset import TrainDatasetWrapper
 
 
 # Set up logging
@@ -188,9 +188,9 @@ class VAEtrainer(Trainer):
             with torch.no_grad():
                 results = self.model.encode_and_sample(
                     audios_srs=audios_srs,
-                    num_steps=4,
-                    temperature=0.1,
-                    guidance_scale=3.5,
+                    num_steps=8,
+                    temperature=0.8,
+                    guidance_scale=1.5,
                 )
             # Create visualizations
             images = []
@@ -365,18 +365,21 @@ def main():
     # Set default dtype
     if training_cfg.get("bf16", False):
         torch.set_default_dtype(torch.bfloat16)
+        dtype = torch.bfloat16
     elif training_cfg.get("fp16", False):
         torch.set_default_dtype(torch.float16)
+        dtype = torch.float16
     else:
         torch.set_default_dtype(torch.float32)
+        dtype = torch.float32
 
     # Setup device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Using device: {device}")
 
     # Create AudioDataset
-    train_dataset = DatasetWrapper(LibriTTS(), "train")
-    test_dataset = DatasetWrapper(LibriTTS(), "test")
+    train_dataset = TrainDatasetWrapper(LibriTTS(), "train")
+    test_dataset = TrainDatasetWrapper(LibriTTS(), "test")
 
     # handle wandb - only initialize on main process (rank 0)
     wandb_project = training_cfg.pop("wandb_project", None)
@@ -400,7 +403,8 @@ def main():
             encoder_config=encoder_config,
             decoder_config=decoder_config,
             mel_spec_config=MelSpectrogramConfig(),
-        )
+        ),
+        dtype=dtype,
     )
 
     training_cfg["learning_rate"] = float(training_cfg.get("learning_rate"))
