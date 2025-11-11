@@ -44,8 +44,8 @@ class MelSpectrogramEncoder(torch.nn.Module):
             center=self.padding == "center",
             power=1,
         )
-        self.std = 2.0798065662384033
-        self.mean = -0.9009257555007935
+        self.std = 2.080231189727783
+        self.mean = -1.0173088312149048
         self.normalize = config.normalize
 
     def forward(self, audios_srs: List[Tuple[torch.FloatTensor, int]], **kwargs):

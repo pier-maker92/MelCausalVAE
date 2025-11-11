@@ -5,9 +5,9 @@ import torch
 import logging
 import argparse
 from vocos import Vocos
-import matplotlib.pyplot as plt
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List
+import matplotlib.pyplot as plt
 from .modules.cfm import DiTConfig
 from .modules.VAE import VAE, VAEConfig
 from .modules.Encoder import ConvformerEncoderConfig
@@ -23,8 +23,9 @@ from transformers import (
 )
 
 # data
-from .data.audio_dataset import DataCollator
+from .data.mls import MLSDataset
 from .data.libri_tts import LibriTTS
+from .data.audio_dataset import DataCollator
 from .data.audio_dataset import TrainDatasetWrapper
 
 
@@ -378,8 +379,15 @@ def main():
     logger.info(f"Using device: {device}")
 
     # Create AudioDataset
-    train_dataset = TrainDatasetWrapper(LibriTTS(), "train")
-    test_dataset = TrainDatasetWrapper(LibriTTS(), "test")
+    dataset_name = training_cfg.pop("dataset_name", None)
+    if dataset_name == "mls":
+        dataset = MLSDataset()
+    elif dataset_name == "libritts":
+        dataset = LibriTTS()
+    else:
+        raise ValueError(f"Dataset {dataset_name} not supported")
+    train_dataset = TrainDatasetWrapper(dataset, "train")
+    test_dataset = TrainDatasetWrapper(dataset, "test")
 
     # handle wandb - only initialize on main process (rank 0)
     wandb_project = training_cfg.pop("wandb_project", None)
@@ -413,6 +421,11 @@ def main():
     if args.deepspeed:
         training_cfg["deepspeed"] = args.deepspeed
         logger.info(f"Using DeepSpeed config: {args.deepspeed}")
+
+    from_pretrained = training_cfg.pop("from_pretrained", None)
+    if from_pretrained:
+        model.from_pretrained(from_pretrained)
+        logger.info(f"Loaded pretrained model from {from_pretrained}")
 
     # Setup training arguments
     training_args = TrainingArguments(
