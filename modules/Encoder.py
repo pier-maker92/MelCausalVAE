@@ -9,7 +9,9 @@ from typing import Optional
 from einops import rearrange
 import torch.nn.functional as F
 from dataclasses import dataclass
+from modules.semantic_module import SeamlessM4Tv2Encoder
 from modules.flash_attn_encoder import FlashTransformerEncoder
+from modules.regulator import make_pad_mask, InterpolateRegulator
 
 
 @dataclass
@@ -27,6 +29,7 @@ class SigmaVAEencoderConfig:
     target_std: Optional[float] = None
     use_sofplus: Optional[bool] = None
     kl_loss_warmup_steps: int = 1000
+    semantic_regulation: bool = True
 
 
 @dataclass
@@ -45,6 +48,11 @@ class SigmaVAEEncoder(nn.Module):
         self.config = config
         self.std_activation = nn.Softplus() if self.config.use_sofplus else nn.Identity()
         self.kl_loss_weight = float(config.kl_loss_weight)
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.semantic_module = SeamlessM4Tv2Encoder(device=device, dtype=torch.bfloat16)
+        self.semantic_regulator = InterpolateRegulator(
+            sampling_ratios=[0, 1], in_channels=1024, channels=256, out_channels=config.latent_dim
+        )
 
     def forward(self, **kwargs):
         pass
