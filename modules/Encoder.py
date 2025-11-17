@@ -11,7 +11,7 @@ import torch.nn.functional as F
 from dataclasses import dataclass
 from modules.semantic_module import SeamlessM4Tv2Encoder
 from modules.flash_attn_encoder import FlashTransformerEncoder
-from modules.regulator import make_pad_mask, InterpolateRegulator
+from modules.regulator import InterpolateRegulator
 
 
 @dataclass
@@ -20,6 +20,7 @@ class ConvformerOutput:
     kl_loss: Optional[torch.FloatTensor] = None
     padding_mask: Optional[torch.BoolTensor] = None
     µ: Optional[torch.FloatTensor] = None
+    semantic_loss: Optional[torch.FloatTensor] = None
 
 
 @dataclass
@@ -49,9 +50,8 @@ class SigmaVAEEncoder(nn.Module):
         self.std_activation = nn.Softplus() if self.config.use_sofplus else nn.Identity()
         self.kl_loss_weight = float(config.kl_loss_weight)
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.semantic_module = SeamlessM4Tv2Encoder(device=device, dtype=torch.bfloat16)
         self.semantic_regulator = InterpolateRegulator(
-            sampling_ratios=[0, 1], in_channels=1024, channels=256, out_channels=config.latent_dim
+            depth=2, in_channels=1024, channels=256, out_channels=config.latent_dim
         )
 
     def forward(self, **kwargs):
@@ -320,6 +320,15 @@ class ConvformerEncoder(SigmaVAEEncoder):
         if hasattr(self, "logvar"):
             logvar = self.logvar(z)
 
+        semantic_loss = None
+        if kwargs.get("semantic_guidance", None) is not None:
+            semantic_loss = self.semantic_regulator(
+                target=mu,
+                guidance=kwargs["semantic_guidance"].semantic_features,
+                guidance_mask=kwargs["semantic_guidance"].padding_mask,
+                target_padding_mask=self._resize_padding_mask(padding_mask, mu.shape[1]),
+            )
+
         z = self.reparameterize(mu, logvar)
         kl_loss = None
         if kwargs.get("step", None) is not None:
@@ -328,7 +337,11 @@ class ConvformerEncoder(SigmaVAEEncoder):
             ) * self.get_kl_cosine_schedule(kwargs["step"])
 
         return ConvformerOutput(
-            z=z, kl_loss=kl_loss, padding_mask=self._resize_padding_mask(padding_mask, mu.shape[1]), µ=mu
+            z=z,
+            kl_loss=kl_loss,
+            padding_mask=self._resize_padding_mask(padding_mask, mu.shape[1]),
+            µ=mu,
+            semantic_loss=semantic_loss,
         )
 
 

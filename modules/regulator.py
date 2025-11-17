@@ -1,31 +1,6 @@
 import torch
 import torch.nn as nn
-from typing import Optional
 import torch.nn.functional as F
-
-
-def make_pad_mask(lengths: torch.Tensor, max_len: int = 0) -> torch.Tensor:
-    """Make mask tensor containing indices of padded part.
-
-    Args:
-        lengths (torch.Tensor): Batch of lengths (B,).
-    Returns:
-        torch.Tensor: Mask tensor containing indices of padded part.
-
-    Examples:
-        >>> lengths = [5, 3, 2]
-        >>> make_pad_mask(lengths)
-        masks = [[0, 0, 0, 0 ,0],
-                 [0, 0, 0, 1, 1],
-                 [0, 0, 1, 1, 1]]
-    """
-    batch_size = lengths.size(0)
-    max_len = max_len if max_len > 0 else lengths.max().item()
-    seq_range = torch.arange(0, max_len, dtype=torch.int64, device=lengths.device)
-    seq_range_expand = seq_range.unsqueeze(0).expand(batch_size, max_len)
-    seq_length_expand = lengths.unsqueeze(-1)
-    mask = seq_range_expand >= seq_length_expand
-    return mask
 
 
 class InterpolateRegulator(nn.Module):
@@ -66,6 +41,24 @@ class InterpolateRegulator(nn.Module):
 
         self.model = nn.Sequential(*layers)
 
+    def _apply_conv_stack(self, x):
+        """
+        Applies the conv → norm → activation stack.
+        Uses left-padding for Conv1d when causal.
+        """
+        for layer in self.model:
+            if isinstance(layer, nn.Conv1d) and layer.kernel_size[0] > 1:
+                if self.is_causal:
+                    # causal left padding: pad = kernel_size - 1
+                    k = layer.kernel_size[0]
+                    x = F.pad(x, (k - 1, 0))
+                    x = layer(x)
+                else:
+                    x = layer(x)
+            else:
+                x = layer(x)
+        return x
+
     def _causal_interpolate(self, x, out_length):
         """
         Nearest-neighbor causal upsampling:
@@ -80,33 +73,53 @@ class InterpolateRegulator(nn.Module):
         idx = torch.clamp(idx, 0, T - 1)
         return x[:, :, idx]
 
-    def forward(self, x, xlens=None, ylens=None):
-        # x: (B, T, D)
-        target_len = ylens.max()
+    @staticmethod
+    def masked_mean(x, mask):
+        # mask: 1 means real, 0 means ignore
+        return (x * mask).sum() / mask.sum()
 
-        # mask: (B, target_len, 1)
-        mask = ~make_pad_mask(lengths=xlens, max_len=target_len).unsqueeze(-1)
+    def forward(
+        self,
+        guidance,  # semantic_guidance.feature (B, T_g, D)
+        guidance_mask,  # semantic_guidance.padding_mask (B, T_g) 1 = pad, 0 = real
+        target,  # (B, T_target, D_target)
+        target_padding_mask,  # (B, T_target) 1 = pad, 0 = real
+    ):
+        """
+        Interpolates guidance features and mask to match target length,
+        combines masks, and computes masked cosine distillation loss.
+        """
 
-        # (B, T, D) → (B, D, T)
-        x = x.transpose(1, 2).contiguous()
+        B, T_target = target.shape[:2]
 
-        # ---- Interpolation ----
+        # ----------------- INTERPOLATE guidance -----------------
+        x = guidance.transpose(1, 2)  # (B, D, T_g)
+
         if self.is_causal:
-            x = self._causal_interpolate(x, target_len)
+            x = self._causal_interpolate(x, T_target)
         else:
-            x = F.interpolate(x, size=target_len, mode="linear")
+            x = F.interpolate(x, size=T_target, mode="linear", align_corners=False)
+        out = self._apply_conv_stack(x)  # (B, T_target, D_proj)
+        out = out.transpose(1, 2)  # (B, T_target, D_proj)
 
-        # ---- Convolutional stacks ----
+        # ----------------- INTERPOLATE guidance_mask -----------------
+        gmask = (guidance_mask == 0).float().unsqueeze(1)  # (B, 1, T_g)
         if self.is_causal:
-            for layer in self.model:
-                if isinstance(layer, nn.Conv1d) and layer.kernel_size[0] > 1:
-                    pad = layer.kernel_size[0] - 1
-                    x = F.pad(x, (pad, 0))  # left padding only
-                    x = layer(x)
-                else:
-                    x = layer(x)
+            gmask_interp = self._causal_interpolate(gmask, T_target)
         else:
-            x = self.model(x)
+            gmask_interp = F.interpolate(gmask, size=T_target, mode="linear", align_corners=False)
+        gmask_interp = gmask_interp.squeeze(1)  # (B, T_target)
+        gmask_interp = (gmask_interp > 0.5).float()  # threshold → boolean mask
 
-        out = x.transpose(1, 2).contiguous()
-        return out * mask, ylens
+        # ----------------- COMBINE MASKS -----------------
+        # 1 = valid, 0 = ignore
+        final_mask = ((target_padding_mask == 0) & (gmask_interp == 1)).float()  # (B, T_target)
+
+        # ----------------- COMPUTE LOSS -----------------
+        proj_loss = 0.0
+        for i in range(B):
+            cos_sim = F.cosine_similarity(out[i], target[i], dim=-1)  # (T_target,)
+            proj_loss += self.masked_mean(1 - cos_sim, final_mask[i])
+
+        proj_loss = proj_loss / B
+        return proj_loss

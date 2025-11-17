@@ -65,6 +65,11 @@ class VAEtrainer(Trainer):
         super().__init__(**kwargs)
         # Register granular losses
         granular_losses = ["audio_loss", "kl_loss"]
+        try:
+            if getattr(self.model.encoder.config, "semantic_regulation", False):
+                granular_losses.append("semantic_loss")
+        except Exception:
+            pass
         self.add_callback(AddGranularLossesToTrainerState(granular_losses))
 
     def compute_loss(self, model, inputs, return_outputs=False):
@@ -78,7 +83,8 @@ class VAEtrainer(Trainer):
             )
             audio_loss = outputs.audio_loss
             kl_loss = outputs.kl_loss
-            loss = audio_loss + kl_loss
+            semantic_loss = getattr(outputs, "semantic_loss", None)
+            loss = audio_loss + kl_loss + (semantic_loss if semantic_loss is not None else 0.0)
 
             # Accumulate granular losses
             if self.args.n_gpu > 1:
@@ -87,6 +93,12 @@ class VAEtrainer(Trainer):
 
             self.control.granular_losses["audio_loss"] += audio_loss.detach() / self.args.gradient_accumulation_steps
             self.control.granular_losses["kl_loss"] += kl_loss.detach() / self.args.gradient_accumulation_steps
+            if semantic_loss is not None:
+                if self.args.n_gpu > 1:
+                    semantic_loss = semantic_loss.mean()
+                self.control.granular_losses["semantic_loss"] += (
+                    semantic_loss.detach() / self.args.gradient_accumulation_steps
+                )
 
             return (loss, outputs) if return_outputs else loss
         else:
@@ -98,7 +110,8 @@ class VAEtrainer(Trainer):
             )
             audio_loss = outputs.audio_loss
             kl_loss = outputs.kl_loss
-            loss = audio_loss + kl_loss
+            semantic_loss = getattr(outputs, "semantic_loss", None)
+            loss = audio_loss + kl_loss + (semantic_loss if semantic_loss is not None else 0.0)
             return (loss, outputs) if return_outputs else loss
 
     def _maybe_log_save_evaluate(self, tr_loss, grad_norm, model, trial, epoch, ignore_keys_for_eval):

@@ -1,19 +1,22 @@
 # Only specify values that override defaults in configs/defaults/*.yaml
 training:
-  output_dir: checkpoints/MelCausalVAE/test
   dataset_name: libritts
-  num_train_epochs: 3
+  output_dir: checkpoints/MelCausalVAE/setting4-semantic-regulator
+  num_train_epochs: 2
   learning_rate: 1e-4
   per_device_train_batch_size: 2
-  report_to: none
+  report_to: wandb
   wandb_project: convformer-cfm
-  wandb_run_name: sigma-vae
+  wandb_run_name: sigma-vae-semantic-regulator-libritts-ft
   fp16: false
   bf16: true
   save_steps: 1000
   eval_steps: 1000
   save_total_limit: 1
   gradient_accumulation_steps: 2
+  dataloader_num_workers: 4
+  from_pretrained: /home/ec2-user/checkpoints/MelCausalVAE/setting2/checkpoint-80000/model.safetensors
+  #resume_from_checkpoint: checkpoints/setting2/checkpoint-3000
 
 convformer:
   compress_factor_C: 8
@@ -24,7 +27,7 @@ convformer:
   logvar_layer: false
   use_sofplus: false
   target_std: 1.0
-  kl_loss_warmup_steps: 1000
+  kl_loss_warmup_steps: 100
   kl_loss_weight: 1e-3
 
 cfm:
@@ -34,4 +37,5 @@ cfm:
   unet_dropout_rate: 0.1
   use_conv_layer: true
   audio_latent_dim: 64
-  uncond_prob: 0.1
+  uncond_prob: 0.15
+  learned_prior: false

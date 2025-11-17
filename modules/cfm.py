@@ -281,7 +281,7 @@ class DiT(torch.nn.Module):
         cfg_scale = guidance_scale
         # ---- context vector z ----
         context_vector, y0 = self.handle_context_vector(
-            context_vector, temperature=temperature, generator=generator, std=0.1
+            context_vector, temperature=temperature, generator=generator, std=0.0
         )
         B, T = context_vector.shape[:2]
         if padding_mask is None:
@@ -298,8 +298,8 @@ class DiT(torch.nn.Module):
         self.transformer.to(device=context_vector.device, dtype=context_vector.dtype)
 
         # ---- time span ----
-        t_lin = torch.linspace(0, 1, num_steps, device=context_vector.device, dtype=context_vector.dtype)
-        t_span = t_lin**gamma
+        t_span = torch.linspace(0, 1, num_steps, device=context_vector.device, dtype=context_vector.dtype)
+        # t_span = t_lin**gamma
 
         # ---- ODE ----
         def fn(t, state):
@@ -312,7 +312,7 @@ class DiT(torch.nn.Module):
             )
             return features
 
-        odeint_kwargs = dict(atol=1e-1, rtol=1e-1, method="rk4")
+        odeint_kwargs = dict(atol=1e-5, rtol=1e-5, method="euler")
         trajectory = odeint(fn, y0, t_span, **odeint_kwargs)
 
         generated_latents = trajectory[-1]

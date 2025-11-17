@@ -1,16 +1,18 @@
 import torch
+import safetensors
+from typing import Optional
 from .cfm import DiT, DiTConfig
 from dataclasses import dataclass, asdict
+from .semantic_module import SeamlessM4Tv2Encoder
 from .Encoder import ConvformerEncoderConfig, ConvformerEncoder
 from .melspecEncoder import MelSpectrogramEncoder, MelSpectrogramConfig
-from typing import Optional
-import safetensors
 
 
 @dataclass
 class VAEOutput:
     audio_loss: torch.Tensor
     kl_loss: torch.Tensor
+    semantic_loss: Optional[torch.Tensor] = None
 
 
 @dataclass
@@ -20,6 +22,7 @@ class VAEConfig:
     encoder_config: ConvformerEncoderConfig
     decoder_config: DiTConfig
     mel_spec_config: MelSpectrogramConfig
+    add_semantic_distillation: bool = True
 
     @property
     def hidden_size(self):
@@ -43,6 +46,8 @@ class VAE(torch.nn.Module):
         self.decoder = DiT(config.decoder_config)
         self.encoder = ConvformerEncoder(config.encoder_config)
         self.wav2mel = MelSpectrogramEncoder(config.mel_spec_config)
+        if config.add_semantic_distillation:
+            self.semantic_module = SeamlessM4Tv2Encoder(dtype=dtype)
         self.decoder.expansion_factor = config.encoder_config.compress_factor_C
         self.dtype = dtype
         self.set_dtype(dtype)
@@ -52,28 +57,31 @@ class VAE(torch.nn.Module):
         self.decoder.to(dtype=dtype)
         self.encoder.to(dtype=dtype)
         self.wav2mel.to(dtype=dtype)
+        if self.config.add_semantic_distillation:
+            self.semantic_module.set_dtype(dtype=dtype)
 
     def set_device(self, device: torch.device):
         self.decoder.to(device=device)
         self.encoder.to(device=device)
         self.wav2mel.to(device=device)
-
-    def set_dtype(self, dtype: torch.dtype):
-        self.decoder.to(dtype=dtype)
-        self.encoder.to(dtype=dtype)
-        self.wav2mel.to(dtype=dtype)
+        if self.config.add_semantic_distillation:
+            self.semantic_module.set_device(device=device)
 
     def from_pretrained(self, checkpoint_path: str):
         state_dict = safetensors.torch.load_file(checkpoint_path)
-        self.load_state_dict(state_dict)
+        self.load_state_dict(state_dict, strict=False)
         print(f"Loaded checkpoint from {checkpoint_path}")
 
     def forward(self, audios_srs, **kwargs):
         encoded_audios = self.wav2mel(audios_srs)
+        semantic_output = None
+        if self.config.add_semantic_distillation:
+            semantic_output = self.semantic_module(audios_srs)
         convformer_output = self.encoder(
             x=encoded_audios.audio_features,
             padding_mask=encoded_audios.padding_mask,
             step=kwargs.get("training_step", None),
+            semantic_guidance=semantic_output,
         )
         audio_loss = self.decoder(
             target=encoded_audios.audio_features,
@@ -84,6 +92,7 @@ class VAE(torch.nn.Module):
         return VAEOutput(
             audio_loss=audio_loss,
             kl_loss=convformer_output.kl_loss,
+            semantic_loss=convformer_output.semantic_loss,
         )
 
     @torch.no_grad()
@@ -122,19 +131,19 @@ class VAE(torch.nn.Module):
         """
         Sample from the VAE.
         """
-        if z is not None:
-            context_vector = z
-        elif µ is not None:
-            context_vector = self.encoder.reparameterize(µ)
-        else:
-            raise ValueError("Either z or µ must be provided")
+        # if z is not None:
+        #     context_vector = z
+        # elif µ is not None:
+        #     context_vector = self.encoder.reparameterize(µ)
+        # else:
+        #     raise ValueError("Either z or µ must be provided")
 
         reconstructed_mel = self.decoder.generate(
             num_steps=num_steps,
             generator=generator,
             temperature=temperature,
             padding_mask=padding_mask,
-            context_vector=context_vector,
+            context_vector=µ,
             guidance_scale=guidance_scale,
         )
         if self.config.mel_spec_config.normalize:
