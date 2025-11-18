@@ -19,7 +19,7 @@ class ConvformerOutput:
     z: torch.FloatTensor
     kl_loss: Optional[torch.FloatTensor] = None
     padding_mask: Optional[torch.BoolTensor] = None
-    µ: Optional[torch.FloatTensor] = None
+    mu: Optional[torch.FloatTensor] = None
     semantic_loss: Optional[torch.FloatTensor] = None
 
 
@@ -319,17 +319,17 @@ class ConvformerEncoder(SigmaVAEEncoder):
         logvar = None
         if hasattr(self, "logvar"):
             logvar = self.logvar(z)
+        z = self.reparameterize(mu, logvar)
 
         semantic_loss = None
         if kwargs.get("semantic_guidance", None) is not None:
             semantic_loss = self.semantic_regulator(
-                target=mu,
+                target=z,
                 guidance=kwargs["semantic_guidance"].semantic_features,
                 guidance_mask=kwargs["semantic_guidance"].padding_mask,
                 target_padding_mask=self._resize_padding_mask(padding_mask, mu.shape[1]),
             )
 
-        z = self.reparameterize(mu, logvar)
         kl_loss = None
         if kwargs.get("step", None) is not None:
             kl_loss = self.kl_divergence(
@@ -340,7 +340,7 @@ class ConvformerEncoder(SigmaVAEEncoder):
             z=z,
             kl_loss=kl_loss,
             padding_mask=self._resize_padding_mask(padding_mask, mu.shape[1]),
-            µ=mu,
+            mu=mu,
             semantic_loss=semantic_loss,
         )
 

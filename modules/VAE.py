@@ -13,6 +13,8 @@ class VAEOutput:
     audio_loss: torch.Tensor
     kl_loss: torch.Tensor
     semantic_loss: Optional[torch.Tensor] = None
+    mu_mean: Optional[torch.Tensor] = None
+    mu_var: Optional[torch.Tensor] = None
 
 
 @dataclass
@@ -86,13 +88,16 @@ class VAE(torch.nn.Module):
         audio_loss = self.decoder(
             target=encoded_audios.audio_features,
             target_padding_mask=encoded_audios.padding_mask,
-            context_vector=convformer_output.µ,  # z
+            context_vector=convformer_output.mu,  # z
         ).loss
-
+        mu_mean = convformer_output.mu[~convformer_output.padding_mask].mean()
+        mu_var = convformer_output.mu[~convformer_output.padding_mask].var()
         return VAEOutput(
             audio_loss=audio_loss,
             kl_loss=convformer_output.kl_loss,
-            semantic_loss=convformer_output.semantic_loss,
+            semantic_loss=convformer_output.semantic_loss * 0.1,
+            mu_mean=mu_mean,
+            mu_var=mu_var,
         )
 
     @torch.no_grad()
@@ -124,7 +129,7 @@ class VAE(torch.nn.Module):
         temperature: float = 0.2,
         guidance_scale: float = 1.0,
         z: Optional[torch.Tensor] = None,
-        µ: Optional[torch.Tensor] = None,
+        mu: Optional[torch.Tensor] = None,
         generator: Optional[torch.Generator] = None,
         padding_mask: Optional[torch.BoolTensor] = None,
     ):
@@ -143,7 +148,7 @@ class VAE(torch.nn.Module):
             generator=generator,
             temperature=temperature,
             padding_mask=padding_mask,
-            context_vector=µ,
+            context_vector=mu,
             guidance_scale=guidance_scale,
         )
         if self.config.mel_spec_config.normalize:
@@ -178,7 +183,7 @@ class VAE(torch.nn.Module):
         # Generate mel spectrogram from latent
         reconstructed_mel = self.decoder.generate(
             num_steps=num_steps,
-            context_vector=convformer_output.µ,  # z
+            context_vector=convformer_output.mu,  # z
             temperature=temperature,
             guidance_scale=guidance_scale,
             generator=generator,

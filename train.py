@@ -64,7 +64,7 @@ class VAEtrainer(Trainer):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         # Register granular losses
-        granular_losses = ["audio_loss", "kl_loss"]
+        granular_losses = ["audio_loss", "kl_loss", "mu_mean", "mu_var"]
         try:
             if getattr(self.model.encoder.config, "semantic_regulation", False):
                 granular_losses.append("semantic_loss")
@@ -84,6 +84,8 @@ class VAEtrainer(Trainer):
             audio_loss = outputs.audio_loss
             kl_loss = outputs.kl_loss
             semantic_loss = getattr(outputs, "semantic_loss", None)
+            mu_mean = getattr(outputs, "mu_mean")
+            mu_var = getattr(outputs, "mu_var")
             loss = audio_loss + kl_loss + (semantic_loss if semantic_loss is not None else 0.0)
 
             # Accumulate granular losses
@@ -98,6 +100,20 @@ class VAEtrainer(Trainer):
                     semantic_loss = semantic_loss.mean()
                 self.control.granular_losses["semantic_loss"] += (
                     semantic_loss.detach() / self.args.gradient_accumulation_steps
+                )
+            if mu_mean is not None:
+                val = mu_mean.detach().float()
+                if val.dim() > 0:
+                    val = val.mean()
+                self.control.granular_losses["mu_mean"] += (
+                    val.to(self.control.granular_losses["mu_mean"].dtype) / self.args.gradient_accumulation_steps
+                )
+            if mu_var is not None:
+                val = mu_var.detach().float()
+                if val.dim() > 0:
+                    val = val.mean()
+                self.control.granular_losses["mu_var"] += (
+                    val.to(self.control.granular_losses["mu_var"].dtype) / self.args.gradient_accumulation_steps
                 )
 
             return (loss, outputs) if return_outputs else loss
@@ -139,10 +155,11 @@ class VAEtrainer(Trainer):
                     # reset the loss
                     self.control.granular_losses[k] -= self.control.granular_losses[k]
 
-                    logs[k] = round(
-                        logs[k] / (self.state.global_step - self._globalstep_last_logged),
-                        4,
-                    )
+                    avg_val = logs[k] / (self.state.global_step - self._globalstep_last_logged)
+                    if k in ("mu_mean", "mu_var"):
+                        logs[k] = round(avg_val, 8)
+                    else:
+                        logs[k] = round(avg_val, 4)
 
             logs["learning_rate"] = self._get_learning_rate()
 
@@ -203,7 +220,7 @@ class VAEtrainer(Trainer):
                 results = self.model.encode_and_sample(
                     audios_srs=audios_srs,
                     num_steps=8,
-                    temperature=0.8,
+                    temperature=1.0,
                     guidance_scale=1.5,
                 )
             # Create visualizations

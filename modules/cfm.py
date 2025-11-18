@@ -164,7 +164,7 @@ class DiT(torch.nn.Module):
             target = target[:, :min_length, :]
 
         if self.learned_prior:
-            prior = self.prior_proj(context_vector)
+            raise ValueError("Learned prior is not supported")
         else:
             temperature = temperature or 1.0
             prior = (
@@ -208,20 +208,6 @@ class DiT(torch.nn.Module):
 
         state = self.noise_proj(torch.cat([context_vector, w], dim=-1))
         return state, times, target
-        # tempi e rumore
-        # times = torch.rand((target.shape[0],), dtype=target.dtype, device=target.device)
-        # t = times.view(-1, 1, 1)
-        # eps = torch.randn_like(target)
-
-        # # VP cosine schedule (alpha, sigma) e derivate
-        # alpha, sigma, dalpha, dsigma = self.vp_cosine_params(t, s=0.008)
-
-        # # stato e target velocità
-        # w = alpha * target + sigma * eps  # (B, T, C)
-        # v_target = dalpha * target + dsigma * eps  # (B, T, C)
-
-        # state = self.noise_proj(torch.cat([context_vector, w], dim=-1))
-        # return state, times, v_target
 
     def let_it_flow(
         self,

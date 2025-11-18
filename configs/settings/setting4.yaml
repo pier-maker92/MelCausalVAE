@@ -1,22 +1,22 @@
 # Only specify values that override defaults in configs/defaults/*.yaml
 training:
   dataset_name: libritts
-  output_dir: checkpoints/MelCausalVAE/setting4-semantic-regulator
+  output_dir: checkpoints/MelCausalVAE/setting4-beta-semantic-regulator-smallkl
   num_train_epochs: 2
   learning_rate: 1e-4
-  per_device_train_batch_size: 2
+  per_device_train_batch_size: 6
   report_to: wandb
   wandb_project: convformer-cfm
-  wandb_run_name: sigma-vae-semantic-regulator-libritts-ft
+  wandb_run_name: sigma-vae-semantic-regulator-libritts-ft-smallkl
   fp16: false
   bf16: true
   save_steps: 1000
   eval_steps: 1000
   save_total_limit: 1
-  gradient_accumulation_steps: 2
+  gradient_accumulation_steps: 1
   dataloader_num_workers: 4
-  from_pretrained: /home/ec2-user/checkpoints/MelCausalVAE/setting2/checkpoint-80000/model.safetensors
-  #resume_from_checkpoint: checkpoints/setting2/checkpoint-3000
+  from_pretrained: /home/ec2-user/checkpoints/setting3/checkpoint-16000/model.safetensors
+  #resume_from_checkpoint: checkpoints/MelCausalVAE/setting4-semantic-regulator/checkpoint-1000
 
 convformer:
   compress_factor_C: 8
