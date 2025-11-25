@@ -24,7 +24,7 @@ class VAEConfig:
     encoder_config: ConvformerEncoderConfig
     decoder_config: DiTConfig
     mel_spec_config: MelSpectrogramConfig
-    add_semantic_distillation: bool = True
+    add_semantic_distillation: bool = False
 
     @property
     def hidden_size(self):
@@ -95,7 +95,7 @@ class VAE(torch.nn.Module):
         return VAEOutput(
             audio_loss=audio_loss,
             kl_loss=convformer_output.kl_loss,
-            semantic_loss=convformer_output.semantic_loss * 0.1,
+            semantic_loss=None,  # convformer_output.semantic_loss * 0.1,
             mu_mean=mu_mean,
             mu_var=mu_var,
         )
@@ -126,12 +126,13 @@ class VAE(torch.nn.Module):
     def sample(
         self,
         num_steps: int = 4,
-        temperature: float = 0.2,
+        temperature: float = 1.0,
         guidance_scale: float = 1.0,
         z: Optional[torch.Tensor] = None,
         mu: Optional[torch.Tensor] = None,
         generator: Optional[torch.Generator] = None,
         padding_mask: Optional[torch.BoolTensor] = None,
+        std: float = 1.0,
     ):
         """
         Sample from the VAE.
@@ -150,6 +151,7 @@ class VAE(torch.nn.Module):
             padding_mask=padding_mask,
             context_vector=mu,
             guidance_scale=guidance_scale,
+            std=std,
         )
         if self.config.mel_spec_config.normalize:
             reconstructed_mel = self.denormalize_mel(reconstructed_mel)
@@ -163,7 +165,6 @@ class VAE(torch.nn.Module):
         temperature: float = 1.0,
         guidance_scale: float = 1.0,
         generator: Optional[torch.Generator] = None,
-        padding_mask: Optional[torch.BoolTensor] = None,
     ):
         """
         Encode audio to latent space and generate mel spectrogram.

@@ -35,7 +35,7 @@ class DiTConfig:
     uncond_prob: float = 0.0
     learned_prior: bool = False
     use_vp_schedule: bool = False
-
+    is_causal: bool = False
     # def __init__(
     #     self,
     #     audio_latent_dim: int,
@@ -91,6 +91,8 @@ class DiT(torch.nn.Module):
         self.mel_channels = config.mel_channels
         self.uncond_prob = config.uncond_prob
         self.learned_prior = config.learned_prior
+        self.is_causal = config.is_causal
+        print(f"VAE is_causal: {self.is_causal}")
         # context vector projection
         self.context_vector_proj = nn.Sequential(
             nn.Linear(self.audio_latent_dim, self.unet_dim), nn.LayerNorm(self.unet_dim)
@@ -114,26 +116,10 @@ class DiT(torch.nn.Module):
             heads=self.unet_heads,
             use_conv_layer=self.use_conv_layer,
             audio_latent_dim=self.mel_channels,  # projection to mel
-            is_causal=True,
+            is_causal=self.is_causal,
             attn_flash=True,
         )
         self.transformer.to(dtype=torch.bfloat16)
-
-    def vp_cosine_params(self, t: torch.Tensor, s: float = 0.008):
-        """
-        t: shape (B,) or broadcastable to (B, 1, 1)
-        Returns alpha, sigma, dalpha_dt, dsigma_dt with shapes broadcastable to (B, 1, 1)
-        """
-        # ensure shape (..., 1, 1) for broadcast over sequence and channels
-        if t.ndim == 1:
-            t = t.view(-1, 1, 1)
-        phi = ((1.0 - t) + s) / (1.0 + s) * (math.pi / 2.0)
-        alpha = torch.cos(phi)
-        sigma = torch.sin(phi)
-        c = (math.pi / 2.0) / (1.0 + s)  # dphi/dt = -c
-        dalpha_dt = c * torch.sin(phi)  # -sin(phi)*(-c)
-        dsigma_dt = -c * torch.cos(phi)  #  cos(phi)*(-c)
-        return alpha, sigma, dalpha_dt, dsigma_dt
 
     def reparameterize(self, mu: torch.FloatTensor, std: Optional[float] = None) -> torch.FloatTensor:
         eps = torch.randn_like(mu)
@@ -262,12 +248,12 @@ class DiT(torch.nn.Module):
         temperature: float = 1.0,
         guidance_scale: float = 1.0,
         generator: Optional[torch.Generator] = None,
-        gamma: float = 1.0,  # griglia concava verso t piccoli
+        std: float = 1.0,
     ):
         cfg_scale = guidance_scale
         # ---- context vector z ----
         context_vector, y0 = self.handle_context_vector(
-            context_vector, temperature=temperature, generator=generator, std=0.0
+            context_vector, temperature=temperature, generator=generator, std=std
         )
         B, T = context_vector.shape[:2]
         if padding_mask is None:

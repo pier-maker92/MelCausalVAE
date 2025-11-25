@@ -1,17 +1,17 @@
 # Only specify values that override defaults in configs/defaults/*.yaml
 training:
   dataset_name: libritts
-  output_dir: checkpoints/MelCausalVAE/setting4-beta-semantic-regulator-smallkl
+  output_dir: checkpoints/MelCausalVAE/setting4-b
   num_train_epochs: 2
   learning_rate: 1e-4
   per_device_train_batch_size: 2
   report_to: wandb
   wandb_project: convformer-cfm
-  wandb_run_name: sigma-vae-semantic-regulator-libritts-ft-smallkl
+  wandb_run_name: sigma-vae-medium_kl
   fp16: false
   bf16: true
   save_steps: 1000
-  eval_steps: 1000
+  eval_steps: 100
   save_total_limit: 1
   gradient_accumulation_steps: 2
   dataloader_num_workers: 4
@@ -28,7 +28,7 @@ convformer:
   use_sofplus: false
   target_std: 1.0
   kl_loss_warmup_steps: 100
-  kl_loss_weight: 1e-3
+  kl_loss_weight: 7.0e-3
 
 cfm:
   unet_dim: 1024
@@ -39,3 +39,4 @@ cfm:
   audio_latent_dim: 64
   uncond_prob: 0.15
   learned_prior: false
+  is_causal: true
