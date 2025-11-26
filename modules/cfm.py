@@ -35,7 +35,7 @@ class DiTConfig:
     uncond_prob: float = 0.0
     learned_prior: bool = False
     use_vp_schedule: bool = False
-    is_causal: bool = False
+    is_causal: bool = True
     # def __init__(
     #     self,
     #     audio_latent_dim: int,

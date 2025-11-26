@@ -21,6 +21,7 @@ class ConvformerOutput:
     padding_mask: Optional[torch.BoolTensor] = None
     mu: Optional[torch.FloatTensor] = None
     semantic_loss: Optional[torch.FloatTensor] = None
+    semantic_features: Optional[torch.FloatTensor] = None
 
 
 @dataclass

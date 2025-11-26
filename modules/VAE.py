@@ -4,6 +4,7 @@ from typing import Optional
 from .cfm import DiT, DiTConfig
 from dataclasses import dataclass, asdict
 from .semantic_module import SeamlessM4Tv2Encoder
+from .semantic_mapper import SemanticMapperConfig, Z2YMapper
 from .Encoder import ConvformerEncoderConfig, ConvformerEncoder
 from .melspecEncoder import MelSpectrogramEncoder, MelSpectrogramConfig
 
@@ -24,7 +25,9 @@ class VAEConfig:
     encoder_config: ConvformerEncoderConfig
     decoder_config: DiTConfig
     mel_spec_config: MelSpectrogramConfig
+    semantic_mapper_config: SemanticMapperConfig
     add_semantic_distillation: bool = False
+    add_semantic_mapper: bool = False
 
     @property
     def hidden_size(self):
@@ -50,6 +53,8 @@ class VAE(torch.nn.Module):
         self.wav2mel = MelSpectrogramEncoder(config.mel_spec_config)
         if config.add_semantic_distillation:
             self.semantic_module = SeamlessM4Tv2Encoder(dtype=dtype)
+        if config.add_semantic_mapper:
+            self.semantic_mapper = Z2YMapper(config.semantic_mapper_config)
         self.decoder.expansion_factor = config.encoder_config.compress_factor_C
         self.dtype = dtype
         self.set_dtype(dtype)
@@ -61,6 +66,8 @@ class VAE(torch.nn.Module):
         self.wav2mel.to(dtype=dtype)
         if self.config.add_semantic_distillation:
             self.semantic_module.set_dtype(dtype=dtype)
+        if self.config.add_semantic_mapper:
+            self.semantic_mapper.to(dtype=dtype)
 
     def set_device(self, device: torch.device):
         self.decoder.to(device=device)
@@ -68,6 +75,8 @@ class VAE(torch.nn.Module):
         self.wav2mel.to(device=device)
         if self.config.add_semantic_distillation:
             self.semantic_module.set_device(device=device)
+        if self.config.add_semantic_mapper:
+            self.semantic_mapper.to(device=device)
 
     def from_pretrained(self, checkpoint_path: str):
         state_dict = safetensors.torch.load_file(checkpoint_path)
@@ -116,6 +125,8 @@ class VAE(torch.nn.Module):
             padding_mask=encoded_audios.padding_mask,
             step=None,
         )
+        if self.config.add_semantic_mapper:
+            convformer_output.semantic_features = self.semantic_mapper.encode(convformer_output.z)
         if not return_original_mel:
             return convformer_output
         else:
