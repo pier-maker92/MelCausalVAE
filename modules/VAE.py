@@ -126,7 +126,9 @@ class VAE(torch.nn.Module):
             step=None,
         )
         if self.config.add_semantic_mapper:
-            convformer_output.semantic_features = self.semantic_mapper.encode(convformer_output.z)
+            convformer_output.semantic_features = self.semantic_mapper(convformer_output.mu).y.to(
+                convformer_output.mu.dtype
+            )
         if not return_original_mel:
             return convformer_output
         else:

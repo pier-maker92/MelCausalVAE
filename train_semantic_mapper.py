@@ -143,9 +143,9 @@ class SemanticMapperWrapper(torch.nn.Module):
             semantic_padding_mask = semantic_output.padding_mask
 
         # Map z -> y (trainable)
-        mapper_output = self.mapper(z=z, compute_cons_loss=True, mu=convformer_output.mu)
+        mapper_output = self.mapper(z=z)
         y = mapper_output.y
-        cons_loss = mapper_output.cons_loss
+        # cons_loss = mapper_output.cons_loss
 
         # Compute semantic distillation loss via regulator
         semantic_loss = self.regulator(
@@ -156,16 +156,16 @@ class SemanticMapperWrapper(torch.nn.Module):
         )
 
         # Total loss
-        total_loss = semantic_loss + cons_loss
+        total_loss = semantic_loss  # + cons_loss
 
         # Return output in expected format
         class Output:
-            def __init__(self, loss, semantic_loss, cons_loss):
+            def __init__(self, loss, semantic_loss):
                 self.loss = loss
                 self.semantic_loss = semantic_loss
-                self.cons_loss = cons_loss
+                # self.cons_loss = cons_loss
 
-        return Output(loss=total_loss, semantic_loss=semantic_loss, cons_loss=cons_loss)
+        return Output(loss=total_loss, semantic_loss=semantic_loss)  # , cons_loss=cons_loss)
 
 
 class SemanticMapperTrainer(Trainer):
@@ -185,22 +185,22 @@ class SemanticMapperTrainer(Trainer):
 
         loss = outputs.loss
         semantic_loss = outputs.semantic_loss
-        cons_loss = outputs.cons_loss
+        # cons_loss = outputs.cons_loss
 
         # Accumulate granular losses if training and callback initialized
         if hasattr(self.control, "granular_losses"):
             # Handle multi-GPU
             if self.args.n_gpu > 1:
                 semantic_loss_detached = semantic_loss.mean().detach()
-                cons_loss_detached = cons_loss.mean().detach()
+                # cons_loss_detached = cons_loss.mean().detach()
             else:
                 semantic_loss_detached = semantic_loss.detach()
-                cons_loss_detached = cons_loss.detach()
+                # cons_loss_detached = cons_loss.detach()
 
             self.control.granular_losses["semantic_loss"] += (
                 semantic_loss_detached / self.args.gradient_accumulation_steps
             )
-            self.control.granular_losses["cons_loss"] += cons_loss_detached / self.args.gradient_accumulation_steps
+            # self.control.granular_losses["cons_loss"] += cons_loss_detached / self.args.gradient_accumulation_steps
 
         return (loss, outputs) if return_outputs else loss
 
@@ -385,9 +385,8 @@ def main():
     logger.info("Initializing Z2Y mapper...")
     mapper_config = SemanticMapperConfig(
         z_dim=encoder_config.latent_dim,
-        bottleneck_dim=mapper_cfg.get("bottleneck_dim", 48),
-        dropout=mapper_cfg.get("dropout", 0.1),
-        lambda_cons=mapper_cfg.get("lambda_cons", 0.2),
+        n_layers=mapper_cfg.get("n_layers", 6),
+        hidden_dim=mapper_cfg.get("hidden_dim", 128),
     )
     mapper = Z2YMapper(mapper_config)
     logger.info("✓ Initialized Z2Y mapper")

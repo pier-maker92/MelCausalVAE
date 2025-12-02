@@ -10,21 +10,21 @@
 #   - total_loss = semantic_loss + lambda_cons * cons_loss
 
 training:
-  output_dir: checkpoints/MelCausalVAE/semantic_mapper
+  output_dir: checkpoints/MelCausalVAE/semantic_mapper_invertible
   dataset_name: libritts
   num_train_epochs: 10
   learning_rate: 1e-4
   per_device_train_batch_size: 16
   report_to: wandb
   wandb_project: z2y-mapper
-  wandb_run_name: z2y-mapper-baseline
+  wandb_run_name: z2y-invertible
   fp16: false
   bf16: true
   save_steps: 1000
   save_total_limit: 3
   gradient_accumulation_steps: 1
   logging_steps: 1
-  resume_from_checkpoint: /home/ec2-user/checkpoints/MelCausalVAE/semantic_mapper/checkpoint-2000
+  resume_from_checkpoint: /home/ec2-user/checkpoints/MelCausalVAE/semantic_mapper_invertible/checkpoint-1000
 
 # VAE encoder config (must match the pretrained checkpoint)
 convformer:
@@ -52,7 +52,6 @@ cfm:
 
 # Z2Y mapper specific config
 semantic_mapper:
-  bottleneck_dim: 48  # Bottleneck dimension (z_dim -> bottleneck -> z_dim)
-  dropout: 0.1  # Dropout rate in the mapper
-  lambda_cons: 0.2  # Weight for consistency loss MSE(y, z)
+  n_layers: 6
+  hidden_dim: 128
 
