@@ -25,15 +25,14 @@ def simple_collate_fn(batch):
     return batch
 
 
-class LibriTTS(SimpleAudioDataset):
+class LibriSpeech100h(SimpleAudioDataset):
     def __init__(self):
         super().__init__()
         # Load the two datasets
         datasets = []
-        for subset in ["clean", "other"]:
+        for subset in ["train"]:
             ds = load_dataset(
-                "parler-tts/libritts_r_filtered",
-                subset,
+                "cmu-mlsp/hubert_layer9-librispeech-asr100h",
                 cache_dir=cache_dir,
                 num_proc=min(
                     os.cpu_count(),
@@ -41,6 +40,7 @@ class LibriTTS(SimpleAudioDataset):
                 ),
             )
             datasets.append(ds)
+
         partitions_per_destination = defaultdict(list)
         for dataset in datasets:
             for partition in dataset:
@@ -52,6 +52,8 @@ class LibriTTS(SimpleAudioDataset):
                 f"{destination}_dataset",
                 concatenate_datasets(partitions_per_destination[destination]),
             )
+        # select only the "audio_codes" column
+        self.train_dataset = self.train_dataset.select_columns(["audio_codes"])
 
     def _partition_to_destination(self, partition_name):
         if "train" in partition_name:
@@ -60,15 +62,15 @@ class LibriTTS(SimpleAudioDataset):
             return "test"
 
 
-parser = argparse.ArgumentParser()
-parser.add_argument("-b", "--batch_size", type=int, default=1)
-parser.add_argument("-s", "--stats", action="store_true", default=False)
-parser.add_argument("-n", "--num_samples", type=int, default=10000)
-args = parser.parse_args()
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-b", "--batch_size", type=int, default=1)
+    parser.add_argument("-s", "--stats", action="store_true", default=False)
+    parser.add_argument("-n", "--num_samples", type=int, default=10000)
+    args = parser.parse_args()
     # data collator
     data_collator = DataCollator()
-    dataset = TrainDatasetWrapper(LibriTTS(), "train")
+    dataset = TrainDatasetWrapper(LibriSpeech100h(), "train")
 #     dataloader = DataLoader(
 #         dataset,
 #         batch_size=args.batch_size,
