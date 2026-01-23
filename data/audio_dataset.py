@@ -32,10 +32,10 @@ class SimpleAudioDataset(Dataset):
     def __len__(self):
         return len(self.train_dataset)
 
-    def _process_audio_output(self, data_dict, audio_data):
+    def _process_audio_output(self, data_dict, audio_data, target_sr=24000):
         audio_output, sr_output = self._process_audio_component(
             audio_data,
-            target_sr=24000,  # FIXME: hardcoded
+            target_sr=target_sr,
         )
         data_dict.update({"audio_output": [audio_output], "audio_output_sr": [sr_output]})
 
@@ -54,6 +54,8 @@ class DataCollator(object):
         batch_aligned_transcription_ids = [None] * len(instances)
         batch_transcription = [None] * len(instances)
         batch_language = [None] * len(instances)
+        batch_ids = [None] * len(instances)
+        batch_audio_codes = [None] * len(instances)
         for i, instance in enumerate(instances):
             if "audio_input" in instance:
                 batch_input_audios_srs[i] = (
@@ -78,7 +80,10 @@ class DataCollator(object):
                 batch_transcription[i] = instance["transcription"]
             if "language" in instance:
                 batch_language[i] = instance["language"]
-
+            if "ids" in instance:
+                batch_ids[i] = instance["ids"]
+            if "audio_codes" in instance:
+                batch_audio_codes[i] = instance["audio_codes"]
         # if not all none add to the batch
         def all_none(batch):
             return all([x is None for x in batch])
@@ -97,6 +102,10 @@ class DataCollator(object):
             batch["transcription"] = batch_transcription
         if not all_none(batch_language):
             batch["language"] = batch_language
+        if not all_none(batch_ids):
+            batch["ids"] = batch_ids
+        if not all_none(batch_audio_codes):
+            batch["audio_codes"] = batch_audio_codes
         return batch
 
 
@@ -112,7 +121,25 @@ class TrainDatasetWrapper(SimpleAudioDataset):
     def __getitem__(self, idx):
         data_dict = {}
         data = self.dataset[idx]
-        self._process_audio_output(data_dict, data["audio"])
+        self._process_audio_output(data_dict, data["audio"], target_sr=16000)
+        data_dict["ids"] = data.get("id")
+        data_dict["language"] = data.get("language", "en")
+        data_dict["audio_codes"] = data.get("audio_codes", None)
+        return data_dict
+
+class HubertDatasetWrapper(SimpleAudioDataset):
+    def __init__(self, dataset: SimpleAudioDataset, split: str):
+        super().__init__()
+        assert split in ["train", "test"], "split must be either train or test"
+        self.dataset = getattr(dataset, f"{split}_dataset")
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        data_dict = {}
+        data = self.dataset[idx]
+        data_dict["audio_codes"] = data.get("audio_codes", None)
         return data_dict
 
 
