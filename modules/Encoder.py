@@ -5,13 +5,14 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import math
 import torch
 import torch.nn as nn
-from typing import Optional
 from einops import rearrange
 import torch.nn.functional as F
 from dataclasses import dataclass
+from typing import Optional, List
+from modules.VAE import BPEOutput
+from modules.regulator import InterpolateRegulator
 from modules.semantic_module import SeamlessM4Tv2Encoder
 from modules.flash_attn_encoder import FlashTransformerEncoder
-from modules.regulator import InterpolateRegulator
 
 
 @dataclass
@@ -297,7 +298,25 @@ class ConvformerEncoder(SigmaVAEEncoder):
         if config.logvar_layer:
             self.logvar = nn.Linear(512, latent_dim)
 
-    def forward(self, x: torch.FloatTensor, padding_mask: torch.BoolTensor = None, **kwargs):  # x: [B, T, 100]
+        self.semantic_embeddings = nn.Embedding(num_embeddings=16384, embedding_dim=512)
+
+    def collapse_frame(self, latent_frames: torch.FloatTensor, batch_durations: torch.LongTensor) -> torch.FloatTensor:
+        # get the mean value of latent_frames based on the durations
+        batch_collapsed_frames = []
+        for durations in batch_durations:
+            collapsed_frames = []
+            for duration in durations:
+                collapsed_frames.append(latent_frames[batch_idx, duration : duration + 1].mean(dim=0))
+            batch_collapsed_frames.append(torch.cat(collapsed_frames, dim=0))
+        return torch.stack(batch_collapsed_frames)
+
+    def forward(
+        self,
+        x: torch.FloatTensor,
+        padding_mask: torch.BoolTensor = None,
+        hubert_guidance: Optional[List[BPEOutput]] = None,
+        **kwargs,
+    ):  # x: [B, T, 100]
         B, T, F = x.shape
         x = self.in_freq_proj(x)
         x = x.unsqueeze(1)  # [B, 1, T, 100]
@@ -316,6 +335,18 @@ class ConvformerEncoder(SigmaVAEEncoder):
         # Flatten freq to tokens and run causal Transformer
         hiddens = x.transpose(1, 2)  # [B, T/C, 512]
         z = self.transformer(hiddens)  # [B, T/C, 512]
+
+        if hubert_guidance is not None:
+            assert (
+                kwargs.get("semantic_guidance", None) is None
+            ), "semantic_guidance and hubert_guidance cannot be used together"
+            z = self.collapse_frame(z, semantic_guidance.durations)
+            semantic_embeddings = self.semantic_embeddings(semantic_guidance.semantic_ids)
+            semantic_loss = F.mse_loss(
+                semantic_embeddings, z.detach()
+            )  # loss here shuold not backpropagate to the encoder features
+            z = z - semantic_embeddings  # remove the semantic embeddings from the latent features
+
         mu = self.mu(z)
         logvar = None
         if hasattr(self, "logvar"):

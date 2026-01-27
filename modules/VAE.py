@@ -1,3 +1,7 @@
+import os
+import sys
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import torch
 import safetensors
 from typing import Optional
@@ -7,6 +11,13 @@ from .semantic_module import SeamlessM4Tv2Encoder
 from .semantic_mapper import SemanticMapperConfig, Z2YMapper
 from .Encoder import ConvformerEncoderConfig, ConvformerEncoder
 from .melspecEncoder import MelSpectrogramEncoder, MelSpectrogramConfig
+from data import BPETokenizer
+
+
+@dataclass
+class BPEOutput:
+    semantic_ids: torch.LongTensor
+    durations: torch.LongTensor
 
 
 @dataclass
@@ -28,6 +39,8 @@ class VAEConfig:
     semantic_mapper_config: SemanticMapperConfig
     add_semantic_distillation: bool = False
     add_semantic_mapper: bool = False
+    add_hubert_guidance: bool = False
+    hubert_guidance_tokenizer_path: str = "bpe_simple.json"
 
     @property
     def hidden_size(self):
@@ -41,6 +54,10 @@ class VAEConfig:
             "encoder_config": asdict(self.encoder_config),
             "decoder_config": asdict(self.decoder_config),
             "mel_spec_config": asdict(self.mel_spec_config),
+            "add_semantic_distillation": self.add_semantic_distillation,
+            "add_semantic_mapper": self.add_semantic_mapper,
+            "add_hubert_guidance": self.add_hubert_guidance,
+            "hubert_guidance_tokenizer_path": self.hubert_guidance_tokenizer_path,
         }
 
 
@@ -55,6 +72,14 @@ class VAE(torch.nn.Module):
             self.semantic_module = SeamlessM4Tv2Encoder(dtype=dtype)
         if config.add_semantic_mapper:
             self.semantic_mapper = Z2YMapper(config.semantic_mapper_config)
+        if config.add_hubert_guidance:
+            self.hubert_guidance_tokenizer = BPETokenizer(
+                n_initial_units=1024,
+                target_vocab_size=16384,
+                deduplicate=True,
+                verbose=True,
+            )
+            self.hubert_guidance_tokenizer.load(config.hubert_guidance_tokenizer_path)
         self.decoder.expansion_factor = config.encoder_config.compress_factor_C
         self.dtype = dtype
         self.set_dtype(dtype)
@@ -85,14 +110,27 @@ class VAE(torch.nn.Module):
 
     def forward(self, audios_srs, **kwargs):
         encoded_audios = self.wav2mel(audios_srs)
-        semantic_output = None
+        semantic_output, hubert_guidance = None, None
         if self.config.add_semantic_distillation:
             semantic_output = self.semantic_module(audios_srs)
+        if self.config.add_hubert_guidance:
+            assert kwargs.get("units", None) is not None, "k-means Hubert units must be provided for hubert guidance"
+            assert len(kwargs.get("units")) == len(audios_srs), "number of units must match number of audio samples"
+            hubert_guidance = []
+            for unit_sequence in kwargs.get("units"):
+                tokenized_sequence, durations = self.hubert_guidance_tokenizer.encode(unit_sequence)
+                hubert_guidance.append(
+                    BPEOutput(
+                        semantic_ids=tokenized_sequence,
+                        durations=durations,
+                    )
+                )
         convformer_output = self.encoder(
             x=encoded_audios.audio_features,
             padding_mask=encoded_audios.padding_mask,
             step=kwargs.get("training_step", None),
             semantic_guidance=semantic_output,
+            hubert_guidance=hubert_guidance,
         )
         audio_loss = self.decoder(
             target=encoded_audios.audio_features,

@@ -25,9 +25,9 @@ from transformers import (
 # data
 from .data.mls import MLSDataset
 from .data.libri_tts import LibriTTS
-from .data.audio_dataset import DataCollator
+from .data.librispeechHubert import LibriSpeech100h
 from .data.audio_dataset import TrainDatasetWrapper
-
+from .data.audio_dataset import DataCollator, HubertDatasetWrapper
 
 # Set up logging
 logging.basicConfig(
@@ -76,10 +76,13 @@ class VAEtrainer(Trainer):
         """Compute the loss for the VAE"""
         if hasattr(self.control, "granular_losses") and model.training:
             audios_srs = inputs["output_audios_srs"]
+            units = inputs.get("audio_codes", None)
+            breakpoint()
             # Forward pass
             outputs = model(
                 audios_srs=audios_srs,
                 training_step=self.state.global_step,
+                units=units,
             )
             audio_loss = outputs.audio_loss
             kl_loss = outputs.kl_loss
@@ -414,6 +417,8 @@ def main():
         dataset = MLSDataset()
     elif dataset_name == "libritts":
         dataset = LibriTTS()
+    elif dataset_name == "librispeech100h":
+        dataset = HubertDatasetWrapper(LibriSpeech100h(), split="train")
     else:
         raise ValueError(f"Dataset {dataset_name} not supported")
     train_dataset = TrainDatasetWrapper(dataset, "train")
