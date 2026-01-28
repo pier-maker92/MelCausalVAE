@@ -6,7 +6,6 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import json
 import numpy as np
 from tqdm import tqdm
-from joblib import Parallel, delayed
 from typing import List, Tuple, Dict
 from collections import Counter, defaultdict
 
@@ -285,51 +284,51 @@ class BPETokenizer:
         )
 
 
-# Training script
-if __name__ == "__main__":
-    import argparse
-    from torch.utils.data import DataLoader
-    from data.audio_dataset import DataCollator, HubertDatasetWrapper
-    from data.librispeechHubert import LibriSpeech100h
+# # Training script
+# if __name__ == "__main__":
+#     import argparse
+#     from torch.utils.data import DataLoader
+#     from data.audio_dataset import DataCollator, HubertDatasetWrapper
+#     from data.librispeechHubert import LibriSpeech100h
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument("-b", "--batch_size", type=int, default=32)
-    parser.add_argument("-n", "--n_initial_units", type=int, default=1024)
-    parser.add_argument("-k", "--target_vocab_size", type=int, default=16384)
-    parser.add_argument("-d", "--deduplicate", action="store_true")
-    parser.add_argument("-o", "--output", type=str, default="bpe_simple.json")
-    args = parser.parse_args()
+#     parser = argparse.ArgumentParser()
+#     parser.add_argument("-b", "--batch_size", type=int, default=32)
+#     parser.add_argument("-n", "--n_initial_units", type=int, default=1024)
+#     parser.add_argument("-k", "--target_vocab_size", type=int, default=16384)
+#     parser.add_argument("-d", "--deduplicate", action="store_true")
+#     parser.add_argument("-o", "--output", type=str, default="bpe_simple.json")
+#     args = parser.parse_args()
 
-    # Load data
-    print("Loading data...")
-    data_collator = DataCollator()
-    dataset = HubertDatasetWrapper(LibriSpeech100h(), split="train")
-    dataloader = DataLoader(
-        dataset,
-        batch_size=args.batch_size,
-        collate_fn=data_collator,
-        num_workers=0,
-        shuffle=False,
-    )
+#     # Load data
+#     print("Loading data...")
+#     data_collator = DataCollator()
+#     dataset = HubertDatasetWrapper(LibriSpeech100h(), split="train")
+#     dataloader = DataLoader(
+#         dataset,
+#         batch_size=args.batch_size,
+#         collate_fn=data_collator,
+#         num_workers=0,
+#         shuffle=False,
+#     )
 
-    # Collect sequences
-    sequences = []
-    for batch in tqdm(dataloader, desc="Loading sequences"):
-        for seq in batch["audio_codes"]:
-            sequences.append(np.array([int(x) for x in seq]))
-    print(f"Loaded {len(sequences)} sequences")
+#     # Collect sequences
+#     sequences = []
+#     for batch in tqdm(dataloader, desc="Loading sequences"):
+#         for seq in batch["audio_codes"]:
+#             sequences.append(np.array([int(x) for x in seq]))
+#     print(f"Loaded {len(sequences)} sequences")
 
-    # Train
-    tokenizer = BPETokenizer(
-        n_initial_units=args.n_initial_units,
-        target_vocab_size=args.target_vocab_size,
-        deduplicate=args.deduplicate,
-        verbose=True,
-    )
-    if args.deduplicate:
-        sequences = tokenizer._collapse_repetitions(sequences)
+#     # Train
+#     tokenizer = BPETokenizer(
+#         n_initial_units=args.n_initial_units,
+#         target_vocab_size=args.target_vocab_size,
+#         deduplicate=args.deduplicate,
+#         verbose=True,
+#     )
+#     if args.deduplicate:
+#         sequences = tokenizer._collapse_repetitions(sequences)
 
-    tokenizer.train(sequences, verbose=True, output_path=args.output)
+#     tokenizer.train(sequences, verbose=True, output_path=args.output)
 
-    print(f"\nSaved to {args.output}")
-    print(f"Final tokenizer: {tokenizer}")
+#     print(f"\nSaved to {args.output}")
+#     print(f"Final tokenizer: {tokenizer}")

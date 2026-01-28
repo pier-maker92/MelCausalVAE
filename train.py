@@ -8,10 +8,10 @@ from vocos import Vocos
 from pathlib import Path
 from typing import Dict, List
 import matplotlib.pyplot as plt
-from .modules.cfm import DiTConfig
-from .modules.VAE import VAE, VAEConfig
-from .modules.Encoder import ConvformerEncoderConfig
-from .modules.melspecEncoder import MelSpectrogramConfig
+from modules.cfm import DiTConfig
+from modules.VAE import VAE, VAEConfig
+from modules.Encoder import ConvformerEncoderConfig
+from modules.melspecEncoder import MelSpectrogramConfig
 from transformers import (
     Trainer,
     TrainingArguments,
@@ -19,15 +19,14 @@ from transformers import (
     TrainerControl,
     TrainerState,
     set_seed,
-    is_torch_tpu_available,
 )
 
 # data
-from .data.mls import MLSDataset
-from .data.libri_tts import LibriTTS
-from .data.librispeechHubert import LibriSpeech100h
-from .data.audio_dataset import TrainDatasetWrapper
-from .data.audio_dataset import DataCollator, HubertDatasetWrapper
+from data.mls import MLSDataset
+from data.libri_tts import LibriTTS
+from data.librispeechHubert import LibriSpeech100h
+from data.audio_dataset import TrainDatasetWrapper
+from data.audio_dataset import DataCollator, HubertDatasetWrapper
 
 # Set up logging
 logging.basicConfig(
@@ -36,9 +35,6 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
-
-if is_torch_tpu_available(check_device=False):
-    import torch_xla.core.xla_model as xm
 
 
 class AddGranularLossesToTrainerState(TrainerCallback):
@@ -72,7 +68,7 @@ class VAEtrainer(Trainer):
             pass
         self.add_callback(AddGranularLossesToTrainerState(granular_losses))
 
-    def compute_loss(self, model, inputs, return_outputs=False):
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         """Compute the loss for the VAE"""
         if hasattr(self.control, "granular_losses") and model.training:
             audios_srs = inputs["output_audios_srs"]
@@ -135,8 +131,6 @@ class VAEtrainer(Trainer):
 
     def _maybe_log_save_evaluate(self, tr_loss, grad_norm, model, trial, epoch, ignore_keys_for_eval):
         if self.control.should_log and self.state.global_step > self._globalstep_last_logged:
-            if is_torch_tpu_available():
-                xm.mark_step()
 
             logs: Dict[str, float] = {}
 
@@ -418,11 +412,11 @@ def main():
     elif dataset_name == "libritts":
         dataset = LibriTTS()
     elif dataset_name == "librispeech100h":
-        dataset = HubertDatasetWrapper(LibriSpeech100h(), split="train")
+        dataset = LibriSpeech100h()
     else:
         raise ValueError(f"Dataset {dataset_name} not supported")
     train_dataset = TrainDatasetWrapper(dataset, "train")
-    test_dataset = TrainDatasetWrapper(dataset, "test")
+    test_dataset = None  # HubertDatasetWrapper(dataset, "test")
 
     # handle wandb - only initialize on main process (rank 0)
     wandb_project = training_cfg.pop("wandb_project", None)
@@ -441,11 +435,13 @@ def main():
     encoder_config = ConvformerEncoderConfig(**convformer_cfg)
     # Create model
     logger.info("Creating VAE model...")
+    add_hubert_guidance = training_cfg.pop("add_hubert_guidance", False)
     model = VAE(
         config=VAEConfig(
             encoder_config=encoder_config,
             decoder_config=decoder_config,
             mel_spec_config=MelSpectrogramConfig(),
+            add_hubert_guidance=add_hubert_guidance,
         ),
         dtype=dtype,
     )

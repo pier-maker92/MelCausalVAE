@@ -13,7 +13,7 @@ from modules.melspecEncoder import MelSpectrogramEncoder, MelSpectrogramConfig
 from data.audio_dataset import SimpleAudioDataset, DataCollator, TrainDatasetWrapper
 
 # set the HF_HOME environment variable
-#os.environ["HF_HOME"] = "/Volumes/Crucial X6/HF_HOME"
+# os.environ["HF_HOME"] = "/Volumes/Crucial X6/HF_HOME"
 cache_dir = "/Users/pierfrancescomelucci/Research/Playground/data_cache"
 
 
@@ -53,7 +53,7 @@ class LibriSpeech100h(SimpleAudioDataset):
                 concatenate_datasets(partitions_per_destination[destination]),
             )
         # select only the "audio_codes" column
-        self.train_dataset = self.train_dataset.select_columns(["audio_codes"])
+        # self.train_dataset = self.train_dataset.select_columns(["audio_codes"])
 
     def _partition_to_destination(self, partition_name):
         if "train" in partition_name:
@@ -62,15 +62,15 @@ class LibriSpeech100h(SimpleAudioDataset):
             return "test"
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("-b", "--batch_size", type=int, default=1)
-    parser.add_argument("-s", "--stats", action="store_true", default=False)
-    parser.add_argument("-n", "--num_samples", type=int, default=10000)
-    args = parser.parse_args()
-    # data collator
-    data_collator = DataCollator()
-    dataset = TrainDatasetWrapper(LibriSpeech100h(), "train")
+# if __name__ == "__main__":
+#     parser = argparse.ArgumentParser()
+#     parser.add_argument("-b", "--batch_size", type=int, default=1)
+#     parser.add_argument("-s", "--stats", action="store_true", default=False)
+#     parser.add_argument("-n", "--num_samples", type=int, default=10000)
+#     args = parser.parse_args()
+#     # data collator
+#     data_collator = DataCollator()
+#     dataset = TrainDatasetWrapper(LibriSpeech100h(), "train")
 #     dataloader = DataLoader(
 #         dataset,
 #         batch_size=args.batch_size,
