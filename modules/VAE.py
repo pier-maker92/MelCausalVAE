@@ -36,11 +36,11 @@ class VAEConfig:
     encoder_config: ConvformerEncoderConfig
     decoder_config: DiTConfig
     mel_spec_config: MelSpectrogramConfig
-    semantic_mapper_config: SemanticMapperConfig
+    semantic_mapper_config: Optional[SemanticMapperConfig] = None
     add_semantic_distillation: bool = False
     add_semantic_mapper: bool = False
     add_hubert_guidance: bool = False
-    hubert_guidance_tokenizer_path: str = "bpe_simple.json"
+    hubert_guidance_tokenizer_path: str = "data/tokenizer.json"
 
     @property
     def hidden_size(self):

@@ -73,7 +73,6 @@ class VAEtrainer(Trainer):
         if hasattr(self.control, "granular_losses") and model.training:
             audios_srs = inputs["output_audios_srs"]
             units = inputs.get("audio_codes", None)
-            breakpoint()
             # Forward pass
             outputs = model(
                 audios_srs=audios_srs,

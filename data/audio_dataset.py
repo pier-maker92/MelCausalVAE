@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import torchaudio.transforms as T
 from torch.utils.data import Dataset
 from typing import Optional, Sequence, Dict
+from data.tokenizer import BPETokenizer
 
 
 class SimpleAudioDataset(Dataset):
@@ -125,6 +126,7 @@ class TrainDatasetWrapper(SimpleAudioDataset):
         data_dict["ids"] = data.get("id")
         data_dict["language"] = data.get("language", "en")
         data_dict["audio_codes"] = data.get("audio_codes", None)
+        #data_dict["audio_codes"] = self.tokenizer.encode_batch([data_dict["audio_codes"]])
         return data_dict
 
 class HubertDatasetWrapper(SimpleAudioDataset):
@@ -132,6 +134,8 @@ class HubertDatasetWrapper(SimpleAudioDataset):
         super().__init__()
         assert split in ["train", "test"], "split must be either train or test"
         self.dataset = getattr(dataset, f"{split}_dataset")
+        self.tokenizer = BPETokenizer(n_initial_units=1024, target_vocab_size=16384, deduplicate=True, verbose=True)
+        self.tokenizer.load("data/tokenizer.json")
 
     def __len__(self):
         return len(self.dataset)
@@ -140,6 +144,7 @@ class HubertDatasetWrapper(SimpleAudioDataset):
         data_dict = {}
         data = self.dataset[idx]
         data_dict["audio_codes"] = data.get("audio_codes", None)
+        data_dict["audio_codes"] = self.tokenizer.encode_batch([data_dict["audio_codes"]])
         return data_dict
 
 

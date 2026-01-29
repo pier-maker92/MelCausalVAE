@@ -8,4 +8,4 @@ torchdiffeq
 beartype
 safetensors
 transformers[torch]
-torchcodec
+torchcodec==0.7
