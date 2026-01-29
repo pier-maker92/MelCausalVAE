@@ -15,12 +15,6 @@ from data.tokenizer import BPETokenizer
 
 
 @dataclass
-class BPEOutput:
-    semantic_ids: torch.LongTensor
-    durations: torch.LongTensor
-
-
-@dataclass
 class VAEOutput:
     audio_loss: torch.Tensor
     kl_loss: torch.Tensor
@@ -39,8 +33,6 @@ class VAEConfig:
     semantic_mapper_config: Optional[SemanticMapperConfig] = None
     add_semantic_distillation: bool = False
     add_semantic_mapper: bool = False
-    add_hubert_guidance: bool = False
-    hubert_guidance_tokenizer_path: str = "data/tokenizer.json"
 
     @property
     def hidden_size(self):
@@ -56,8 +48,6 @@ class VAEConfig:
             "mel_spec_config": asdict(self.mel_spec_config),
             "add_semantic_distillation": self.add_semantic_distillation,
             "add_semantic_mapper": self.add_semantic_mapper,
-            "add_hubert_guidance": self.add_hubert_guidance,
-            "hubert_guidance_tokenizer_path": self.hubert_guidance_tokenizer_path,
         }
 
 
@@ -66,20 +56,16 @@ class VAE(torch.nn.Module):
         super().__init__()
         self.config = config
         self.decoder = DiT(config.decoder_config)
+        if config.encoder_config.compress_factor_C < 4:
+            print(f"WARNING: compress_factor_C is less than 4, but the minimum downsampling factor is 4")
+            print(f"Setting compress_factor_C to 4")
+            config.encoder_config.compress_factor_C = 4
         self.encoder = ConvformerEncoder(config.encoder_config)
         self.wav2mel = MelSpectrogramEncoder(config.mel_spec_config)
         if config.add_semantic_distillation:
             self.semantic_module = SeamlessM4Tv2Encoder(dtype=dtype)
         if config.add_semantic_mapper:
             self.semantic_mapper = Z2YMapper(config.semantic_mapper_config)
-        if config.add_hubert_guidance:
-            self.hubert_guidance_tokenizer = BPETokenizer(
-                n_initial_units=1024,
-                target_vocab_size=16384,
-                deduplicate=True,
-                verbose=True,
-            )
-            self.hubert_guidance_tokenizer.load(config.hubert_guidance_tokenizer_path)
         self.decoder.expansion_factor = config.encoder_config.compress_factor_C
         self.dtype = dtype
         self.set_dtype(dtype)
@@ -113,36 +99,27 @@ class VAE(torch.nn.Module):
         semantic_output, hubert_guidance = None, None
         if self.config.add_semantic_distillation:
             semantic_output = self.semantic_module(audios_srs)
-        if self.config.add_hubert_guidance:
-            assert kwargs.get("units", None) is not None, "k-means Hubert units must be provided for hubert guidance"
-            assert len(kwargs.get("units")) == len(audios_srs), "number of units must match number of audio samples"
-            hubert_guidance = []
-            for unit_sequence in kwargs.get("units"):
-                tokenized_sequence, durations = self.hubert_guidance_tokenizer.encode(unit_sequence)
-                hubert_guidance.append(
-                    BPEOutput(
-                        semantic_ids=tokenized_sequence,
-                        durations=durations,
-                    )
-                )
+
         convformer_output = self.encoder(
             x=encoded_audios.audio_features,
             padding_mask=encoded_audios.padding_mask,
             step=kwargs.get("training_step", None),
             semantic_guidance=semantic_output,
-            hubert_guidance=hubert_guidance,
+            hubert_guidance=kwargs.get("hubert_guidance", None),
         )
+
         audio_loss = self.decoder(
             target=encoded_audios.audio_features,
             target_padding_mask=encoded_audios.padding_mask,
-            context_vector=convformer_output.mu,  # z
+            context_vector=convformer_output.z,  # z
+            hubert_guidance=convformer_output.hubert_guidance,
         ).loss
-        mu_mean = convformer_output.mu[~convformer_output.padding_mask].mean()
-        mu_var = convformer_output.mu[~convformer_output.padding_mask].var()
+        mu_mean = convformer_output.z[~convformer_output.padding_mask].mean()
+        mu_var = convformer_output.z[~convformer_output.padding_mask].var()
         return VAEOutput(
             audio_loss=audio_loss,
             kl_loss=convformer_output.kl_loss,
-            semantic_loss=None,  # convformer_output.semantic_loss * 0.1,
+            semantic_loss=convformer_output.semantic_loss,
             mu_mean=mu_mean,
             mu_var=mu_var,
         )
