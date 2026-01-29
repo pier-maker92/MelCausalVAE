@@ -11,7 +11,7 @@ from .semantic_module import SeamlessM4Tv2Encoder
 from .semantic_mapper import SemanticMapperConfig, Z2YMapper
 from .Encoder import ConvformerEncoderConfig, ConvformerEncoder
 from .melspecEncoder import MelSpectrogramEncoder, MelSpectrogramConfig
-from data import BPETokenizer
+from data.tokenizer import BPETokenizer
 
 
 @dataclass

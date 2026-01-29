@@ -9,7 +9,6 @@ from einops import rearrange
 import torch.nn.functional as F
 from dataclasses import dataclass
 from typing import Optional, List
-from modules.VAE import BPEOutput
 from modules.regulator import InterpolateRegulator
 from modules.semantic_module import SeamlessM4Tv2Encoder
 from modules.flash_attn_encoder import FlashTransformerEncoder
@@ -314,7 +313,7 @@ class ConvformerEncoder(SigmaVAEEncoder):
         self,
         x: torch.FloatTensor,
         padding_mask: torch.BoolTensor = None,
-        hubert_guidance: Optional[List[BPEOutput]] = None,
+        hubert_guidance: Optional[List[any]] = None,
         **kwargs,
     ):  # x: [B, T, 100]
         B, T, F = x.shape

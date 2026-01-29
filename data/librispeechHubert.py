@@ -12,11 +12,6 @@ from datasets import load_dataset, concatenate_datasets
 from modules.melspecEncoder import MelSpectrogramEncoder, MelSpectrogramConfig
 from data.audio_dataset import SimpleAudioDataset, DataCollator, TrainDatasetWrapper
 
-# set the HF_HOME environment variable
-# os.environ["HF_HOME"] = "/Volumes/Crucial X6/HF_HOME"
-cache_dir = "/Users/pierfrancescomelucci/Research/Playground/data_cache"
-
-
 # import mel spec encoder
 mel_spec_encoder = MelSpectrogramEncoder(config=MelSpectrogramConfig())
 
@@ -33,7 +28,6 @@ class LibriSpeech100h(SimpleAudioDataset):
         for subset in ["train"]:
             ds = load_dataset(
                 "cmu-mlsp/hubert_layer9-librispeech-asr100h",
-                cache_dir=cache_dir,
                 num_proc=min(
                     os.cpu_count(),
                     16,
