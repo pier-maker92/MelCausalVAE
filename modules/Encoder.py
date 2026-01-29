@@ -6,7 +6,6 @@ import math
 import torch
 import torch.nn as nn
 from einops import rearrange
-import torch.nn.functional as F
 from dataclasses import dataclass
 from typing import Optional, List
 from modules.regulator import InterpolateRegulator
@@ -22,6 +21,7 @@ class ConvformerOutput:
     mu: Optional[torch.FloatTensor] = None
     semantic_loss: Optional[torch.FloatTensor] = None
     semantic_features: Optional[torch.FloatTensor] = None
+    hubert_guidance: Optional[torch.LongTensor] = None
 
 
 @dataclass
@@ -74,7 +74,7 @@ class SigmaVAEEncoder(nn.Module):
         if logvar is None:
             # Compute in fp32 for numerical stability
             mu_valid = mu[~padding_mask].float()
-            return F.mse_loss(mu_valid, torch.zeros_like(mu_valid)).to(mu.dtype)
+            return torch.nn.functional.mse_loss(mu_valid, torch.zeros_like(mu_valid)).to(mu.dtype)
         # Compute KL divergence in fp32 for numerical stability with fp16
         mu_valid = mu[~padding_mask].float()
         logvar_valid = logvar[~padding_mask].float()
@@ -88,7 +88,7 @@ class SigmaVAEEncoder(nn.Module):
 
     def _resize_padding_mask(self, padding_mask: torch.BoolTensor, target_length: int) -> torch.BoolTensor:
         padding_mask = (
-            F.interpolate(
+            torch.nn.functional.interpolate(
                 padding_mask.unsqueeze(1).float(),
                 size=target_length,
                 mode="linear",
@@ -146,7 +146,7 @@ class TimeCausalConv2d(nn.Conv2d):
     def forward(self, x):  # x: [B, C, T, F]
         t_left = (self.kt - 1) * self.dt  # causal time pad (left only)
         f_left, f_right = self._same_freq_pad(x.shape[-1])
-        x = F.pad(x, (f_left, f_right, t_left, 0))
+        x = torch.nn.functional.pad(x, (f_left, f_right, t_left, 0))
         return super().forward(x)
 
 
@@ -257,7 +257,8 @@ class ConvformerEncoder(SigmaVAEEncoder):
         latent_dim = config.latent_dim
         n_residual_blocks = config.n_residual_blocks
 
-        assert compress_factor_C >= 1 and (compress_factor_C & (compress_factor_C - 1)) == 0, "C must be power of 2"
+        assert (compress_factor_C & (compress_factor_C - 1)) == 0, "C must be power of 2"
+
         self.C = compress_factor_C
         self.in_freq_proj = nn.Linear(100, 100)
 
@@ -297,17 +298,36 @@ class ConvformerEncoder(SigmaVAEEncoder):
         if config.logvar_layer:
             self.logvar = nn.Linear(512, latent_dim)
 
-        self.semantic_embeddings = nn.Embedding(num_embeddings=16384, embedding_dim=512)
+        self.semantic_embeddings = nn.Embedding(num_embeddings=16384 + 1, embedding_dim=latent_dim)
+        self.semantic_embeddings_proj = nn.Linear(latent_dim, 512)
+        self.padding_embedding = nn.Parameter(torch.randn(512))
 
-    def collapse_frame(self, latent_frames: torch.FloatTensor, batch_durations: torch.LongTensor) -> torch.FloatTensor:
+    def collapse_frame(self, latent_frames: torch.FloatTensor, durations: torch.LongTensor) -> torch.FloatTensor:
         # get the mean value of latent_frames based on the durations
         batch_collapsed_frames = []
-        for durations in batch_durations:
+        assert latent_frames.shape[0] == durations.shape[0], "number of latent frames and durations must match"
+        for batch_idx in range(latent_frames.shape[0]):
             collapsed_frames = []
-            for duration in durations:
-                collapsed_frames.append(latent_frames[batch_idx, duration : duration + 1].mean(dim=0))
-            batch_collapsed_frames.append(torch.cat(collapsed_frames, dim=0))
+            latent_sequence = latent_frames[batch_idx]
+            cumulative_duration = 0
+            for duration in durations[batch_idx]:
+                if duration and cumulative_duration < latent_sequence.shape[0]:
+                    latent_slice = latent_sequence[cumulative_duration : cumulative_duration + duration]
+                else:
+                    latent_slice = self.padding_embedding.unsqueeze(0).to(
+                        device=latent_sequence.device, dtype=latent_sequence.dtype
+                    )
+                collapsed_frames.append(latent_slice.mean(dim=0))
+                cumulative_duration += duration
+            batch_collapsed_frames.append(torch.stack(collapsed_frames))
         return torch.stack(batch_collapsed_frames)
+
+    def pad_semantic_guidance(self, semantic_guidance: List[torch.LongTensor]) -> torch.LongTensor:
+        max_length = max(len(guidance) for guidance in semantic_guidance)
+        padded_semantic_guidance = []
+        for guidance in semantic_guidance:
+            padded_semantic_guidance.append(torch.nn.functional.pad(guidance, (0, max_length - len(guidance), 0, 0)))
+        return torch.stack(padded_semantic_guidance)
 
     def forward(
         self,
@@ -317,42 +337,57 @@ class ConvformerEncoder(SigmaVAEEncoder):
         **kwargs,
     ):  # x: [B, T, 100]
         B, T, F = x.shape
+        assert not torch.isnan(x).any(), "x contains nan before in_freq_proj"
         x = self.in_freq_proj(x)
+        assert not torch.isnan(x).any(), "x contains nan after in_freq_proj"
+
         x = x.unsqueeze(1)  # [B, 1, T, 100]
         x = self.in_proj(x)  # [B, 32, T, 100]
+        assert not torch.isnan(x).any(), "x contains nan after in_proj"
 
         # Three dilated causal blocks; end with [B, 512, T, 64]
         x = self.freq_mixer(x)  # [B, 512, T, 64]
+        assert not torch.isnan(x).any(), "x contains nan after freq_mixer"
 
         # Downsampling blocks
         for layer in self.downsampling.values():
             x = layer(x)
 
+        assert not torch.isnan(x).any(), "x contains nan after downsampling"
+
         # Collapse frequency 4 -> 1 without changing channels
         x = self.freq_collapse(x).squeeze(-1)  # [B, 512, T/C]
+        assert not torch.isnan(x).any(), "x contains nan after freq_collapse"
 
         # Flatten freq to tokens and run causal Transformer
         hiddens = x.transpose(1, 2)  # [B, T/C, 512]
         z = self.transformer(hiddens)  # [B, T/C, 512]
 
+        semantic_loss = None
         if hubert_guidance is not None:
             assert (
                 kwargs.get("semantic_guidance", None) is None
             ), "semantic_guidance and hubert_guidance cannot be used together"
-            z = self.collapse_frame(z, semantic_guidance.durations)
-            semantic_embeddings = self.semantic_embeddings(semantic_guidance.semantic_ids)
-            semantic_loss = F.mse_loss(
+            hubert_guidance.durations = hubert_guidance.durations // (self.C // 2)
+            assert not torch.isnan(z).any(), "z contains nan before collapsing frame"
+            z = self.collapse_frame(z, hubert_guidance.durations)
+            assert not torch.isnan(z).any(), "z contains nan after collapsing frame"
+            semantic_embeddings = self.semantic_embeddings(hubert_guidance.semantic_ids.to(z.device))
+            hubert_guidance.semantic_embeddings = semantic_embeddings
+            semantic_embeddings = self.semantic_embeddings_proj(semantic_embeddings)
+            semantic_loss = torch.nn.functional.mse_loss(
                 semantic_embeddings, z.detach()
             )  # loss here shuold not backpropagate to the encoder features
             z = z - semantic_embeddings  # remove the semantic embeddings from the latent features
+            assert not torch.isnan(z).any(), "z contains nan after semantic embedding"
 
         mu = self.mu(z)
         logvar = None
         if hasattr(self, "logvar"):
             logvar = self.logvar(z)
         z = self.reparameterize(mu, logvar)
+        assert not torch.isnan(z).any(), "z contains nan after reparameterization"
 
-        semantic_loss = None
         if kwargs.get("semantic_guidance", None) is not None:
             semantic_loss = self.semantic_regulator(
                 target=z,
@@ -373,6 +408,7 @@ class ConvformerEncoder(SigmaVAEEncoder):
             padding_mask=self._resize_padding_mask(padding_mask, mu.shape[1]),
             mu=mu,
             semantic_loss=semantic_loss,
+            hubert_guidance=hubert_guidance,
         )
 
 

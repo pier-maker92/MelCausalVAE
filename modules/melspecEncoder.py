@@ -12,7 +12,7 @@ from torchaudio.transforms import MelSpectrogram
 @dataclass
 class MelSpectrogramConfig:
     mel_channels: int = 100
-    sampling_rate: int = 16000 #FIXME handle this in config
+    sampling_rate: int = 24000  # FIXME handle this in config
     n_fft: int = 1024
     hop_length: int = 256
     n_mels: int = 100

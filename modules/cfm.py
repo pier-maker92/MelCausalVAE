@@ -97,6 +97,13 @@ class DiT(torch.nn.Module):
         self.context_vector_proj = nn.Sequential(
             nn.Linear(self.audio_latent_dim, self.unet_dim), nn.LayerNorm(self.unet_dim)
         )
+        # hubert norm
+        self.hubert_norm = nn.LayerNorm(self.audio_latent_dim)
+        # hubert + context projection
+        self.hubert_and_context_proj = nn.Sequential(
+            nn.Linear(self.audio_latent_dim + self.audio_latent_dim, self.audio_latent_dim),
+            nn.LayerNorm(self.audio_latent_dim),
+        )
         # noise projection
         if self.learned_prior:
             self.noise_proj = nn.Sequential(nn.Linear(self.unet_dim, self.unet_dim), nn.LayerNorm(self.unet_dim))
@@ -141,9 +148,34 @@ class DiT(torch.nn.Module):
         temperature: Optional[float] = None,
         generator: Optional[torch.Generator] = None,
         std: Optional[float] = None,
+        hubert_guidance: Optional = None,
     ):
-        context_vector = self.reparameterize(context_vector, std=std)
-        context_vector = context_vector.repeat_interleave(self.expansion_factor, dim=1)
+        # context_vector = self.reparameterize(context_vector, std=std)
+        if hubert_guidance is None:
+            context_vector = context_vector.repeat_interleave(self.expansion_factor, dim=1)
+        else:
+            durations = hubert_guidance.durations * self.expansion_factor
+            assert (
+                context_vector.shape[0] == hubert_guidance.semantic_embeddings.shape[0] == durations.shape[0]
+            ), "number of context vectors and semantic embeddings and durations must match"
+            assert (
+                context_vector.shape[1] == hubert_guidance.semantic_embeddings.shape[1] == durations.shape[1]
+            ), "time dimension must match"
+            context_vector = self.hubert_and_context_proj(
+                torch.cat([context_vector, self.hubert_norm(hubert_guidance.semantic_embeddings)], dim=-1)
+            )
+            context_vector_batch = []
+            for barch_idx in range(context_vector.shape[0]):
+                duration_sequence = durations[barch_idx]
+                context_vector_sequence = []
+                for idx, duration in enumerate(duration_sequence):
+                    if duration:
+                        context_vector_sequence.append(context_vector[barch_idx][idx].repeat(duration, 1))
+                    else:
+                        context_vector_sequence.append(torch.zeros_like(context_vector[barch_idx][:1]))
+                context_vector_batch.append(torch.cat(context_vector_sequence, dim=0))
+            # pad the context vector sequence to the same length using orch.nn.utils.rnn.pad_sequence
+            context_vector = torch.nn.utils.rnn.pad_sequence(context_vector_batch, batch_first=True, padding_value=0)
         if target is not None:
             min_length = min(context_vector.shape[1], target.shape[1])
             context_vector = context_vector[:, :min_length, :]
@@ -164,7 +196,7 @@ class DiT(torch.nn.Module):
                 )
                 * temperature
             )
-        return self.context_vector_proj(context_vector), prior
+        return self.context_vector_proj(context_vector), prior, target
 
     def prepare_flow(
         self,
@@ -224,7 +256,10 @@ class DiT(torch.nn.Module):
         context_vector: torch.FloatTensor,
         **kwargs,
     ):
-        context_vector, prior = self.handle_context_vector(context_vector, target)
+        assert not torch.isnan(context_vector).any(), "context vector contains nan"
+        context_vector, prior, target = self.handle_context_vector(
+            context_vector, target, hubert_guidance=kwargs.get("hubert_guidance", None)
+        )
 
         # ---- flow ----
         state, times, v_target = self.prepare_flow(
@@ -232,6 +267,7 @@ class DiT(torch.nn.Module):
             context_vector=context_vector,
             x0=prior,
         )
+        target_padding_mask = target_padding_mask[:, : target.shape[1]]
 
         # ---- get the flow ----
         loss = self.let_it_flow(times=times, state=state, target=v_target, flow_mask=target_padding_mask)

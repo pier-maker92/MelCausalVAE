@@ -8,32 +8,32 @@ training:
   wandb_project: convformer-cfm
   wandb_run_name: variable-rate-training-librispeech100h
   fp16: false
-  bf16: false
+  bf16: true
   save_steps: 1000
   eval_strategy: "no"
   eval_steps: 1000
   save_total_limit: 1
-  gradient_accumulation_steps: 2
+  gradient_accumulation_steps: 10
   dataloader_num_workers: 4
   #from_pretrained: /home/ec2-user/checkpoints/MelCausalVAE/setting3/checkpoint-16000/model.safetensors
   #resume_from_checkpoint: checkpoints/MelCausalVAE/setting5/checkpoint-1000
 
 convformer:
   compress_factor_C: 2
-  tf_heads: 8
+  tf_heads: 4
   tf_layers: 4
   latent_dim: 64
-  n_residual_blocks: 3
-  logvar_layer: false
+  n_residual_blocks: 1
+  logvar_layer: true
   use_sofplus: false
   target_std: 1.0
   kl_loss_warmup_steps: 100
-  kl_loss_weight: 1e-3
+  kl_loss_weight: 1e-2
 
 cfm:
-  unet_dim: 1024
-  unet_depth: 8
-  unet_heads: 16
+  unet_dim: 256
+  unet_depth: 4
+  unet_heads: 8
   unet_dropout_rate: 0.1
   use_conv_layer: true
   audio_latent_dim: 64

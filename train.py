@@ -72,12 +72,13 @@ class VAEtrainer(Trainer):
         """Compute the loss for the VAE"""
         if hasattr(self.control, "granular_losses") and model.training:
             audios_srs = inputs["output_audios_srs"]
-            units = inputs.get("audio_codes", None)
+            hubert_guidance = inputs.get("hubert_guidance", None)
+
             # Forward pass
             outputs = model(
                 audios_srs=audios_srs,
                 training_step=self.state.global_step,
-                units=units,
+                hubert_guidance=hubert_guidance,
             )
             audio_loss = outputs.audio_loss
             kl_loss = outputs.kl_loss
@@ -128,7 +129,9 @@ class VAEtrainer(Trainer):
             loss = audio_loss + kl_loss + (semantic_loss if semantic_loss is not None else 0.0)
             return (loss, outputs) if return_outputs else loss
 
-    def _maybe_log_save_evaluate(self, tr_loss, grad_norm, model, trial, epoch, ignore_keys_for_eval):
+    def _maybe_log_save_evaluate(
+        self, tr_loss, grad_norm, model, trial, epoch, ignore_keys_for_eval, start_time, learning_rate=None
+    ):
         if self.control.should_log and self.state.global_step > self._globalstep_last_logged:
 
             logs: Dict[str, float] = {}
@@ -166,7 +169,7 @@ class VAEtrainer(Trainer):
             self._globalstep_last_logged = self.state.global_step
             self.store_flos()
 
-            self.log(logs)
+            self.log(logs, start_time=start_time)
 
         metrics = None
         if self.control.should_evaluate:
@@ -434,13 +437,11 @@ def main():
     encoder_config = ConvformerEncoderConfig(**convformer_cfg)
     # Create model
     logger.info("Creating VAE model...")
-    add_hubert_guidance = training_cfg.pop("add_hubert_guidance", False)
     model = VAE(
         config=VAEConfig(
             encoder_config=encoder_config,
             decoder_config=decoder_config,
             mel_spec_config=MelSpectrogramConfig(),
-            add_hubert_guidance=add_hubert_guidance,
         ),
         dtype=dtype,
     )

@@ -20,7 +20,6 @@ training:
   wandb_project: convformer-mel-vae-warmup
   wandb_run_name: null
   lr_scheduler_type: "cosine"
-  max_grad_norm: 0.2
   bf16: true
   fp16: false
   resume_from_checkpoint: null
