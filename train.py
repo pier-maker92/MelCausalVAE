@@ -177,7 +177,10 @@ class VAEtrainer(Trainer):
             self._report_to_hp_search(trial, self.state.global_step, metrics)
 
         if self.control.should_save:
-            self._save_checkpoint(model, trial, metrics=metrics)
+            self._save_checkpoint(
+                model,
+                trial,
+            )  # metrics=metrics
             self.control = self.callback_handler.on_save(self.args, self.state, self.control)
 
     def evaluate(
@@ -221,7 +224,7 @@ class VAEtrainer(Trainer):
                 audios_srs=audios_srs,
                 num_steps=8,
                 temperature=1.0,
-                guidance_scale=1.5,
+                guidance_scale=1.0,
                 hubert_guidance=hubert_guidance,
             )
         # Create visualizations
