@@ -213,72 +213,71 @@ class VAEtrainer(Trainer):
                 audios_srs = batch["output_audios_srs"]
                 audios_srs = [(audio.to(self.args.device).to(torch.bfloat16), sr) for audio, sr in audios_srs]
                 break
+        hubert_guidance = batch.get("hubert_guidance", None)
+
         # Generate reconstructions
-        try:
-            with torch.no_grad():
-                results = self.model.encode_and_sample(
-                    audios_srs=audios_srs,
-                    num_steps=8,
-                    temperature=1.0,
-                    guidance_scale=1.5,
+        with torch.no_grad():
+            results = self.model.encode_and_sample(
+                audios_srs=audios_srs,
+                num_steps=8,
+                temperature=1.0,
+                guidance_scale=1.5,
+                hubert_guidance=hubert_guidance,
+            )
+        # Create visualizations
+        images = []
+        # Resolve device id safely for distributed/non-distributed
+        device_id = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+
+        audios = []
+        audio_paths = []
+        for idx in range(len(audios_srs)):
+            fig = self._create_mel_comparison_plot(
+                original=results["original_mel"][idx],
+                reconstructed=results["reconstructed_mel"][idx],
+                padding_mask=results["padding_mask"][idx],
+                sample_idx=idx,
+                device_id=device_id,
+            )
+
+            # Convert matplotlib figure to wandb Image
+            images.append(
+                wandb.Image(fig, caption=f"Sample {idx} - Step {self.state.global_step} - Device {device_id}")
+            )
+            plt.close(fig)
+
+            # Decode reconstructed mel to audio with Vocos
+            mel = results["reconstructed_mel"][idx]  # [T, F]
+            pad_mask = results["padding_mask"][idx]  # [T]
+            valid_mel = mel[: (~pad_mask).sum()]
+
+            # Shape for Vocos: [B, F, T]
+            features = valid_mel.unsqueeze(0).permute(0, 2, 1).to(torch.bfloat16).to(self.args.device)
+            waveform = vocos.decode(features)  # [1, samples]
+            waveform = waveform.float().squeeze(0).detach().cpu()
+            # normalize waveform to -1 to 1
+            waveform = waveform / (waveform.abs().max() + 1e-8)
+            sr = audios_srs[idx][1]
+            # Log as wandb audio as well
+            audios.append(
+                wandb.Audio(
+                    waveform.numpy(),
+                    sample_rate=sr,
+                    caption=f"Sample {idx} - Step {self.state.global_step} - Device {device_id}",
                 )
-            # Create visualizations
-            images = []
-            # Resolve device id safely for distributed/non-distributed
-            device_id = torch.distributed.get_rank()
+            )
 
-            audios = []
-            audio_paths = []
-            for idx in range(len(audios_srs)):
-                fig = self._create_mel_comparison_plot(
-                    original=results["original_mel"][idx],
-                    reconstructed=results["reconstructed_mel"][idx],
-                    padding_mask=results["padding_mask"][idx],
-                    sample_idx=idx,
-                    device_id=device_id,
-                )
-
-                # Convert matplotlib figure to wandb Image
-                images.append(
-                    wandb.Image(fig, caption=f"Sample {idx} - Step {self.state.global_step} - Device {device_id}")
-                )
-                plt.close(fig)
-
-                # Decode reconstructed mel to audio with Vocos
-                mel = results["reconstructed_mel"][idx]  # [T, F]
-                pad_mask = results["padding_mask"][idx]  # [T]
-                valid_mel = mel[: (~pad_mask).sum()]
-
-                # Shape for Vocos: [B, F, T]
-                features = valid_mel.unsqueeze(0).permute(0, 2, 1).to(torch.bfloat16).to(self.args.device)
-                waveform = vocos.decode(features)  # [1, samples]
-                waveform = waveform.float().squeeze(0).detach().cpu()
-                # normalize waveform to -1 to 1
-                waveform = waveform / (waveform.abs().max() + 1e-8)
-                sr = audios_srs[idx][1]
-                # Log as wandb audio as well
-                audios.append(
-                    wandb.Audio(
-                        waveform.numpy(),
-                        sample_rate=sr,
-                        caption=f"Sample {idx} - Step {self.state.global_step} - Device {device_id}",
-                    )
-                )
-
-            # Log to wandb as a gallery
-            if wandb.run is not None:
-                wandb.log(
-                    {
-                        "reconstructions": images,
-                        "reconstructions_audio": audios,
-                        "reconstructions_audio_paths": audio_paths,
-                        "step": self.state.global_step,
-                    }
-                )
-                logger.info(f"Successfully logged {len(images)} reconstruction samples to wandb")
-
-        except Exception as e:
-            logger.error(f"Failed to generate samples: {e}", exc_info=True)
+        # Log to wandb as a gallery
+        if wandb.run is not None:
+            wandb.log(
+                {
+                    "reconstructions": images,
+                    "reconstructions_audio": audios,
+                    "reconstructions_audio_paths": audio_paths,
+                    "step": self.state.global_step,
+                }
+            )
+            logger.info(f"Successfully logged {len(images)} reconstruction samples to wandb")
 
     def _create_mel_comparison_plot(
         self,
@@ -418,7 +417,7 @@ def main():
     else:
         raise ValueError(f"Dataset {dataset_name} not supported")
     train_dataset = TrainDatasetWrapper(dataset, "train")
-    test_dataset = None  # HubertDatasetWrapper(dataset, "test")
+    test_dataset = TrainDatasetWrapper(dataset, "test")
 
     # handle wandb - only initialize on main process (rank 0)
     wandb_project = training_cfg.pop("wandb_project", None)

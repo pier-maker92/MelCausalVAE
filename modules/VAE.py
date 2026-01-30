@@ -96,7 +96,7 @@ class VAE(torch.nn.Module):
 
     def forward(self, audios_srs, **kwargs):
         encoded_audios = self.wav2mel(audios_srs)
-        semantic_output, hubert_guidance = None, None
+        semantic_output = None
         if self.config.add_semantic_distillation:
             semantic_output = self.semantic_module(audios_srs)
 
@@ -193,6 +193,7 @@ class VAE(torch.nn.Module):
         temperature: float = 1.0,
         guidance_scale: float = 1.0,
         generator: Optional[torch.Generator] = None,
+        hubert_guidance: Optional[torch.Tensor] = None,
     ):
         """
         Encode audio to latent space and generate mel spectrogram.
@@ -207,16 +208,18 @@ class VAE(torch.nn.Module):
             x=original_mel,
             padding_mask=encoded_audios.padding_mask,
             step=None,
+            hubert_guidance=hubert_guidance,
         )
 
         # Generate mel spectrogram from latent
         reconstructed_mel = self.decoder.generate(
             num_steps=num_steps,
-            context_vector=convformer_output.mu,  # z
+            context_vector=convformer_output.z,  # z
             temperature=temperature,
             guidance_scale=guidance_scale,
             generator=generator,
             padding_mask=convformer_output.padding_mask,
+            hubert_guidance=convformer_output.hubert_guidance,
         )
         if self.config.mel_spec_config.normalize:
             original_mel = self.denormalize_mel(original_mel)

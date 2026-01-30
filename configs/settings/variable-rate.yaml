@@ -1,17 +1,17 @@
 training:
   dataset_name: librispeech100h
   output_dir: checkpoints/MelCausalVAE/variable-rate # variable rate training
-  num_train_epochs: 2
+  num_train_epochs: 1
   learning_rate: 1e-4
   per_device_train_batch_size: 2
-  report_to: none
+  report_to: wandb
   wandb_project: convformer-cfm
   wandb_run_name: variable-rate-training-librispeech100h
   fp16: false
   bf16: true
   save_steps: 1000
-  eval_strategy: "no"
-  eval_steps: 1000
+  eval_strategy: "steps"
+  eval_steps: 10
   save_total_limit: 1
   gradient_accumulation_steps: 10
   dataloader_num_workers: 4

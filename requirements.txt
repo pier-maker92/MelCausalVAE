@@ -8,6 +8,7 @@ torchdiffeq
 beartype
 safetensors
 transformers[torch]
+torchvision==0.23.0
 torchcodec==0.7
 deepspeed==0.18.4
 numpy==1.26.4
