@@ -276,8 +276,10 @@ class ConvformerEncoder(SigmaVAEEncoder):
         # ds2: time /2, freq /4, channels 512 -> 256
         self.downsampling = nn.ModuleDict(
             {
-                "downsample@2": CausalDownsamplingBlock(256, 512, n_residual_blocks=n_residual_blocks, drop_p=drop_p),
-                "downsample@4": CausalDownsamplingBlock(512, 512, n_residual_blocks=n_residual_blocks, drop_p=drop_p),
+                "downsample@2": CausalDownsamplingBlock(
+                    256, 512, n_residual_blocks=n_residual_blocks, compress_freq=16, drop_p=drop_p
+                ),
+                # "downsample@4": CausalDownsamplingBlock(512, 512, n_residual_blocks=n_residual_blocks, drop_p=drop_p),
             }
         )
         # Extra temporal downsampling to reach T/C (sf=1), keeping channels at 512
@@ -368,7 +370,6 @@ class ConvformerEncoder(SigmaVAEEncoder):
             assert (
                 kwargs.get("semantic_guidance", None) is None
             ), "semantic_guidance and hubert_guidance cannot be used together"
-            hubert_guidance.durations = hubert_guidance.durations // (self.C // 2)
             assert not torch.isnan(z).any(), "z contains nan before collapsing frame"
             z = self.collapse_frame(z, hubert_guidance.durations)
             assert not torch.isnan(z).any(), "z contains nan after collapsing frame"

@@ -56,10 +56,10 @@ class VAE(torch.nn.Module):
         super().__init__()
         self.config = config
         self.decoder = DiT(config.decoder_config)
-        if config.encoder_config.compress_factor_C < 4:
-            print(f"WARNING: compress_factor_C is less than 4, but the minimum downsampling factor is 4")
-            print(f"Setting compress_factor_C to 4")
-            config.encoder_config.compress_factor_C = 4
+        # if config.encoder_config.compress_factor_C < 4:
+        #     print(f"WARNING: compress_factor_C is less than 4, but the minimum downsampling factor is 4")
+        #     print(f"Setting compress_factor_C to 4")
+        #     config.encoder_config.compress_factor_C = 4
         self.encoder = ConvformerEncoder(config.encoder_config)
         self.wav2mel = MelSpectrogramEncoder(config.mel_spec_config)
         if config.add_semantic_distillation:
