@@ -223,8 +223,8 @@ class VAEtrainer(Trainer):
             results = self.model.encode_and_sample(
                 audios_srs=audios_srs,
                 num_steps=8,
-                temperature=1.0,
-                guidance_scale=1.0,
+                temperature=0.3,
+                guidance_scale=1.5,
                 hubert_guidance=hubert_guidance,
             )
         # Create visualizations
@@ -267,6 +267,20 @@ class VAEtrainer(Trainer):
                     waveform.numpy(),
                     sample_rate=sr,
                     caption=f"Sample {idx} - Step {self.state.global_step} - Device {device_id}",
+                )
+            )
+            # now original audio decoded with Vocos
+            original_mel = results["original_mel"][idx]
+            original_mel = original_mel[: (~pad_mask).sum()]
+            original_mel = original_mel.unsqueeze(0).permute(0, 2, 1).to(torch.bfloat16).to(self.args.device)
+            original_waveform = vocos.decode(original_mel)
+            original_waveform = original_waveform.float().squeeze(0).detach().cpu()
+            original_waveform = original_waveform / (original_waveform.abs().max() + 1e-8)
+            audios.append(
+                wandb.Audio(
+                    original_waveform.numpy(),
+                    sample_rate=sr,
+                    caption=f"Original Audio - Sample {idx} - Step {self.state.global_step} - Device {device_id}",
                 )
             )
 

@@ -42,7 +42,7 @@ class SimpleAudioDataset(Dataset):
 
     def _process_audio_output(self, data_dict, audio_data, target_sr=24000):
         audio_output, sr_output = self._process_audio_component(
-            audio_data, target_sr=target_sr, max_duration=1  # FIXME hardcoded duration
+            audio_data, target_sr=target_sr, max_duration=None  # FIXME hardcoded duration
         )
         data_dict.update({"audio_output": [audio_output], "audio_output_sr": [sr_output]})
 
@@ -127,7 +127,7 @@ class DataCollator(object):
                 batch_first=True,
                 padding_value=0,
             )
-            batch["hubert_guidance"] = BPEOutput(semantic_ids=tokenized_units, durations=tokenized_units_durations)
+            #batch["hubert_guidance"] = BPEOutput(semantic_ids=tokenized_units, durations=tokenized_units_durations)
         return batch
 
 
@@ -150,7 +150,7 @@ class TrainDatasetWrapper(SimpleAudioDataset):
         data_dict["language"] = data.get("language", "en")
         # FIXME creating this monstrosity to test the padding system with a A10 gpu of only 16 GB
         limit = 50
-        data_dict["units"] = data.get("audio_codes", None)[:limit]
+        data_dict["units"] = data.get("audio_codes", None)#[:limit]
         audio_codes, durations = self.tokenizer.encode(data_dict["units"])
         data_dict["tokenized_units"] = audio_codes
         data_dict["tokenized_units_durations"] = durations

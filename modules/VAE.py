@@ -107,15 +107,16 @@ class VAE(torch.nn.Module):
             semantic_guidance=semantic_output,
             hubert_guidance=kwargs.get("hubert_guidance", None),
         )
+        context_vector = convformer_output.z #if not self.encoder.config.logvar_layer else convformer_output.z
 
         audio_loss = self.decoder(
             target=encoded_audios.audio_features,
             target_padding_mask=encoded_audios.padding_mask,
-            context_vector=convformer_output.z,  # z
+            context_vector=context_vector,
             hubert_guidance=convformer_output.hubert_guidance,
         ).loss
-        mu_mean = convformer_output.z[~convformer_output.padding_mask].mean()
-        mu_var = convformer_output.z[~convformer_output.padding_mask].var()
+        mu_mean = context_vector[~convformer_output.padding_mask].mean()
+        mu_var = context_vector[~convformer_output.padding_mask].var()
         return VAEOutput(
             audio_loss=audio_loss,
             kl_loss=convformer_output.kl_loss,
@@ -210,11 +211,11 @@ class VAE(torch.nn.Module):
             step=None,
             hubert_guidance=hubert_guidance,
         )
-
+        context_vector = convformer_output.z # if not self.encoder.config.logvar_layer else convformer_output.z
         # Generate mel spectrogram from latent
         reconstructed_mel = self.decoder.generate(
             num_steps=num_steps,
-            context_vector=convformer_output.z,  # z
+            context_vector=context_vector,
             temperature=temperature,
             guidance_scale=guidance_scale,
             generator=generator,
@@ -228,6 +229,6 @@ class VAE(torch.nn.Module):
         return {
             "original_mel": original_mel,
             "reconstructed_mel": reconstructed_mel,
-            "context_vector": convformer_output.z,
+            "context_vector": context_vector,
             "padding_mask": encoded_audios.padding_mask,
         }

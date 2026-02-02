@@ -168,19 +168,19 @@ class DiT(torch.nn.Module):
             context_vector_batch = []
             if padding_mask is not None:
                 padding_mask_batch = []
-            for barch_idx in range(context_vector.shape[0]):
-                duration_sequence = durations[barch_idx]
+            for batch_idx in range(context_vector.shape[0]):
+                duration_sequence = durations[batch_idx]
                 context_vector_sequence = []
                 padding_mask_sequence = []
                 for idx, duration in enumerate(duration_sequence):
                     if duration:
-                        context_vector_sequence.append(context_vector[barch_idx][idx].repeat(duration, 1))
+                        context_vector_sequence.append(context_vector[batch_idx][idx].repeat(duration, 1))
                         if padding_mask is not None:
-                            padding_mask_sequence.append(padding_mask[barch_idx][idx].repeat(duration))
+                            padding_mask_sequence.append(padding_mask[batch_idx][idx].repeat(duration))
                     else:
-                        context_vector_sequence.append(torch.zeros_like(context_vector[barch_idx][:1]))
+                        context_vector_sequence.append(torch.zeros_like(context_vector[batch_idx][:1]))
                         if padding_mask is not None:
-                            padding_mask_sequence.append(torch.ones_like(padding_mask[barch_idx][:1]))
+                            padding_mask_sequence.append(torch.ones_like(padding_mask[batch_idx][:1]))
 
                 context_vector_batch.append(torch.cat(context_vector_sequence, dim=0))
                 if padding_mask is not None:
@@ -212,6 +212,7 @@ class DiT(torch.nn.Module):
                 * temperature
             )
         return self.context_vector_proj(context_vector), prior, target, padding_mask
+        # context vector projection contains layer norm
 
     def prepare_flow(
         self,
@@ -311,7 +312,7 @@ class DiT(torch.nn.Module):
             context_vector,
             temperature=temperature,
             generator=generator,
-            std=std,
+            std=0.0,#std,
             hubert_guidance=hubert_guidance,
             padding_mask=padding_mask,
         )
@@ -327,7 +328,7 @@ class DiT(torch.nn.Module):
                 raise ValueError("Padding mask is required for batch size > 1")
         else:
             pass
-            # padding_mask = padding_mask.repeat_interleave(self.expansion_factor, dim=1)
+            padding_mask = padding_mask.repeat_interleave(self.expansion_factor, dim=1)
         self.transformer.to(device=context_vector.device, dtype=context_vector.dtype)
 
         # ---- time span ----
