@@ -93,7 +93,6 @@ class DiT(torch.nn.Module):
         self.learned_prior = config.learned_prior
         self.is_causal = config.is_causal
         print(f"VAE is_causal: {self.is_causal}")
-        # context vector projection
         self.context_vector_proj = nn.Sequential(
             nn.Linear(self.audio_latent_dim, self.unet_dim), nn.LayerNorm(self.unet_dim)
         )
@@ -106,7 +105,10 @@ class DiT(torch.nn.Module):
         )
         # noise projection
         if self.learned_prior:
-            self.noise_proj = nn.Sequential(nn.Linear(self.unet_dim, self.unet_dim), nn.LayerNorm(self.unet_dim))
+            self.noise_proj = nn.Sequential(
+                nn.Linear(self.mel_channels, self.unet_dim),
+                nn.LayerNorm(self.unet_dim),
+            )
             self.prior_proj = nn.Sequential(
                 nn.Linear(self.audio_latent_dim, self.mel_channels), nn.LayerNorm(self.mel_channels)
             )
@@ -145,13 +147,9 @@ class DiT(torch.nn.Module):
         self,
         context_vector: torch.FloatTensor,
         target: Optional[torch.FloatTensor] = None,
-        temperature: Optional[float] = None,
-        generator: Optional[torch.Generator] = None,
-        std: Optional[float] = None,
         hubert_guidance: Optional = None,
         padding_mask: Optional[torch.BoolTensor] = None,
     ):
-        # context_vector = self.reparameterize(context_vector, std=std)
         if hubert_guidance is None:
             context_vector = context_vector.repeat_interleave(self.expansion_factor, dim=1)
         else:
@@ -197,28 +195,16 @@ class DiT(torch.nn.Module):
             target = target[:, :min_length, :]
 
         if self.learned_prior:
-            raise ValueError("Learned prior is not supported")
+            context_vector = self.prior_proj(context_vector)
         else:
-            temperature = temperature or 1.0
-            prior = (
-                torch.randn(
-                    context_vector.shape[0],
-                    context_vector.shape[1],
-                    self.mel_channels,
-                    dtype=context_vector.dtype,
-                    device=context_vector.device,
-                    generator=generator,
-                )
-                * temperature
-            )
-        return self.context_vector_proj(context_vector), prior, target, padding_mask
-        # context vector projection contains layer norm
+            context_vector = self.context_vector_proj(context_vector)
+
+        return context_vector, target, padding_mask
 
     def prepare_flow(
         self,
         target: torch.FloatTensor,
         context_vector: torch.FloatTensor,
-        x0: torch.FloatTensor,
     ):
         if random.random() < self.uncond_prob:
             if self.learned_prior:
@@ -234,13 +220,19 @@ class DiT(torch.nn.Module):
         )
         t = rearrange(times, "b -> b 1 1")
         # Now we need noise, x0 sampled from a normal distribution
-        x0 = torch.randn_like(target)
+        if self.learned_prior:
+            x0 = context_vector
+        else:
+            x0 = torch.randn_like(target)
         # w is the noise signal that is transformed by the flow
         w = (1 - (1 - self.sigma) * t) * x0 + t * target
         # target is the original signal minus the noise
         target = target - (1 - self.sigma) * x0
 
-        state = self.noise_proj(torch.cat([context_vector, w], dim=-1))
+        if not self.learned_prior:
+            state = self.noise_proj(torch.cat([context_vector, w], dim=-1))
+        else:
+            state = self.noise_proj(w)
         return state, times, target
 
     def let_it_flow(
@@ -273,7 +265,7 @@ class DiT(torch.nn.Module):
         **kwargs,
     ):
         assert not torch.isnan(context_vector).any(), "context vector contains nan"
-        context_vector, prior, target, target_padding_mask = self.handle_context_vector(
+        context_vector, target, target_padding_mask = self.handle_context_vector(
             context_vector,
             target,
             hubert_guidance=kwargs.get("hubert_guidance", None),
@@ -284,7 +276,6 @@ class DiT(torch.nn.Module):
         state, times, v_target = self.prepare_flow(
             target=target,
             context_vector=context_vector,
-            x0=prior,
         )
         target_padding_mask = target_padding_mask[:, : target.shape[1]]
 
@@ -308,14 +299,26 @@ class DiT(torch.nn.Module):
     ):
         cfg_scale = guidance_scale
         # ---- context vector z ----
-        context_vector, y0, _, padding_mask = self.handle_context_vector(
+        context_vector, _, padding_mask = self.handle_context_vector(
             context_vector,
-            temperature=temperature,
-            generator=generator,
-            std=0.0,#std,
             hubert_guidance=hubert_guidance,
             padding_mask=padding_mask,
         )
+        if self.learned_prior:
+            y0 = context_vector
+        else:
+            y0 = (
+                torch.randn(
+                    context_vector.shape[0],
+                    context_vector.shape[1],
+                    self.mel_channels,
+                    dtype=context_vector.dtype,
+                    device=context_vector.device,
+                    generator=generator,
+                )
+                * temperature
+            )
+
         B, T = context_vector.shape[:2]
         if padding_mask is None:
             if B == 1:
@@ -363,7 +366,7 @@ class DiT(torch.nn.Module):
     ):
         times = times.repeat(state.shape[0])
         cond_state = (
-            self.noise_proj(context_vector)
+            self.noise_proj(state)
             if self.learned_prior
             else self.noise_proj(torch.cat([context_vector, state], dim=-1))
         )
@@ -377,7 +380,7 @@ class DiT(torch.nn.Module):
         uncond_state = (
             self.noise_proj(torch.cat([torch.zeros_like(context_vector), state], dim=-1))
             if not self.learned_prior
-            else self.noise_proj(torch.zeros_like(context_vector))
+            else self.noise_proj(torch.randn_like(state))
         )
         uncond_out = self.transformer(
             x=uncond_state,

@@ -65,7 +65,7 @@ def get_cosine_schedule_with_warmup_and_min_lr(
     """
     # Get the initial learning rate from the optimizer at creation time
     initial_lr = optimizer.param_groups[0]["lr"]
-    
+
     def lr_lambda(current_step):
         if current_step < num_warmup_steps:
             return float(current_step) / float(max(1, num_warmup_steps))
@@ -177,15 +177,15 @@ class VAEtrainer(Trainer):
         # Check if lr_min is specified in lr_scheduler_kwargs
         lr_scheduler_kwargs = getattr(self.args, "lr_scheduler_kwargs", {}) or {}
         lr_min = lr_scheduler_kwargs.get("lr_min", None)
-        
+
         # If lr_min is specified and scheduler type is cosine, use custom scheduler
         if lr_min is not None and self.args.lr_scheduler_type == "cosine":
             if optimizer is None:
                 optimizer = self.optimizer
-            
+
             num_warmup_steps = self.args.get_warmup_steps(num_training_steps)
             num_cycles = lr_scheduler_kwargs.get("num_cycles", 0.5)
-            
+
             self.lr_scheduler = get_cosine_schedule_with_warmup_and_min_lr(
                 optimizer=optimizer,
                 num_warmup_steps=num_warmup_steps,
