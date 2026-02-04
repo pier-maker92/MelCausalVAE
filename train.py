@@ -20,6 +20,8 @@ from transformers import (
     TrainerState,
     set_seed,
 )
+from transformers.optimization import get_cosine_schedule_with_warmup
+from torch.optim.lr_scheduler import LambdaLR
 
 # data
 from data.mls import MLSDataset
@@ -35,6 +37,45 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
+
+
+def get_cosine_schedule_with_warmup_and_min_lr(
+    optimizer,
+    num_warmup_steps: int,
+    num_training_steps: int,
+    num_cycles: float = 0.5,
+    last_epoch: int = -1,
+    lr_min: float = 0.0,
+):
+    """
+    Create a schedule with a learning rate that decreases following the values of the cosine function
+    between the initial lr set in the optimizer to `lr_min`, after a warmup period during which it
+    increases linearly between 0 and the initial lr set in the optimizer.
+
+    Args:
+        optimizer: The optimizer for which to schedule the learning rate.
+        num_warmup_steps: The number of steps for the warmup phase.
+        num_training_steps: The total number of training steps.
+        num_cycles: The number of waves in the cosine schedule (default: 0.5).
+        last_epoch: The index of the last epoch when resuming training (default: -1).
+        lr_min: The minimum learning rate (default: 0.0).
+
+    Returns:
+        A LambdaLR scheduler.
+    """
+    # Get the initial learning rate from the optimizer at creation time
+    initial_lr = optimizer.param_groups[0]["lr"]
+    
+    def lr_lambda(current_step):
+        if current_step < num_warmup_steps:
+            return float(current_step) / float(max(1, num_warmup_steps))
+        progress = float(current_step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))
+        # Cosine annealing with minimum learning rate
+        cosine_value = 0.5 * (1.0 + torch.cos(torch.tensor(num_cycles * 2.0 * 3.141592653589793 * progress)))
+        # Scale cosine from [lr_min, initial_lr] instead of [0, initial_lr]
+        return (lr_min / initial_lr) + (1.0 - lr_min / initial_lr) * cosine_value
+
+    return LambdaLR(optimizer, lr_lambda, last_epoch)
 
 
 class AddGranularLossesToTrainerState(TrainerCallback):
@@ -128,6 +169,34 @@ class VAEtrainer(Trainer):
             semantic_loss = getattr(outputs, "semantic_loss", None)
             loss = audio_loss + kl_loss + (semantic_loss if semantic_loss is not None else 0.0)
             return (loss, outputs) if return_outputs else loss
+
+    def create_scheduler(self, num_training_steps: int, optimizer=None):
+        """
+        Override scheduler creation to use custom cosine scheduler with min_lr support.
+        """
+        # Check if lr_min is specified in lr_scheduler_kwargs
+        lr_scheduler_kwargs = getattr(self.args, "lr_scheduler_kwargs", {}) or {}
+        lr_min = lr_scheduler_kwargs.get("lr_min", None)
+        
+        # If lr_min is specified and scheduler type is cosine, use custom scheduler
+        if lr_min is not None and self.args.lr_scheduler_type == "cosine":
+            if optimizer is None:
+                optimizer = self.optimizer
+            
+            num_warmup_steps = self.args.get_warmup_steps(num_training_steps)
+            num_cycles = lr_scheduler_kwargs.get("num_cycles", 0.5)
+            
+            self.lr_scheduler = get_cosine_schedule_with_warmup_and_min_lr(
+                optimizer=optimizer,
+                num_warmup_steps=num_warmup_steps,
+                num_training_steps=num_training_steps,
+                num_cycles=num_cycles,
+                lr_min=float(lr_min),
+            )
+            logger.info(f"Using custom cosine scheduler with min_lr={lr_min}")
+        else:
+            # Use default scheduler creation
+            super().create_scheduler(num_training_steps, optimizer)
 
     def _maybe_log_save_evaluate(
         self, tr_loss, grad_norm, model, trial, epoch, ignore_keys_for_eval, start_time, learning_rate=None
@@ -463,6 +532,16 @@ def main():
     )
 
     training_cfg["learning_rate"] = float(training_cfg.get("learning_rate"))
+
+    # Extract min_learning_rate and set it in lr_scheduler_kwargs
+    min_learning_rate = training_cfg.pop("min_learning_rate", None)
+    if min_learning_rate is not None:
+        # Initialize lr_scheduler_kwargs if it doesn't exist
+        if "lr_scheduler_kwargs" not in training_cfg:
+            training_cfg["lr_scheduler_kwargs"] = {}
+        # Set lr_min for cosine scheduler
+        training_cfg["lr_scheduler_kwargs"]["lr_min"] = float(min_learning_rate)
+        logger.info(f"Setting minimum learning rate to {min_learning_rate} in scheduler kwargs")
 
     # Add DeepSpeed config if provided
     if args.deepspeed:

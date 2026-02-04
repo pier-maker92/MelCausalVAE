@@ -27,3 +27,4 @@ training:
   gradient_accumulation_steps: 1
   from_pretrained: null
   dataset_name: null
+  min_learning_rate: 1e-6

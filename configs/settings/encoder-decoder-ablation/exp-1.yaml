@@ -1,12 +1,12 @@
 training:
   dataset_name: librispeech100h
-  output_dir: checkpoints/MelCausalVAE/big-sigma-vae # variable rate training
-  num_train_epochs: 10
+  output_dir: checkpoints/MelCausalVAE/exp-1 # variable rate training
+  num_train_epochs: 2
   learning_rate: 1e-4
   per_device_train_batch_size: 4
   report_to: wandb
-  wandb_project: convformer-cfm
-  wandb_run_name: big-sigma-vae
+  wandb_project: flexi-vae
+  wandb_run_name: exp-1
   fp16: false
   bf16: true
   save_steps: 1000
@@ -15,6 +15,7 @@ training:
   save_total_limit: 1
   gradient_accumulation_steps: 2
   dataloader_num_workers: 4
+  min_learning_rate: 1e-5
   #from_pretrained: checkpoints/MelCausalVAE/sigma-vae/checkpoint-6000/model.safetensors
   #resume_from_checkpoint: checkpoints/MelCausalVAE/big-sigma-vae/checkpoint-13000
 
@@ -24,7 +25,7 @@ convformer:
   tf_layers: 4
   latent_dim: 64
   n_residual_blocks: 3
-  logvar_layer: false
+  logvar_layer: true
   use_sofplus: false
   target_std: 1.0
   kl_loss_warmup_steps: 100
