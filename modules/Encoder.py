@@ -7,7 +7,8 @@ import torch
 import torch.nn as nn
 from einops import rearrange
 from dataclasses import dataclass
-from typing import Optional, List
+from typing import Optional, List, Tuple
+from modules.ctc import CTC
 from modules.regulator import InterpolateRegulator
 from modules.semantic_module import SeamlessM4Tv2Encoder
 from modules.flash_attn_encoder import FlashTransformerEncoder
@@ -22,6 +23,8 @@ class ConvformerOutput:
     semantic_loss: Optional[torch.FloatTensor] = None
     semantic_features: Optional[torch.FloatTensor] = None
     hubert_guidance: Optional[torch.LongTensor] = None
+    ctc_loss: Optional[torch.FloatTensor] = None
+    ctc_boundaries: Optional[List[List[Tuple[int, int, str]]]] = None  # per batch item
 
 
 @dataclass
@@ -304,6 +307,8 @@ class ConvformerEncoder(SigmaVAEEncoder):
         self.semantic_embeddings_proj = nn.Linear(latent_dim, 512)
         self.padding_embedding = nn.Parameter(torch.randn(512))
 
+        self.ctc = CTC(input_size=512, hidden_size=512, output_size=250)
+
     def collapse_frame(self, latent_frames: torch.FloatTensor, durations: torch.LongTensor) -> torch.FloatTensor:
         # get the mean value of latent_frames based on the durations
         batch_collapsed_frames = []
@@ -336,6 +341,7 @@ class ConvformerEncoder(SigmaVAEEncoder):
         x: torch.FloatTensor,
         padding_mask: torch.BoolTensor = None,
         hubert_guidance: Optional[List[any]] = None,
+        transcriptions: Optional[List[str]] = None,
         **kwargs,
     ):  # x: [B, T, 100]
         B, T, F = x.shape
@@ -365,7 +371,20 @@ class ConvformerEncoder(SigmaVAEEncoder):
         hiddens = x.transpose(1, 2)  # [B, T/C, 512]
         z = self.transformer(hiddens)  # [B, T/C, 512]
 
+        padding_mask = self._resize_padding_mask(padding_mask, z.shape[1])
+
         semantic_loss = None
+        ctc_loss = None
+        ctc_boundaries = None
+        if transcriptions is not None:
+            assert padding_mask is not None, "padding_mask is required for ctc loss"
+            ctc_loss, boundaries, durations, log_probs = self.ctc(
+                z,
+                transcriptions,
+                input_lengths=((~padding_mask).long().sum(dim=1)),
+            )
+            ctc_boundaries = boundaries
+
         if hubert_guidance is not None:
             assert (
                 kwargs.get("semantic_guidance", None) is None
@@ -394,22 +413,22 @@ class ConvformerEncoder(SigmaVAEEncoder):
                 target=z,
                 guidance=kwargs["semantic_guidance"].semantic_features,
                 guidance_mask=kwargs["semantic_guidance"].padding_mask,
-                target_padding_mask=self._resize_padding_mask(padding_mask, mu.shape[1]),
+                target_padding_mask=padding_mask,
             )
 
         kl_loss = None
         if kwargs.get("step", None) is not None:
-            kl_loss = self.kl_divergence(
-                mu, logvar, self._resize_padding_mask(padding_mask, mu.shape[1])
-            ) * self.get_kl_cosine_schedule(kwargs["step"])
+            kl_loss = self.kl_divergence(mu, logvar, padding_mask) * self.get_kl_cosine_schedule(kwargs["step"])
 
         return ConvformerOutput(
             z=z,
             kl_loss=kl_loss,
-            padding_mask=self._resize_padding_mask(padding_mask, mu.shape[1]),
+            padding_mask=padding_mask,
             mu=mu,
             semantic_loss=semantic_loss,
             hubert_guidance=hubert_guidance,
+            ctc_loss=ctc_loss,
+            ctc_boundaries=ctc_boundaries,
         )
 
 

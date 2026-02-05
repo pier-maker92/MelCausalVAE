@@ -21,6 +21,7 @@ class VAEOutput:
     semantic_loss: Optional[torch.Tensor] = None
     mu_mean: Optional[torch.Tensor] = None
     mu_var: Optional[torch.Tensor] = None
+    ctc_loss: Optional[torch.FloatTensor] = None
 
 
 @dataclass
@@ -106,8 +107,9 @@ class VAE(torch.nn.Module):
             step=kwargs.get("training_step", None),
             semantic_guidance=semantic_output,
             hubert_guidance=kwargs.get("hubert_guidance", None),
+            transcriptions=kwargs.get("transcriptions", None),
         )
-        context_vector = convformer_output.z #if not self.encoder.config.logvar_layer else convformer_output.z
+        context_vector = convformer_output.z  # if not self.encoder.config.logvar_layer else convformer_output.z
 
         audio_loss = self.decoder(
             target=encoded_audios.audio_features,
@@ -123,6 +125,7 @@ class VAE(torch.nn.Module):
             semantic_loss=convformer_output.semantic_loss,
             mu_mean=mu_mean,
             mu_var=mu_var,
+            ctc_loss=convformer_output.ctc_loss,
         )
 
     @torch.no_grad()
@@ -195,23 +198,26 @@ class VAE(torch.nn.Module):
         guidance_scale: float = 1.0,
         generator: Optional[torch.Generator] = None,
         hubert_guidance: Optional[torch.Tensor] = None,
+        transcriptions: Optional[list] = None,
     ):
         """
         Encode audio to latent space and generate mel spectrogram.
+        If transcriptions are provided, CTC boundaries are computed and returned for visualization.
         """
 
         # Encode audio to mel spectrogram
         encoded_audios = self.wav2mel(audios_srs)
         original_mel = encoded_audios.audio_features
 
-        # Encode to latent space
+        # Encode to latent space (with optional transcriptions for CTC boundaries)
         convformer_output = self.encoder(
             x=original_mel,
             padding_mask=encoded_audios.padding_mask,
             step=None,
             hubert_guidance=hubert_guidance,
+            transcriptions=transcriptions,
         )
-        context_vector = convformer_output.z # if not self.encoder.config.logvar_layer else convformer_output.z
+        context_vector = convformer_output.z  # if not self.encoder.config.logvar_layer else convformer_output.z
         # Generate mel spectrogram from latent
         reconstructed_mel = self.decoder.generate(
             num_steps=num_steps,
@@ -226,9 +232,12 @@ class VAE(torch.nn.Module):
             original_mel = self.denormalize_mel(original_mel)
             reconstructed_mel = self.denormalize_mel(reconstructed_mel)
 
-        return {
+        result = {
             "original_mel": original_mel,
             "reconstructed_mel": reconstructed_mel,
             "context_vector": context_vector,
             "padding_mask": encoded_audios.padding_mask,
         }
+        if convformer_output.ctc_boundaries is not None:
+            result["ctc_boundaries"] = convformer_output.ctc_boundaries
+        return result

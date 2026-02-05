@@ -98,8 +98,9 @@ class AddGranularLossesToTrainerState(TrainerCallback):
 class VAEtrainer(Trainer):
     """Custom trainer for VAE"""
 
-    def __init__(self, **kwargs):
+    def __init__(self, phonemes=False, **kwargs):
         super().__init__(**kwargs)
+        self.phonemes = phonemes
         # Register granular losses
         granular_losses = ["audio_loss", "kl_loss", "mu_mean", "mu_var"]
         try:
@@ -107,6 +108,9 @@ class VAEtrainer(Trainer):
                 granular_losses.append("semantic_loss")
         except Exception:
             pass
+        # Add CTC loss if phonemes are enabled
+        if phonemes:
+            granular_losses.append("ctc_loss")
         self.add_callback(AddGranularLossesToTrainerState(granular_losses))
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
@@ -114,19 +118,27 @@ class VAEtrainer(Trainer):
         if hasattr(self.control, "granular_losses") and model.training:
             audios_srs = inputs["output_audios_srs"]
             hubert_guidance = inputs.get("hubert_guidance", None)
+            transcriptions = inputs.get("transcriptions", None)
 
             # Forward pass
             outputs = model(
                 audios_srs=audios_srs,
                 training_step=self.state.global_step,
                 hubert_guidance=hubert_guidance,
+                transcriptions=transcriptions,
             )
             audio_loss = outputs.audio_loss
             kl_loss = outputs.kl_loss
             semantic_loss = getattr(outputs, "semantic_loss", None)
+            ctc_loss = getattr(outputs, "ctc_loss", None)
             mu_mean = getattr(outputs, "mu_mean")
             mu_var = getattr(outputs, "mu_var")
-            loss = audio_loss + kl_loss + (semantic_loss if semantic_loss is not None else 0.0)
+            loss = (
+                audio_loss
+                + kl_loss
+                + (semantic_loss if semantic_loss is not None else 0.0)
+                + (ctc_loss if ctc_loss is not None else 0.0)
+            )
 
             # Accumulate granular losses
             if self.args.n_gpu > 1:
@@ -141,6 +153,10 @@ class VAEtrainer(Trainer):
                 self.control.granular_losses["semantic_loss"] += (
                     semantic_loss.detach() / self.args.gradient_accumulation_steps
                 )
+            if ctc_loss is not None:
+                if self.args.n_gpu > 1:
+                    ctc_loss = ctc_loss.mean()
+                self.control.granular_losses["ctc_loss"] += ctc_loss.detach() / self.args.gradient_accumulation_steps
             if mu_mean is not None:
                 val = mu_mean.detach().float()
                 if val.dim() > 0:
@@ -167,7 +183,12 @@ class VAEtrainer(Trainer):
             audio_loss = outputs.audio_loss
             kl_loss = outputs.kl_loss
             semantic_loss = getattr(outputs, "semantic_loss", None)
-            loss = audio_loss + kl_loss + (semantic_loss if semantic_loss is not None else 0.0)
+            loss = (
+                audio_loss
+                + kl_loss
+                + (semantic_loss if semantic_loss is not None else 0.0)
+                + (ctc_loss if ctc_loss is not None else 0.0)
+            )
             return (loss, outputs) if return_outputs else loss
 
     def create_scheduler(self, num_training_steps: int, optimizer=None):
@@ -286,8 +307,11 @@ class VAEtrainer(Trainer):
                 audios_srs = [(audio.to(self.args.device).to(torch.bfloat16), sr) for audio, sr in audios_srs]
                 break
         hubert_guidance = batch.get("hubert_guidance", None)
+        transcriptions = batch.get("transcriptions", None) if self.phonemes else None
+        if transcriptions is not None:
+            transcriptions = [t if t is not None else "" for t in transcriptions]
 
-        # Generate reconstructions
+        # Generate reconstructions (with transcriptions for CTC boundaries when phonemes=True)
         with torch.no_grad():
             results = self.model.encode_and_sample(
                 audios_srs=audios_srs,
@@ -295,21 +319,42 @@ class VAEtrainer(Trainer):
                 temperature=0.8,
                 guidance_scale=1.3,
                 hubert_guidance=hubert_guidance,
+                transcriptions=transcriptions,
             )
+
+        # Resolve CTC boundaries and GT phonemes for plotting (phonemes=True only)
+        ctc_boundaries_mel = None
+        gt_phonemes_per_sample = None
+        if self.phonemes and "ctc_boundaries" in results and transcriptions is not None:
+            # Encoder boundaries/durations are in latent (z) frames; multiply by compress_factor_C
+            # to get mel spectrogram frame indices and mel-frame durations for plotting.
+            C = self.model.encoder.config.compress_factor_C
+            ctc_boundaries_mel = []
+            for boundaries in results["ctc_boundaries"]:
+                ctc_boundaries_mel.append([(start * C, end * C, ph) for start, end, ph in boundaries])
+            gt_phonemes_per_sample = self.model.encoder.ctc.get_phonemes(transcriptions)
+            # Split each "fɔːɹ soʊ stændz" string into list of phonemes
+            gt_phonemes_per_sample = [s.split() if isinstance(s, str) else [] for s in gt_phonemes_per_sample]
+
         # Create visualizations
         images = []
+        ctc_gallery_images = []  # Dedicated larger CTC-only gallery when phonemes=True
         # Resolve device id safely for distributed/non-distributed
         device_id = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
 
         audios = []
         audio_paths = []
         for idx in range(len(audios_srs)):
+            boundaries_mel = ctc_boundaries_mel[idx] if ctc_boundaries_mel is not None else None
+            gt_phonemes = gt_phonemes_per_sample[idx] if gt_phonemes_per_sample is not None else None
             fig = self._create_mel_comparison_plot(
                 original=results["original_mel"][idx],
                 reconstructed=results["reconstructed_mel"][idx],
                 padding_mask=results["padding_mask"][idx],
                 sample_idx=idx,
                 device_id=device_id,
+                boundaries_mel=boundaries_mel,
+                gt_phonemes=gt_phonemes,
             )
 
             # Convert matplotlib figure to wandb Image
@@ -317,6 +362,24 @@ class VAEtrainer(Trainer):
                 wandb.Image(fig, caption=f"Sample {idx} - Step {self.state.global_step} - Device {device_id}")
             )
             plt.close(fig)
+
+            # Dedicated CTC inspection gallery (larger, mel + boundaries + phonemes only)
+            if self.phonemes:
+                fig_ctc = self._create_ctc_inspection_plot(
+                    original=results["original_mel"][idx],
+                    padding_mask=results["padding_mask"][idx],
+                    sample_idx=idx,
+                    device_id=device_id,
+                    boundaries_mel=boundaries_mel,
+                    gt_phonemes=gt_phonemes,
+                )
+                ctc_gallery_images.append(
+                    wandb.Image(
+                        fig_ctc,
+                        caption=f"CTC Sample {idx} - Step {self.state.global_step} - Device {device_id}",
+                    )
+                )
+                plt.close(fig_ctc)
 
             # Decode reconstructed mel to audio with Vocos
             mel = results["reconstructed_mel"][idx]  # [T, F]
@@ -355,15 +418,18 @@ class VAEtrainer(Trainer):
 
         # Log to wandb as a gallery
         if wandb.run is not None:
-            wandb.log(
-                {
-                    "reconstructions": images,
-                    "reconstructions_audio": audios,
-                    "reconstructions_audio_paths": audio_paths,
-                    "step": self.state.global_step,
-                }
-            )
+            log_dict = {
+                "reconstructions": images,
+                "reconstructions_audio": audios,
+                "reconstructions_audio_paths": audio_paths,
+                "step": self.state.global_step,
+            }
+            if ctc_gallery_images:
+                log_dict["ctc_phoneme_inspection"] = ctc_gallery_images
+            wandb.log(log_dict)
             logger.info(f"Successfully logged {len(images)} reconstruction samples to wandb")
+            if ctc_gallery_images:
+                logger.info(f"Logged {len(ctc_gallery_images)} CTC inspection plots to ctc_phoneme_inspection")
 
     def _create_mel_comparison_plot(
         self,
@@ -372,15 +438,22 @@ class VAEtrainer(Trainer):
         padding_mask: torch.Tensor,
         sample_idx: int,
         device_id: int,
+        boundaries_mel=None,
+        gt_phonemes=None,
     ):
         """
         Create a side-by-side comparison plot of original and reconstructed mel spectrograms.
+        When boundaries_mel and gt_phonemes are provided (phonemes=True), draw red CTC boundaries
+        on the original mel and show predicted vs ground-truth phonemes below it (monotonic alignment).
 
         Args:
             original: Original mel spectrogram [T, F]
             reconstructed: Reconstructed mel spectrogram [T, F]
             padding_mask: Padding mask [T]
             sample_idx: Index of the sample
+            device_id: Device id for caption
+            boundaries_mel: Optional list of (start, end, pred_phoneme) in mel frame indices
+            gt_phonemes: Optional list of ground-truth phoneme strings for monotonic alignment
 
         Returns:
             matplotlib figure
@@ -399,23 +472,156 @@ class VAEtrainer(Trainer):
         original = original.copy()[~padding_mask]
         reconstructed = reconstructed.copy()[~padding_mask]
 
-        # Create figure with 2 subplots
-        fig, axes = plt.subplots(2, 1, figsize=(12, 8))
+        n_mel_frames = original.shape[0]
+        show_phonemes = boundaries_mel is not None and len(boundaries_mel) > 0
 
-        # Plot original
-        im1 = axes[0].imshow(original.T, aspect="auto", origin="lower", interpolation="nearest", cmap="viridis")
-        axes[0].set_title(f"Original Mel Spectrogram - Sample {sample_idx} - Device {device_id}")
-        axes[0].set_xlabel("Time")
-        axes[0].set_ylabel("Mel Frequency")
-        plt.colorbar(im1, ax=axes[0])
+        if show_phonemes:
+            fig, axes = plt.subplots(3, 1, figsize=(14, 10), height_ratios=[1.5, 0.35, 1.5])
+            ax_mel_orig, ax_phonemes, ax_mel_recon = axes
+        else:
+            fig, axes = plt.subplots(2, 1, figsize=(12, 8))
+            ax_mel_orig, ax_mel_recon = axes
+
+        # Plot original mel (with optional red CTC boundaries)
+        im1 = ax_mel_orig.imshow(original.T, aspect="auto", origin="lower", interpolation="nearest", cmap="viridis")
+        ax_mel_orig.set_title(f"Original Mel Spectrogram - Sample {sample_idx} - Device {device_id}")
+        ax_mel_orig.set_ylabel("Mel Frequency")
+        if not show_phonemes:
+            ax_mel_orig.set_xlabel("Time")
+        plt.colorbar(im1, ax=ax_mel_orig)
+
+        if show_phonemes:
+            for start, end, pred_ph in boundaries_mel:
+                start, end = int(start), int(end)
+                if start < n_mel_frames:
+                    ax_mel_orig.axvline(x=start, color="red", linewidth=2.5, alpha=0.95)
+                if end < n_mel_frames:
+                    ax_mel_orig.axvline(x=end, color="red", linewidth=2.5, alpha=0.95)
+            ax_mel_orig.set_xlim(0, n_mel_frames)
+
+            # Phoneme strip: same x-range as mel (0..n_mel_frames) so labels align temporally
+            ax_phonemes.set_xlim(0, n_mel_frames)
+            ax_phonemes.set_ylim(0, 1)
+            ax_phonemes.set_yticks([0.25, 0.75])
+            ax_phonemes.set_yticklabels(["GT", "Pred"], fontsize=9)
+            ax_phonemes.tick_params(axis="x", which="both", bottom=False, labelbottom=False)
+
+            # Truncate long phonemes so text stays within segment (max 8 chars)
+            def _trunc(s, max_len=8):
+                return (s[:max_len] + "…") if len(s) > max_len else s
+
+            # Pred row: one label per CTC segment, centered in segment
+            for i, (start, end, pred_ph) in enumerate(boundaries_mel):
+                start, end = int(start), int(end)
+                if start >= n_mel_frames:
+                    continue
+                end = min(end, n_mel_frames)
+                mid = (start + end) / 2.0
+                ax_phonemes.text(mid, 0.75, _trunc(pred_ph), ha="center", va="center", fontsize=7, clip_on=True)
+
+            # GT row: distribute GT phonemes evenly over time so all are visible and aligned to plot
+            gt_list = gt_phonemes if gt_phonemes is not None else []
+            M = len(gt_list)
+            if M > 0:
+                for i, gt_ph in enumerate(gt_list):
+                    # Segment i: [i * n_mel_frames / M, (i+1) * n_mel_frames / M]
+                    seg_start = i * n_mel_frames / M
+                    seg_end = (i + 1) * n_mel_frames / M
+                    mid = (seg_start + seg_end) / 2.0
+                    ax_phonemes.text(
+                        mid, 0.25, _trunc(gt_ph), ha="center", va="center", fontsize=7, color="darkblue", clip_on=True
+                    )
+
+            ax_phonemes.set_xlabel("Time (frames)")
+            ax_phonemes.set_axisbelow(True)
+            ax_phonemes.grid(axis="x", alpha=0.3)
 
         # Plot reconstructed
-        im2 = axes[1].imshow(reconstructed.T, aspect="auto", origin="lower", interpolation="nearest", cmap="viridis")
-        axes[1].set_title(f"Reconstructed Mel Spectrogram - Sample {sample_idx} - Device {device_id}")
-        axes[1].set_xlabel("Time")
-        axes[1].set_ylabel("Mel Frequency")
-        plt.colorbar(im2, ax=axes[1])
+        im2 = ax_mel_recon.imshow(
+            reconstructed.T, aspect="auto", origin="lower", interpolation="nearest", cmap="viridis"
+        )
+        ax_mel_recon.set_title(f"Reconstructed Mel Spectrogram - Sample {sample_idx} - Device {device_id}")
+        ax_mel_recon.set_xlabel("Time")
+        ax_mel_recon.set_ylabel("Mel Frequency")
+        plt.colorbar(im2, ax=ax_mel_recon)
 
+        plt.tight_layout()
+        return fig
+
+    def _create_ctc_inspection_plot(
+        self,
+        original: torch.Tensor,
+        padding_mask: torch.Tensor,
+        sample_idx: int,
+        device_id: int,
+        boundaries_mel=None,
+        gt_phonemes=None,
+    ):
+        """
+        Create a large CTC-only figure: original mel + red boundaries + phoneme strip (Pred / GT).
+        Used for the dedicated CTC inspection gallery when phonemes=True.
+        """
+        original = original.float().detach().cpu().numpy()
+        padding_mask = padding_mask.detach().cpu().numpy()
+        original = original.copy()[~padding_mask]
+        n_mel_frames = original.shape[0]
+
+        if boundaries_mel is None or len(boundaries_mel) == 0:
+            fig, ax_mel = plt.subplots(1, 1, figsize=(20, 6))
+            ax_mel.imshow(original.T, aspect="auto", origin="lower", interpolation="nearest", cmap="viridis")
+            ax_mel.set_title(f"CTC Inspection - Sample {sample_idx} - Device {device_id} (no boundaries)")
+            ax_mel.set_xlabel("Time (frames)")
+            ax_mel.set_ylabel("Mel Frequency")
+            plt.tight_layout()
+            return fig
+
+        fig, axes = plt.subplots(2, 1, figsize=(22, 10), height_ratios=[2.0, 0.5])
+        ax_mel_orig, ax_phonemes = axes
+
+        im = ax_mel_orig.imshow(original.T, aspect="auto", origin="lower", interpolation="nearest", cmap="viridis")
+        ax_mel_orig.set_title(f"CTC Inspection - Original Mel - Sample {sample_idx} - Device {device_id}")
+        ax_mel_orig.set_ylabel("Mel Frequency")
+        plt.colorbar(im, ax=ax_mel_orig)
+
+        for start, end, pred_ph in boundaries_mel:
+            start, end = int(start), int(end)
+            if start < n_mel_frames:
+                ax_mel_orig.axvline(x=start, color="red", linewidth=2.5, alpha=0.95)
+            if end < n_mel_frames:
+                ax_mel_orig.axvline(x=end, color="red", linewidth=2.5, alpha=0.95)
+        ax_mel_orig.set_xlim(0, n_mel_frames)
+
+        ax_phonemes.set_xlim(0, n_mel_frames)
+        ax_phonemes.set_ylim(0, 1)
+        ax_phonemes.set_yticks([0.25, 0.75])
+        ax_phonemes.set_yticklabels(["GT", "Pred"], fontsize=10)
+        ax_phonemes.tick_params(axis="x", which="both", bottom=False, labelbottom=False)
+
+        def _trunc(s, max_len=8):
+            return (s[:max_len] + "…") if len(s) > max_len else s
+
+        for i, (start, end, pred_ph) in enumerate(boundaries_mel):
+            start, end = int(start), int(end)
+            if start >= n_mel_frames:
+                continue
+            end = min(end, n_mel_frames)
+            mid = (start + end) / 2.0
+            ax_phonemes.text(mid, 0.75, _trunc(pred_ph), ha="center", va="center", fontsize=8, clip_on=True)
+
+        gt_list = gt_phonemes if gt_phonemes is not None else []
+        M = len(gt_list)
+        if M > 0:
+            for i, gt_ph in enumerate(gt_list):
+                seg_start = i * n_mel_frames / M
+                seg_end = (i + 1) * n_mel_frames / M
+                mid = (seg_start + seg_end) / 2.0
+                ax_phonemes.text(
+                    mid, 0.25, _trunc(gt_ph), ha="center", va="center", fontsize=8, color="darkblue", clip_on=True
+                )
+
+        ax_phonemes.set_xlabel("Time (frames)")
+        ax_phonemes.set_axisbelow(True)
+        ax_phonemes.grid(axis="x", alpha=0.3)
         plt.tight_layout()
         return fig
 
@@ -503,8 +709,9 @@ def main():
     else:
         raise ValueError(f"Dataset {dataset_name} not supported")
     hubert_guidance = training_cfg.pop("hubert_guidance", False)
-    train_dataset = TrainDatasetWrapper(dataset, "train", hubert_guidance=hubert_guidance)
-    test_dataset = TrainDatasetWrapper(dataset, "test", hubert_guidance=hubert_guidance)
+    phonemes = training_cfg.pop("phonemes", False)
+    train_dataset = TrainDatasetWrapper(dataset, "train", hubert_guidance=hubert_guidance, phonemes=phonemes)
+    test_dataset = TrainDatasetWrapper(dataset, "test", hubert_guidance=hubert_guidance, phonemes=phonemes)
 
     # handle wandb - only initialize on main process (rank 0)
     wandb_project = training_cfg.pop("wandb_project", None)
@@ -553,8 +760,17 @@ def main():
     if from_pretrained:
         model.from_pretrained(from_pretrained)
         logger.info(f"Loaded pretrained model from {from_pretrained}")
-    
-    
+
+    # Warm-up phonemizer in the main process so espeak is loaded once (evita "failed to find
+    # espeak library" in evaluation o in step successivi per differenze di ambiente/fork).
+    if phonemes and hasattr(model.encoder, "ctc"):
+        try:
+            model.encoder.ctc.get_phonemes(["test"])
+        except RuntimeError as e:
+            if "espeak" in str(e).lower():
+                logger.error(str(e))
+                raise
+        logger.info("Phonemizer (espeak) warm-up OK")
 
     # Setup training arguments
     training_args = TrainingArguments(
@@ -570,6 +786,7 @@ def main():
         train_dataset=train_dataset,
         eval_dataset=test_dataset,
         data_collator=data_collator,
+        phonemes=phonemes,
     )
 
     # Start training

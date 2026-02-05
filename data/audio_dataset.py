@@ -64,6 +64,7 @@ class DataCollator(object):
         batch_ids = [None] * len(instances)
         batch_tokenized_units = [None] * len(instances)
         batch_tokenized_units_durations = [None] * len(instances)
+        batch_transcriptions = [None] * len(instances)
         for i, instance in enumerate(instances):
             if "audio_input" in instance:
                 batch_input_audios_srs[i] = (
@@ -94,7 +95,8 @@ class DataCollator(object):
                 batch_tokenized_units[i] = torch.LongTensor(instance["tokenized_units"])
             if "tokenized_units_durations" in instance:
                 batch_tokenized_units_durations[i] = torch.LongTensor(instance["tokenized_units_durations"])
-
+            if "transcription" in instance:
+                batch_transcriptions[i] = instance["transcription"]
         # if not all none add to the batch
         def all_none(batch):
             return all([x is None for x in batch])
@@ -128,17 +130,20 @@ class DataCollator(object):
                 padding_value=0,
             )
             batch["hubert_guidance"] = BPEOutput(semantic_ids=tokenized_units, durations=tokenized_units_durations)
+        if not all_none(batch_transcriptions):
+            batch["transcriptions"] = batch_transcriptions
         return batch
 
 
 class TrainDatasetWrapper(SimpleAudioDataset):
-    def __init__(self, dataset: SimpleAudioDataset, split: str, hubert_guidance: bool = False):
+    def __init__(self, dataset: SimpleAudioDataset, split: str, hubert_guidance: bool = False, phonemes: bool = False):
         super().__init__()
         assert split in ["train", "test"], "split must be either train or test"
         self.dataset = getattr(dataset, f"{split}_dataset")
         self.tokenizer = BPETokenizer(n_initial_units=1024, target_vocab_size=16384, deduplicate=True, verbose=True)
         self.tokenizer.load("data/tokenizer.json")
         self.hubert_guidance = hubert_guidance
+        self.phonemes = phonemes
     def __len__(self):
         return len(self.dataset)
 
@@ -147,7 +152,9 @@ class TrainDatasetWrapper(SimpleAudioDataset):
         data = self.dataset[idx]
         self._process_audio_output(data_dict, data["audio"], target_sr=24000)
         data_dict["ids"] = data.get("id")
-        data_dict["language"] = data.get("language", "en")
+        data_dict["language"] = data.get("language", "en-us")
+        if self.phonemes:
+            data_dict["transcription"] = data.get("text", None)
         # FIXME creating this monstrosity to test the padding system with a A10 gpu of only 16 GB
         limit = 50
         if self.hubert_guidance:
