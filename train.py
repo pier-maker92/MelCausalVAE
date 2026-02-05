@@ -292,8 +292,8 @@ class VAEtrainer(Trainer):
             results = self.model.encode_and_sample(
                 audios_srs=audios_srs,
                 num_steps=8,
-                temperature=0.3,
-                guidance_scale=1.5,
+                temperature=0.8,
+                guidance_scale=1.3,
                 hubert_guidance=hubert_guidance,
             )
         # Create visualizations
@@ -502,8 +502,9 @@ def main():
         dataset = LibriSpeech100h()
     else:
         raise ValueError(f"Dataset {dataset_name} not supported")
-    train_dataset = TrainDatasetWrapper(dataset, "train")
-    test_dataset = TrainDatasetWrapper(dataset, "test")
+    hubert_guidance = training_cfg.pop("hubert_guidance", False)
+    train_dataset = TrainDatasetWrapper(dataset, "train", hubert_guidance=hubert_guidance)
+    test_dataset = TrainDatasetWrapper(dataset, "test", hubert_guidance=hubert_guidance)
 
     # handle wandb - only initialize on main process (rank 0)
     wandb_project = training_cfg.pop("wandb_project", None)
@@ -552,6 +553,8 @@ def main():
     if from_pretrained:
         model.from_pretrained(from_pretrained)
         logger.info(f"Loaded pretrained model from {from_pretrained}")
+    
+    
 
     # Setup training arguments
     training_args = TrainingArguments(

@@ -1,0 +1,44 @@
+training:
+  dataset_name: librispeech100h
+  output_dir: checkpoints/MelCausalVAE/exp-flexi-1 # variable rate training
+  num_train_epochs: 2
+  learning_rate: 1e-4
+  per_device_train_batch_size: 4
+  report_to: wandb
+  wandb_project: flexi-vae
+  wandb_run_name: exp-flexi-1
+  fp16: false
+  bf16: true
+  save_steps: 1000
+  eval_strategy: "steps"
+  eval_steps: 1000
+  save_total_limit: 1
+  gradient_accumulation_steps: 2
+  dataloader_num_workers: 4
+  min_learning_rate: 1e-5
+  #from_pretrained: checkpoints/MelCausalVAE/sigma-vae/checkpoint-6000/model.safetensors
+  #resume_from_checkpoint: /workspace/MelCausalVAE/checkpoints/MelCausalVAE/exp-2/checkpoint-1000
+  hubert_guidance: true
+
+convformer:
+  compress_factor_C: 2
+  tf_heads: 8
+  tf_layers: 4
+  latent_dim: 64
+  n_residual_blocks: 3
+  logvar_layer: false
+  use_sofplus: false
+  target_std: 1.0
+  kl_loss_warmup_steps: 1000
+  kl_loss_weight: 1e-3
+
+cfm:
+  unet_dim: 1024
+  unet_depth: 8
+  unet_heads: 16
+  unet_dropout_rate: 0.1
+  use_conv_layer: true
+  audio_latent_dim: 64
+  uncond_prob: 0.15
+  learned_prior: false
+  is_causal: true

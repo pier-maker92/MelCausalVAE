@@ -127,18 +127,18 @@ class DataCollator(object):
                 batch_first=True,
                 padding_value=0,
             )
-            #batch["hubert_guidance"] = BPEOutput(semantic_ids=tokenized_units, durations=tokenized_units_durations)
+            batch["hubert_guidance"] = BPEOutput(semantic_ids=tokenized_units, durations=tokenized_units_durations)
         return batch
 
 
 class TrainDatasetWrapper(SimpleAudioDataset):
-    def __init__(self, dataset: SimpleAudioDataset, split: str):
+    def __init__(self, dataset: SimpleAudioDataset, split: str, hubert_guidance: bool = False):
         super().__init__()
         assert split in ["train", "test"], "split must be either train or test"
         self.dataset = getattr(dataset, f"{split}_dataset")
         self.tokenizer = BPETokenizer(n_initial_units=1024, target_vocab_size=16384, deduplicate=True, verbose=True)
         self.tokenizer.load("data/tokenizer.json")
-
+        self.hubert_guidance = hubert_guidance
     def __len__(self):
         return len(self.dataset)
 
@@ -150,10 +150,11 @@ class TrainDatasetWrapper(SimpleAudioDataset):
         data_dict["language"] = data.get("language", "en")
         # FIXME creating this monstrosity to test the padding system with a A10 gpu of only 16 GB
         limit = 50
-        data_dict["units"] = data.get("audio_codes", None)#[:limit]
-        audio_codes, durations = self.tokenizer.encode(data_dict["units"])
-        data_dict["tokenized_units"] = audio_codes
-        data_dict["tokenized_units_durations"] = durations
+        if self.hubert_guidance:
+            data_dict["units"] = data.get("audio_codes", None)#[:limit]
+            audio_codes, durations = self.tokenizer.encode(data_dict["units"])
+            data_dict["tokenized_units"] = audio_codes
+            data_dict["tokenized_units_durations"] = durations
 
         return data_dict
 

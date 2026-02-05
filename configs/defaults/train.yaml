@@ -28,3 +28,4 @@ training:
   from_pretrained: null
   dataset_name: null
   min_learning_rate: 1e-6
+  hubert_guidance: false

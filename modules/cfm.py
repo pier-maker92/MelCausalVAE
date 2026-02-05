@@ -330,8 +330,8 @@ class DiT(torch.nn.Module):
             else:
                 raise ValueError("Padding mask is required for batch size > 1")
         else:
-            pass
-            padding_mask = padding_mask.repeat_interleave(self.expansion_factor, dim=1)
+            if hubert_guidance is None:
+                padding_mask = padding_mask.repeat_interleave(self.expansion_factor, dim=1)
         self.transformer.to(device=context_vector.device, dtype=context_vector.dtype)
 
         # ---- time span ----
