@@ -1,18 +1,99 @@
-import os
 import torch
 import torch.nn as nn
-from typing import List, Tuple, Dict
-from phonemizer import phonemize
-from phonemizer.separator import Separator
-
-# Se espeak non viene trovato in un passo successivo (es. evaluation), di solito è perché
-# il processo figlio non eredita LD_LIBRARY_PATH. Imposta le variabili d'ambiente prima
-# di avviare Python, es.: export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
+import torch.nn.functional as F
+from typing import List, Tuple, Dict, Optional
 
 
-class CTC(nn.Module):
-    def __init__(self, input_size: int, hidden_size: int, output_size: int = 250):
-        super(CTC, self).__init__()
+# -----------------------------
+# Phoneme tokenizer (dynamic vocab) + optional <sil> handling
+# -----------------------------
+class PhonemeTokenizer:
+    """
+    Dynamic vocab:
+      <blank>=0  (CTC blank)
+      <unk>=1
+    Targets for CTC must NOT include <blank>.
+    """
+
+    def __init__(
+        self,
+        output_size: int = 250,
+        add_edge_sil: bool = True,
+        sil_token: str = "<sil>",
+    ):
+        self.vocab: Dict[str, int] = {"<blank>": 0, "<unk>": 1}
+        self.output_size = output_size
+        self._unk_warnings = set()
+        self.add_edge_sil = add_edge_sil
+        self.sil_token = sil_token
+
+        # ensure sil exists early if desired
+        if self.add_edge_sil:
+            self._update_vocab(self.sil_token)
+
+    def _update_vocab(self, phoneme: str) -> int:
+        if phoneme not in self.vocab:
+            new_idx = len(self.vocab)
+            if new_idx >= self.output_size:
+                if phoneme not in self._unk_warnings:
+                    print(
+                        f"Warning: Vocabulary full (size={self.output_size}). "
+                        f"Mapping phoneme '{phoneme}' to <unk>. Increase output_size."
+                    )
+                    self._unk_warnings.add(phoneme)
+                return self.vocab["<unk>"]
+            self.vocab[phoneme] = new_idx
+        return self.vocab[phoneme]
+
+    def parse_phoneme_strings(self, phoneme_strings: List[str]) -> List[List[str]]:
+        """
+        Input: List[str], each string is like: "p h o n e m e s"
+               you can include word separators; we just split by spaces.
+        Adds edge silences if enabled.
+        """
+        out: List[List[str]] = []
+        for s in phoneme_strings:
+            s = s.strip()
+            tokens = s.split() if len(s) else []
+            if self.add_edge_sil:
+                tokens = [self.sil_token] + tokens + [self.sil_token]
+            out.append(tokens)
+        return out
+
+    def phonemes_to_indices(
+        self, phonemes: List[List[str]]
+    ) -> Tuple[torch.LongTensor, torch.LongTensor]:
+        targets = []
+        target_lengths = []
+        for phoneme_list in phonemes:
+            indices = [self._update_vocab(p) for p in phoneme_list]
+            targets.extend(indices)
+            target_lengths.append(len(indices))
+        return torch.LongTensor(targets), torch.LongTensor(target_lengths)
+
+    def get_vocab(self) -> Dict[str, int]:
+        return self.vocab.copy()
+
+    def set_vocab(self, vocab: Dict[str, int]):
+        self.vocab = vocab.copy()
+        if "<unk>" not in self.vocab:
+            self.vocab["<unk>"] = 1
+
+
+# -----------------------------
+# CTC head on frame-level h (BEFORE CIF)
+# -----------------------------
+class CTCHead(nn.Module):
+    def __init__(
+        self,
+        input_size: int,
+        hidden_size: int,
+        output_size: int = 250,
+        blank: int = 0,
+        add_edge_sil: bool = True,
+        sil_token: str = "<sil>",
+    ):
+        super().__init__()
         self.net = nn.Sequential(
             nn.LayerNorm(input_size),
             nn.Linear(input_size, hidden_size),
@@ -23,230 +104,286 @@ class CTC(nn.Module):
             nn.Dropout(0.1),
             nn.Linear(hidden_size, output_size),
         )
-        self.ctc_loss = nn.CTCLoss(blank=0, reduction="mean", zero_infinity=True)
-
-        # Dynamic vocabulary for phoneme-to-index mapping (blank=0, unk=1)
-        self.vocab = {"<blank>": 0, "<unk>": 1}
+        self.ctc_loss = nn.CTCLoss(blank=blank, reduction="mean", zero_infinity=True)
+        self.blank = blank
         self.output_size = output_size
-        self._unk_warnings = set()  # Track which phonemes have been warned about
-
-    def _update_vocab(self, phoneme: str) -> int:
-        """Add a new phoneme to vocabulary and return its index. Returns <unk> if vocab is full."""
-        if phoneme not in self.vocab:
-            new_idx = len(self.vocab)
-            if new_idx >= self.output_size:
-                # Vocabulary is full, map to <unk> token
-                if phoneme not in self._unk_warnings:
-                    print(
-                        f"Warning: Vocabulary full (size={self.output_size}). "
-                        f"Mapping phoneme '{phoneme}' to <unk> token. "
-                        f"Consider increasing output_size in CTC initialization."
-                    )
-                    self._unk_warnings.add(phoneme)
-                return self.vocab["<unk>"]
-            self.vocab[phoneme] = new_idx
-        return self.vocab[phoneme]
-
-    def get_vocab_size(self) -> int:
-        """Return current vocabulary size."""
-        return len(self.vocab)
-
-    def get_vocab(self) -> Dict[str, int]:
-        """Return copy of current vocabulary."""
-        return self.vocab.copy()
-
-    def set_vocab(self, vocab: Dict[str, int]):
-        """Set vocabulary (useful for loading pretrained models)."""
-        self.vocab = vocab.copy()
-        if len(self.vocab) > self.output_size:
-            raise ValueError(f"Provided vocabulary size ({len(self.vocab)}) exceeds output_size ({self.output_size})")
-        # Ensure <unk> token exists
-        if "<unk>" not in self.vocab:
-            print("Warning: Loaded vocabulary missing <unk> token. Adding it at index 1.")
-            self.vocab["<unk>"] = 1
-        self._unk_warnings = set()  # Reset warnings when loading vocab
-
-    def get_phonemes(self, transcript: List[str], language: str = "en-us") -> List[List[str]]:
-        """
-        Convert transcripts to phoneme tokens.
-        Returns: List[B] of List[phoneme]
-        """
-        phonemes_batch = []
-        sep = Separator(phone=" ", word=" | ", syllable=None)
-
-        for text in transcript:
-            if not text or text.strip() == "":
-                phonemes_batch.append([])
-                continue
-
-            try:
-                phoneme_str = phonemize(
-                    text,
-                    language=language,
-                    backend="espeak",
-                    separator=sep,
-                    strip=True,
-                    preserve_punctuation=False,
-                    njobs=1,
-                )
-            except RuntimeError as e:
-                if "failed to find espeak" in str(e).lower() or "espeak" in str(e).lower():
-                    msg = (
-                        "Phonemizer non trova la libreria espeak. Succede spesso quando "
-                        "l'evaluation o un processo figlio non eredita LD_LIBRARY_PATH. "
-                        "Soluzione: avvia il training con la lib in path, es.\n"
-                        "  export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH\n"
-                        "  python train.py ...\n"
-                        "Oppure installa: apt install espeak-ng libespeak-ng-dev"
-                    )
-                    raise RuntimeError(msg) from e
-                raise
-
-            tokens = phoneme_str.split()
-            tokens = [t for t in tokens if t != "|"]
-
-            phonemes_batch.append(tokens)
-
-        return phonemes_batch
-
-    def phonemes_to_indices(self, phonemes: List[List[str]]) -> Tuple[torch.LongTensor, torch.LongTensor]:
-        """
-        Convert phoneme tokens to CTC targets.
-        """
-        targets = []
-        target_lengths = []
-
-        for phoneme_list in phonemes:
-            indices = []
-
-            for phoneme in phoneme_list:
-                idx = self._update_vocab(phoneme)
-                indices.append(idx)
-
-            targets.extend(indices)
-            target_lengths.append(len(indices))
-
-        return torch.LongTensor(targets), torch.LongTensor(target_lengths)
-
-    def get_frame_boundaries(
-        self, log_probs: torch.Tensor, input_lengths: torch.Tensor
-    ) -> Tuple[List[List[Tuple[int, int, str]]], List[List[int]]]:
-        """
-        Decode CTC output and extract frame boundaries for each phoneme.
-
-        Args:
-            log_probs: [T, B, C] log probabilities from CTC
-            input_lengths: [B] actual lengths of each sequence
-
-        Returns:
-            boundaries_batch: List of boundaries per batch item: [(start_frame, end_frame, phoneme), ...]
-            durations_batch: List of durations per batch item: [duration1, duration2, ...]
-        """
-        batch_size = log_probs.size(1)
-        boundaries_batch = []
-        durations_batch = []
-
-        # Convert vocab to index->phoneme mapping
-        idx_to_phoneme = {v: k for k, v in self.vocab.items()}
-
-        for b in range(batch_size):
-            # Get predictions for this batch item
-            probs = log_probs[: input_lengths[b], b, :]  # [T, C]
-            predictions = torch.argmax(probs, dim=-1)  # [T]
-
-            boundaries = []
-            durations = []
-            prev_token = None
-            start_frame = 0
-
-            for t, token_idx in enumerate(predictions):
-                token_idx = token_idx.item()
-
-                # Skip blank tokens (0)
-                if token_idx == 0:
-                    if prev_token is not None:
-                        # End of a phoneme segment
-                        phoneme = idx_to_phoneme.get(prev_token, "<unk>")
-                        if phoneme != "<blank>":
-                            duration = t - start_frame
-                            boundaries.append((start_frame, t, phoneme))
-                            durations.append(duration)
-                        prev_token = None
-                    continue
-
-                # New phoneme or continuation
-                if token_idx != prev_token:
-                    if prev_token is not None:
-                        # Save previous phoneme boundary
-                        phoneme = idx_to_phoneme.get(prev_token, "<unk>")
-                        if phoneme != "<blank>":
-                            duration = t - start_frame
-                            boundaries.append((start_frame, t, phoneme))
-                            durations.append(duration)
-                    start_frame = t
-                    prev_token = token_idx
-
-            # Handle last phoneme if sequence doesn't end with blank
-            if prev_token is not None:
-                phoneme = idx_to_phoneme.get(prev_token, "<unk>")
-                if phoneme != "<blank>":
-                    end_frame = input_lengths[b].item()
-                    duration = end_frame - start_frame
-                    boundaries.append((start_frame, end_frame, phoneme))
-                    durations.append(duration)
-
-            boundaries_batch.append(boundaries)
-            durations_batch.append(durations)
-
-        return boundaries_batch, durations_batch
+        self.tokenizer = PhonemeTokenizer(
+            output_size=output_size, add_edge_sil=add_edge_sil, sil_token=sil_token
+        )
 
     def forward(
         self,
-        z: torch.FloatTensor,
-        transcript: List[str],
-        input_lengths: torch.LongTensor = None,
+        h: torch.FloatTensor,  # [B,T,D]
+        phoneme_strings: List[str],  # List[str] e.g. "p h o n ..."
+        input_lengths: Optional[torch.LongTensor] = None,  # [B]
     ):
-        """
-        Args:
-            z:
-                [B, T, D] latent features, B is the batch size, T is the length of the sequence, D is the dimension of the latent features.
-                consider that z contains also padding values
-            transcript:
-                [B] list of transcriptions, B is the batch size
-            input_lengths:
-                [B] actual lengths of sequences (excluding padding)
-
-        Returns:
-            loss: CTC loss value
-            boundaries: List of frame boundaries per batch item: [(start, end, phoneme), ...]
-            durations: List of durations per batch item: [duration1, duration2, ...]
-            log_probs: [T, B, C] log probabilities for potential further use
-        """
-        batch_size, seq_len, _ = z.shape
-
-        # If input_lengths not provided, assume no padding
+        B, T, _ = h.shape
         if input_lengths is None:
-            input_lengths = torch.full((batch_size,), seq_len, dtype=torch.long, device=z.device)
+            input_lengths = torch.full((B,), T, dtype=torch.long, device=h.device)
 
-        # Forward pass through layers
-        x = self.net(z)
+        logits = self.net(h)  # [B,T,C]
+        log_probs = torch.log_softmax(logits, dim=-1).permute(1, 0, 2)  # [T,B,C]
 
-        # CTC expects [T, B, C] format
-        log_probs = torch.log_softmax(x, dim=-1).permute(1, 0, 2)  # [T, B, C]
+        phonemes = self.tokenizer.parse_phoneme_strings(
+            phoneme_strings
+        )  # List[List[str]]
+        targets, target_lengths = self.tokenizer.phonemes_to_indices(
+            phonemes
+        )  # flat targets + lengths
+        targets = targets.to(h.device)
+        target_lengths = target_lengths.to(h.device)
 
-        # Get phonemes and convert to indices
-        phonemes = self.get_phonemes(transcript)
-        targets, target_lengths = self.phonemes_to_indices(phonemes)
-        targets = targets.to(z.device)
-        target_lengths = target_lengths.to(z.device)
+        # CTCLoss prefers float32 on CUDA
+        loss = self.ctc_loss(
+            log_probs.float(), targets, input_lengths, target_lengths
+        ).to(log_probs.dtype)
 
-        # Compute CTC loss (PyTorch CTC does not support bfloat16 on CUDA, use float32)
-        log_probs_f32 = log_probs.float()
-        loss = self.ctc_loss(log_probs_f32, targets, input_lengths, target_lengths)
-        loss = loss.to(log_probs.dtype)
+        return {
+            "ctc_loss": loss,
+            "log_probs": log_probs,  # [T,B,C]
+            "phonemes": phonemes,  # List[List[str]]
+            "target_lengths": target_lengths,  # [B]  (N per sample)
+            "vocab": self.tokenizer.get_vocab(),
+        }
 
-        # Extract frame boundaries and durations
-        with torch.no_grad():
-            boundaries, durations = self.get_frame_boundaries(log_probs, input_lengths)
 
-        return loss, boundaries, durations, log_probs
+# -----------------------------
+# Fully-differentiable CIF with exact K=N via alpha normalization
+# -----------------------------
+class CIFFullyDiffAligner(nn.Module):
+    """
+    CIF via overlap in mass-space (vectorized, differentiable).
+
+    Steps:
+      - raw_alpha = softplus(alpha_net(h))  [B,T] > 0
+      - mask padding, then scale raw_alpha so that sum_t alpha_t = N exactly (per sample)
+      - define cumulative mass c_t = sum_{<=t} alpha
+        frame interval in mass-space is [c_{t-1}, c_t]
+        token k corresponds to mass interval [k-1, k]
+      - overlap mass assigned from frame t to token k is:
+          w_{t,k} = clamp(min(c_t, k) - max(c_{t-1}, k-1), 0)
+      - token embedding: token_k = sum_t w_{t,k} * v_t
+      - CIF mass per token: sum_t w_{t,k}  (≈1)
+      - frame-duration per token: sum_t (w_{t,k} / alpha_t)  (fractions of frames) -> sums to L
+    """
+
+    def __init__(
+        self, input_size: int, value_size: Optional[int] = None, alpha_hidden: int = 128
+    ):
+        super().__init__()
+        self.value_size = value_size if value_size is not None else input_size
+
+        self.alpha_net = nn.Sequential(
+            nn.LayerNorm(input_size),
+            nn.Linear(input_size, alpha_hidden),
+            nn.SiLU(),
+            nn.Linear(alpha_hidden, 1),
+        )
+        self.value_proj = nn.Linear(input_size, self.value_size)
+
+    @staticmethod
+    def _length_mask(T: int, lengths: torch.Tensor) -> torch.Tensor:
+        # lengths: [B]
+        ar = torch.arange(T, device=lengths.device).unsqueeze(0)  # [1,T]
+        return ar < lengths.unsqueeze(1)  # [B,T] bool
+
+    @staticmethod
+    def _normalize_alpha_to_N(
+        raw_alpha: torch.Tensor,  # [B,T] >0
+        target_lengths: torch.LongTensor,  # [B] = N
+        input_lengths: torch.LongTensor,  # [B] = L
+        eps: float = 1e-8,
+    ) -> torch.Tensor:
+        """
+        Mask padding, then scale so sum(alpha[b,:L]) == N[b] exactly (up to numerical tolerance).
+        """
+        B, T = raw_alpha.shape
+        mask = CIFFullyDiffAligner._length_mask(T, input_lengths).to(
+            raw_alpha.dtype
+        )  # [B,T]
+        alpha = raw_alpha * mask
+
+        sums = alpha.sum(dim=1)  # [B]
+        N = target_lengths.to(raw_alpha.dtype)  # [B]
+
+        # scale factor; if sum is tiny, fall back to uniform distribution over valid frames
+        scale = N / (sums + eps)  # [B]
+        alpha_scaled = alpha * scale.unsqueeze(1)  # [B,T]
+
+        # uniform fallback when sums ~ 0
+        # uniform alpha on valid frames: N/L
+        L = input_lengths.to(raw_alpha.dtype).clamp_min(1.0)
+        alpha_uniform = mask * (N / L).unsqueeze(1)
+
+        use_uniform = (sums < 10 * eps).to(raw_alpha.dtype).unsqueeze(1)  # [B,1]
+        alpha_final = alpha_scaled * (1.0 - use_uniform) + alpha_uniform * use_uniform
+
+        return alpha_final  # [B,T], sum over valid frames == N
+
+    def forward(
+        self,
+        h: torch.FloatTensor,  # [B,T,D]
+        target_lengths: torch.LongTensor,  # [B] = N
+        input_lengths: torch.LongTensor,  # [B] = L
+    ):
+        B, T, _ = h.shape
+        V = self.value_size
+        eps = 1e-8
+
+        raw_alpha = F.softplus(self.alpha_net(h)).squeeze(-1)  # [B,T] >0
+        alpha = self._normalize_alpha_to_N(
+            raw_alpha, target_lengths, input_lengths, eps=eps
+        )  # [B,T]
+
+        # values to accumulate
+        v = self.value_proj(h)  # [B,T,V]
+
+        # Nmax for padding to a fixed tensor
+        Nmax = int(target_lengths.max().item()) if target_lengths.numel() else 0
+        if Nmax == 0:
+            tokens = h.new_zeros((B, 0, V))
+            frame_durations = h.new_zeros((B, 0))
+            cif_mass_per_token = h.new_zeros((B, 0))
+            token_mask = torch.zeros((B, 0), device=h.device, dtype=torch.bool)
+            return {
+                "tokens": tokens,
+                "frame_durations": frame_durations,
+                "cif_mass_per_token": cif_mass_per_token,
+                "token_mask": token_mask,
+                "alpha": alpha,
+                "raw_alpha": raw_alpha,
+            }
+
+        # cumulative mass
+        c = torch.cumsum(alpha, dim=1)  # [B,T]
+        c_prev = c - alpha  # [B,T]
+
+        # token indices in mass-space:
+        # token k (1..Nmax) corresponds to interval [k-1, k]
+        k = torch.arange(1, Nmax + 1, device=h.device, dtype=h.dtype).view(
+            1, 1, Nmax
+        )  # [1,1,N]
+        left = torch.maximum(c_prev.unsqueeze(-1), (k - 1.0))  # [B,T,N]
+        right = torch.minimum(c.unsqueeze(-1), k)  # [B,T,N]
+        w = torch.clamp(right - left, min=0.0)  # [B,T,N]
+        # w is "mass assigned from frame t to token k" (CIF overlap)
+
+        # token mask: only first N tokens are valid per sample
+        token_mask = torch.arange(Nmax, device=h.device).unsqueeze(
+            0
+        ) < target_lengths.unsqueeze(
+            1
+        )  # [B,N] bool
+
+        # Token embeddings: sum_t w[t,k] * v[t]
+        # w: [B,T,N], v: [B,T,V] -> tokens: [B,N,V]
+        tokens = torch.einsum("btn,btv->bnv", w, v)
+
+        # CIF mass per token (should be ~1 for valid tokens)
+        cif_mass_per_token = w.sum(dim=1)  # [B,N]
+
+        # Frame durations (soft): fraction of each frame assigned to token
+        # fraction = w / alpha_t
+        denom = (alpha + eps).unsqueeze(-1)  # [B,T,1]
+        frac = w / denom  # [B,T,N]
+        frame_durations = frac.sum(dim=1)  # [B,N]
+
+        # Zero out padding tokens explicitly
+        tokens = tokens * token_mask.unsqueeze(-1).to(tokens.dtype)
+        cif_mass_per_token = cif_mass_per_token * token_mask.to(
+            cif_mass_per_token.dtype
+        )
+        frame_durations = frame_durations * token_mask.to(frame_durations.dtype)
+
+        return {
+            "tokens": tokens,  # [B,Nmax,V]
+            "frame_durations": frame_durations,  # [B,Nmax] sum ~= input_lengths
+            "cif_mass_per_token": cif_mass_per_token,  # [B,Nmax] each ~1
+            "token_mask": token_mask,  # [B,Nmax]
+            "alpha": alpha,  # [B,T] sum==N (valid frames)
+            "raw_alpha": raw_alpha,  # [B,T]
+        }
+
+
+# -----------------------------
+# Wrapper: CTC (frame) + CIF (fully diff)
+# -----------------------------
+class CTCThenCIF(nn.Module):
+    def __init__(
+        self,
+        encoder_dim: int,
+        ctc_hidden: int,
+        ctc_output: int = 250,
+        cif_value_dim: Optional[int] = None,
+        add_edge_sil: bool = True,
+        sil_token: str = "<sil>",
+    ):
+        super().__init__()
+        self.ctc = CTCHead(
+            input_size=encoder_dim,
+            hidden_size=ctc_hidden,
+            output_size=ctc_output,
+            add_edge_sil=add_edge_sil,
+            sil_token=sil_token,
+        )
+        self.cif = CIFFullyDiffAligner(input_size=encoder_dim, value_size=cif_value_dim)
+
+    def forward(
+        self,
+        h: torch.FloatTensor,  # [B,T,D] encoder output (causale)
+        phoneme_strings: List[str],  # List[str] "p h o n ..."
+        input_lengths: Optional[torch.LongTensor] = None,
+        return_checks: bool = True,
+    ):
+        B, T, _ = h.shape
+        if input_lengths is None:
+            input_lengths = torch.full((B,), T, dtype=torch.long, device=h.device)
+
+        # 1) CTC
+        ctc_out = self.ctc(
+            h=h, phoneme_strings=phoneme_strings, input_lengths=input_lengths
+        )
+        target_lengths = ctc_out["target_lengths"]  # [B] = N
+
+        # 2) CIF (K=N exact via alpha normalization)
+        cif_out = self.cif(
+            h=h, target_lengths=target_lengths, input_lengths=input_lengths
+        )
+
+        out = {
+            "ctc_loss": ctc_out["ctc_loss"],
+            "log_probs": ctc_out["log_probs"],  # [T,B,C]
+            "phonemes": ctc_out["phonemes"],  # List[List[str]]
+            "target_lengths": target_lengths,  # [B]
+            "tokens": cif_out["tokens"],  # [B,N,V]
+            "frame_durations": cif_out["frame_durations"],  # [B,N]
+            "cif_mass_per_token": cif_out["cif_mass_per_token"],  # [B,N]
+            "token_mask": cif_out["token_mask"],  # [B,N]
+            "alpha": cif_out["alpha"],  # [B,T]
+            "raw_alpha": cif_out["raw_alpha"],  # [B,T]
+            "vocab": ctc_out["vocab"],
+        }
+
+        if return_checks:
+            # Useful diagnostics (no breakpoints)
+            with torch.no_grad():
+                # alpha sum should match N (per sample, valid frames)
+                alpha_sum = out["alpha"].sum(dim=1)  # [B]
+                # frame durations sum should match L (per sample)
+                dur_sum = out["frame_durations"].sum(dim=1)  # [B]
+                out["check_alpha_sum_minus_N"] = alpha_sum - target_lengths.to(
+                    alpha_sum.dtype
+                )
+                out["check_dur_sum_minus_L"] = dur_sum - input_lengths.to(dur_sum.dtype)
+                # token mass should be ~1 for valid tokens
+                # (mean over valid tokens)
+                m = out["cif_mass_per_token"]
+                mask = out["token_mask"]
+                if mask.any():
+                    out["check_token_mass_mean"] = (m[mask]).mean()
+                    out["check_token_mass_std"] = (m[mask]).std(unbiased=False)
+                else:
+                    out["check_token_mass_mean"] = torch.tensor(0.0, device=h.device)
+                    out["check_token_mass_std"] = torch.tensor(0.0, device=h.device)
+
+        return out

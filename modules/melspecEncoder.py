@@ -47,12 +47,13 @@ class MelSpectrogramEncoder(torch.nn.Module):
         self.std = 4.864339828491211
         self.mean = -3.325150489807129
         self.normalize = config.normalize
-    
+        # Target output dtype — updated by VAE.set_dtype() via .to(dtype=...)
+        self._output_dtype = torch.bfloat16
+
     def _update_std_mean_with_momentum(self, mel_spec: torch.Tensor):
-        self.std = self.std * 0.99 + mel_spec.std() * 0.01
-        self.mean = self.mean * 0.99 + mel_spec.mean() * 0.01
-        print(f"std: {self.std}, mean: {self.mean}")
-        
+        with torch.no_grad():
+            self.std = self.std * 0.99 + mel_spec.std().item() * 0.01
+            self.mean = self.mean * 0.99 + mel_spec.mean().item() * 0.01
 
     def forward(self, audios_srs: List[Tuple[torch.FloatTensor, int]], **kwargs):
         audios, sampling_rates = zip(*audios_srs)
@@ -67,8 +68,14 @@ class MelSpectrogramEncoder(torch.nn.Module):
             )
         sr = unique_sampling_rates.pop()
         if sr != self.sampling_rate:
-            raise ValueError(f"Sampling rate {sr} is not supported by this model. " f"Expected {self.sampling_rate}.")
-        dtype = audios[0].dtype
+            raise ValueError(
+                f"Sampling rate {sr} is not supported by this model. "
+                f"Expected {self.sampling_rate}."
+            )
+        # Use the model's target dtype (set via VAE.set_dtype / .to(dtype=...))
+        # instead of input audio dtype (which is always float32 from the data loader).
+        # Mel spectrogram is computed in float32 for FFT stability, then cast to model dtype.
+        dtype = self._output_dtype
         device = audios[0].device
         # Get max length for padding
         # Get max length
@@ -77,7 +84,9 @@ class MelSpectrogramEncoder(torch.nn.Module):
             batch_size = len(audios)
 
             # Create padded tensor using torch.nn.utils.rnn.pad_sequence
-            padded_audios = torch.nn.utils.rnn.pad_sequence(audios, batch_first=True, padding_value=0.0)
+            padded_audios = torch.nn.utils.rnn.pad_sequence(
+                audios, batch_first=True, padding_value=0.0
+            )
             # Create padding mask
             padding_mask = torch.ones(
                 (batch_size, max_length),
@@ -120,7 +129,8 @@ class MelSpectrogramEncoder(torch.nn.Module):
         )  # 93.75Hz
 
         assert padding_mask.shape[1] == mel_spec.shape[1], (
-            f"Temporal dimensions mismatch: padding_mask {padding_mask.shape[1]} vs " f"mel_spec {mel_spec.shape[1]}"
+            f"Temporal dimensions mismatch: padding_mask {padding_mask.shape[1]} vs "
+            f"mel_spec {mel_spec.shape[1]}"
         )
 
         if self.normalize:

@@ -7,8 +7,8 @@ import torch
 import torch.nn as nn
 from einops import rearrange
 from dataclasses import dataclass
-from typing import Optional, List, Tuple
-from modules.ctc import CTC
+from typing import Optional, List
+from modules.ctc import CTCThenCIF
 from modules.regulator import InterpolateRegulator
 from modules.semantic_module import SeamlessM4Tv2Encoder
 from modules.flash_attn_encoder import FlashTransformerEncoder
@@ -24,7 +24,7 @@ class ConvformerOutput:
     semantic_features: Optional[torch.FloatTensor] = None
     hubert_guidance: Optional[torch.LongTensor] = None
     ctc_loss: Optional[torch.FloatTensor] = None
-    ctc_boundaries: Optional[List[List[Tuple[int, int, str]]]] = None  # per batch item
+    frame_durations: Optional[torch.Tensor] = None  # [B, Nmax] CIF durations per token
 
 
 @dataclass
@@ -51,7 +51,9 @@ class SigmaVAEEncoder(nn.Module):
     def __init__(self, config: SigmaVAEencoderConfig):
         super().__init__()
         self.config = config
-        self.std_activation = nn.Softplus() if self.config.use_sofplus else nn.Identity()
+        self.std_activation = (
+            nn.Softplus() if self.config.use_sofplus else nn.Identity()
+        )
         self.kl_loss_weight = float(config.kl_loss_weight)
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.semantic_regulator = InterpolateRegulator(
@@ -61,7 +63,9 @@ class SigmaVAEEncoder(nn.Module):
     def forward(self, **kwargs):
         pass
 
-    def reparameterize(self, mu: torch.FloatTensor, logvar: Optional[torch.FloatTensor] = None) -> torch.FloatTensor:
+    def reparameterize(
+        self, mu: torch.FloatTensor, logvar: Optional[torch.FloatTensor] = None
+    ) -> torch.FloatTensor:
         eps = torch.randn_like(mu)
         if logvar is None:
             std = self.sample_scalar_std(mu)
@@ -72,12 +76,17 @@ class SigmaVAEEncoder(nn.Module):
         return mu + eps * std
 
     def kl_divergence(
-        self, mu: torch.FloatTensor, logvar: Optional[torch.FloatTensor], padding_mask: torch.BoolTensor
+        self,
+        mu: torch.FloatTensor,
+        logvar: Optional[torch.FloatTensor],
+        padding_mask: torch.BoolTensor,
     ) -> torch.FloatTensor:
         if logvar is None:
             # Compute in fp32 for numerical stability
             mu_valid = mu[~padding_mask].float()
-            return torch.nn.functional.mse_loss(mu_valid, torch.zeros_like(mu_valid)).to(mu.dtype)
+            return torch.nn.functional.mse_loss(
+                mu_valid, torch.zeros_like(mu_valid)
+            ).to(mu.dtype)
         # Compute KL divergence in fp32 for numerical stability with fp16
         mu_valid = mu[~padding_mask].float()
         logvar_valid = logvar[~padding_mask].float()
@@ -86,10 +95,13 @@ class SigmaVAEEncoder(nn.Module):
 
     def sample_scalar_std(self, mu: torch.FloatTensor) -> torch.FloatTensor:
         return self.std_activation(
-            torch.randn(mu.shape[0], mu.shape[1], dtype=mu.dtype, device=mu.device) * self.config.target_std
+            torch.randn(mu.shape[0], mu.shape[1], dtype=mu.dtype, device=mu.device)
+            * self.config.target_std
         )
 
-    def _resize_padding_mask(self, padding_mask: torch.BoolTensor, target_length: int) -> torch.BoolTensor:
+    def _resize_padding_mask(
+        self, padding_mask: torch.BoolTensor, target_length: int
+    ) -> torch.BoolTensor:
         padding_mask = (
             torch.nn.functional.interpolate(
                 padding_mask.unsqueeze(1).float(),
@@ -134,7 +146,9 @@ class ChannelLastLayerNorm(nn.Module):
 class TimeCausalConv2d(nn.Conv2d):
     # Causal in time (left pad only); "same" in frequency (symmetric left/right)
     def __init__(self, c_in, c_out, kt, kf, dt=1, df=1, st=1, sf=1):
-        super().__init__(c_in, c_out, (kt, kf), dilation=(dt, df), stride=(st, sf), padding=0)
+        super().__init__(
+            c_in, c_out, (kt, kf), dilation=(dt, df), stride=(st, sf), padding=0
+        )
         self.kt, self.kf, self.dt, self.df, self.st, self.sf = kt, kf, dt, df, st, sf
 
     def _same_freq_pad(self, F_in):
@@ -168,15 +182,32 @@ class ChannelLastLinear(nn.Module):
 
 class PreNormResCausalBlock(nn.Module):
     # LN -> act -> causal conv; skip mirrors stride if T or F changes, else 1x1
-    def __init__(self, c_in, c_out, *, kt=3, kf=7, dt=1, df=1, st=1, sf=1, act=nn.GELU, drop_p=0.1):
+    def __init__(
+        self,
+        c_in,
+        c_out,
+        *,
+        kt=3,
+        kf=7,
+        dt=1,
+        df=1,
+        st=1,
+        sf=1,
+        act=nn.GELU,
+        drop_p=0.1,
+    ):
         super().__init__()
         self.ln = ChannelLastLayerNorm(c_in)
         self.act = act()
-        self.main = TimeCausalConv2d(c_in, c_out, kt=kt, kf=kf, dt=dt, df=df, st=st, sf=sf)
+        self.main = TimeCausalConv2d(
+            c_in, c_out, kt=kt, kf=kf, dt=dt, df=df, st=st, sf=sf
+        )
         shape_changes = (c_in != c_out) or (st != 1) or (sf != 1)
         if shape_changes:
             # Match spatial sizes when stride or non-same padding is used
-            self.skip = TimeCausalConv2d(c_in, c_out, kt=1, kf=1, dt=1, df=1, st=st, sf=sf)
+            self.skip = TimeCausalConv2d(
+                c_in, c_out, kt=1, kf=1, dt=1, df=1, st=st, sf=sf
+            )
         else:
             if c_in != c_out:
                 self.skip = nn.Conv2d(c_in, c_out, kernel_size=1, stride=1)
@@ -197,7 +228,9 @@ class CausalDownsamplingBlock(nn.Module):
         dilations = [1, 2, 4, 8]
         self.residual_blocks = nn.ModuleList(
             [
-                PreNormResCausalBlock(c_in, c_in, kt=3, kf=5, dt=dilation, df=1, st=1, sf=1, drop_p=drop_p)
+                PreNormResCausalBlock(
+                    c_in, c_in, kt=3, kf=5, dt=dilation, df=1, st=1, sf=1, drop_p=drop_p
+                )
                 for dilation in dilations[:n_residual_blocks]
             ]
         )
@@ -227,7 +260,9 @@ class CausalTransformerTail(nn.Module):
         #     norm_first=True,
         # )
         # self.enc = nn.TransformerEncoder(layer, num_layers=nlayers)
-        self.enc = FlashTransformerEncoder(d_model=d_model, nhead=nheads, nlayers=nlayers, drop_p=drop_p)
+        self.enc = FlashTransformerEncoder(
+            d_model=d_model, nhead=nheads, nlayers=nlayers, drop_p=drop_p
+        )
 
     def forward(self, tokens):  # [B, T_tok, d_model]
         # L = tokens.size(1)
@@ -260,7 +295,9 @@ class ConvformerEncoder(SigmaVAEEncoder):
         latent_dim = config.latent_dim
         n_residual_blocks = config.n_residual_blocks
 
-        assert (compress_factor_C & (compress_factor_C - 1)) == 0, "C must be power of 2"
+        assert (
+            compress_factor_C & (compress_factor_C - 1)
+        ) == 0, "C must be power of 2"
 
         self.C = compress_factor_C
         self.in_freq_proj = nn.Linear(100, 100)
@@ -270,9 +307,15 @@ class ConvformerEncoder(SigmaVAEEncoder):
 
         # Three causal blocks with dilations 1,2,4; last block also projects frequency -> 64
         self.freq_mixer = nn.Sequential(
-            PreNormResCausalBlock(32, 64, kt=7, kf=7, dt=1, df=1, st=1, sf=1, drop_p=drop_p),
-            PreNormResCausalBlock(64, 128, kt=5, kf=5, dt=1, df=4, st=1, sf=1, drop_p=drop_p),
-            PreNormResCausalBlock(128, 256, kt=3, kf=3, dt=1, df=8, st=1, sf=1, drop_p=drop_p),
+            PreNormResCausalBlock(
+                32, 64, kt=7, kf=7, dt=1, df=1, st=1, sf=1, drop_p=drop_p
+            ),
+            PreNormResCausalBlock(
+                64, 128, kt=5, kf=5, dt=1, df=4, st=1, sf=1, drop_p=drop_p
+            ),
+            PreNormResCausalBlock(
+                128, 256, kt=3, kf=3, dt=1, df=8, st=1, sf=1, drop_p=drop_p
+            ),
         )
 
         # Two downsamplers:
@@ -280,46 +323,68 @@ class ConvformerEncoder(SigmaVAEEncoder):
         self.downsampling = nn.ModuleDict(
             {
                 "downsample@2": CausalDownsamplingBlock(
-                    256, 512, n_residual_blocks=n_residual_blocks, compress_freq=16, drop_p=drop_p
+                    256,
+                    512,
+                    n_residual_blocks=n_residual_blocks,
+                    compress_freq=16,
+                    drop_p=drop_p,
                 ),
                 # "downsample@4": CausalDownsamplingBlock(512, 512, n_residual_blocks=n_residual_blocks, drop_p=drop_p),
             }
         )
         # Extra temporal downsampling to reach T/C (sf=1), keeping channels at 512
-        extra_stages = int(math.log2(self.C)) - 2  # we already did /4 in time via ds2 and ds4
+        extra_stages = (
+            int(math.log2(self.C)) - 2
+        )  # we already did /4 in time via ds2 and ds4
         for i in range(max(0, extra_stages)):
             self.downsampling[f"downsample@{2**(i+2+1)}"] = CausalDownsamplingBlock(
-                512, 512, n_residual_blocks=n_residual_blocks, compress_freq=1, drop_p=drop_p
+                512,
+                512,
+                n_residual_blocks=n_residual_blocks,
+                compress_freq=1,
+                drop_p=drop_p,
             )
 
         # Collapse frequency 4 -> 1 with a single causal conv, keep channels at 512
         # Use kf=4, sf=4, no frequency padding so F_out = 1 exactly when F_in = 4
-        self.freq_collapse = TimeCausalConv2d(512, 512, kt=1, kf=8, dt=1, df=1, st=1, sf=8)
+        self.freq_collapse = TimeCausalConv2d(
+            512, 512, kt=1, kf=8, dt=1, df=1, st=1, sf=8
+        )
 
         # Causal Transformer tail operating on tokens of size 512
-        self.transformer = CausalTransformerTail(d_model=512, nheads=tf_heads, nlayers=tf_layers, drop_p=drop_p)
+        self.transformer = CausalTransformerTail(
+            d_model=512, nheads=tf_heads, nlayers=tf_layers, drop_p=drop_p
+        )
 
         self.mu = nn.Linear(512, latent_dim)
         if config.logvar_layer:
             self.logvar = nn.Linear(512, latent_dim)
 
-        self.semantic_embeddings = nn.Embedding(num_embeddings=16384 + 1, embedding_dim=latent_dim)
+        self.semantic_embeddings = nn.Embedding(
+            num_embeddings=16384 + 1, embedding_dim=latent_dim
+        )
         self.semantic_embeddings_proj = nn.Linear(latent_dim, 512)
         self.padding_embedding = nn.Parameter(torch.randn(512))
 
-        self.ctc = CTC(input_size=512, hidden_size=512, output_size=250)
+        self.ctc = CTCThenCIF(512, 512)
 
-    def collapse_frame(self, latent_frames: torch.FloatTensor, durations: torch.LongTensor) -> torch.FloatTensor:
+    def collapse_frame(
+        self, latent_frames: torch.FloatTensor, durations: torch.LongTensor
+    ) -> torch.FloatTensor:
         # get the mean value of latent_frames based on the durations
         batch_collapsed_frames = []
-        assert latent_frames.shape[0] == durations.shape[0], "number of latent frames and durations must match"
+        assert (
+            latent_frames.shape[0] == durations.shape[0]
+        ), "number of latent frames and durations must match"
         for batch_idx in range(latent_frames.shape[0]):
             collapsed_frames = []
             latent_sequence = latent_frames[batch_idx]
             cumulative_duration = 0
             for duration in durations[batch_idx]:
                 if duration and cumulative_duration < latent_sequence.shape[0]:
-                    latent_slice = latent_sequence[cumulative_duration : cumulative_duration + duration]
+                    latent_slice = latent_sequence[
+                        cumulative_duration : cumulative_duration + duration
+                    ]
                 else:
                     latent_slice = self.padding_embedding.unsqueeze(0).to(
                         device=latent_sequence.device, dtype=latent_sequence.dtype
@@ -329,11 +394,15 @@ class ConvformerEncoder(SigmaVAEEncoder):
             batch_collapsed_frames.append(torch.stack(collapsed_frames))
         return torch.stack(batch_collapsed_frames)
 
-    def pad_semantic_guidance(self, semantic_guidance: List[torch.LongTensor]) -> torch.LongTensor:
+    def pad_semantic_guidance(
+        self, semantic_guidance: List[torch.LongTensor]
+    ) -> torch.LongTensor:
         max_length = max(len(guidance) for guidance in semantic_guidance)
         padded_semantic_guidance = []
         for guidance in semantic_guidance:
-            padded_semantic_guidance.append(torch.nn.functional.pad(guidance, (0, max_length - len(guidance), 0, 0)))
+            padded_semantic_guidance.append(
+                torch.nn.functional.pad(guidance, (0, max_length - len(guidance), 0, 0))
+            )
         return torch.stack(padded_semantic_guidance)
 
     def forward(
@@ -341,7 +410,7 @@ class ConvformerEncoder(SigmaVAEEncoder):
         x: torch.FloatTensor,
         padding_mask: torch.BoolTensor = None,
         hubert_guidance: Optional[List[any]] = None,
-        transcriptions: Optional[List[str]] = None,
+        phonemes: Optional[List[List[str]]] = None,
         **kwargs,
     ):  # x: [B, T, 100]
         B, T, F = x.shape
@@ -375,15 +444,18 @@ class ConvformerEncoder(SigmaVAEEncoder):
 
         semantic_loss = None
         ctc_loss = None
-        ctc_boundaries = None
-        if transcriptions is not None:
+        frame_durations = None
+        if phonemes is not None:
             assert padding_mask is not None, "padding_mask is required for ctc loss"
-            ctc_loss, boundaries, durations, log_probs = self.ctc(
+            output = self.ctc(
                 z,
-                transcriptions,
+                phonemes,
                 input_lengths=((~padding_mask).long().sum(dim=1)),
             )
-            ctc_boundaries = boundaries
+            z = output.get("tokens")
+            ctc_loss = output.get("ctc_loss")
+            frame_durations = output.get("frame_durations")
+            padding_mask = ~(output.get("token_mask"))
 
         if hubert_guidance is not None:
             assert (
@@ -392,13 +464,17 @@ class ConvformerEncoder(SigmaVAEEncoder):
             assert not torch.isnan(z).any(), "z contains nan before collapsing frame"
             z = self.collapse_frame(z, hubert_guidance.durations)
             assert not torch.isnan(z).any(), "z contains nan after collapsing frame"
-            semantic_embeddings = self.semantic_embeddings(hubert_guidance.semantic_ids.to(z.device))
+            semantic_embeddings = self.semantic_embeddings(
+                hubert_guidance.semantic_ids.to(z.device)
+            )
             hubert_guidance.semantic_embeddings = semantic_embeddings
             semantic_embeddings = self.semantic_embeddings_proj(semantic_embeddings)
             semantic_loss = torch.nn.functional.mse_loss(
                 semantic_embeddings, z.detach()
             )  # loss here shuold not backpropagate to the encoder features
-            z = z - semantic_embeddings  # remove the semantic embeddings from the latent features
+            z = (
+                z - semantic_embeddings
+            )  # remove the semantic embeddings from the latent features
             assert not torch.isnan(z).any(), "z contains nan after semantic embedding"
 
         mu = self.mu(z)
@@ -418,7 +494,9 @@ class ConvformerEncoder(SigmaVAEEncoder):
 
         kl_loss = None
         if kwargs.get("step", None) is not None:
-            kl_loss = self.kl_divergence(mu, logvar, padding_mask) * self.get_kl_cosine_schedule(kwargs["step"])
+            kl_loss = self.kl_divergence(
+                mu, logvar, padding_mask
+            ) * self.get_kl_cosine_schedule(kwargs["step"])
 
         return ConvformerOutput(
             z=z,
@@ -428,7 +506,7 @@ class ConvformerEncoder(SigmaVAEEncoder):
             semantic_loss=semantic_loss,
             hubert_guidance=hubert_guidance,
             ctc_loss=ctc_loss,
-            ctc_boundaries=ctc_boundaries,
+            frame_durations=frame_durations,
         )
 
 

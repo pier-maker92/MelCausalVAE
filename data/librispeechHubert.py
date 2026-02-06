@@ -11,7 +11,10 @@ from torch.utils.data import DataLoader
 from datasets import load_dataset, concatenate_datasets
 from modules.melspecEncoder import MelSpectrogramEncoder, MelSpectrogramConfig
 from data.audio_dataset import SimpleAudioDataset, DataCollator, TrainDatasetWrapper
+from phonemizer.separator import Separator
+from phonemizer import phonemize
 
+sep = Separator(phone=" ", word=" | ", syllable=None)
 # import mel spec encoder
 mel_spec_encoder = MelSpectrogramEncoder(config=MelSpectrogramConfig())
 
@@ -38,7 +41,9 @@ class LibriSpeech100h(SimpleAudioDataset):
         partitions_per_destination = defaultdict(list)
         for dataset in datasets:
             for partition in dataset:
-                partitions_per_destination[self._partition_to_destination(partition)].append(dataset[partition])
+                partitions_per_destination[
+                    self._partition_to_destination(partition)
+                ].append(dataset[partition])
 
         for destination in partitions_per_destination:
             setattr(
@@ -47,13 +52,32 @@ class LibriSpeech100h(SimpleAudioDataset):
                 concatenate_datasets(partitions_per_destination[destination]),
             )
         # select only the "audio_codes" column
-        # self.train_dataset = self.train_dataset.select_columns(["audio_codes"])
+        self.train_dataset = self.train_dataset.map(
+            self.get_phonemes, num_proc=1, batched=True, batch_size=1000
+        )
+        self.test_dataset = self.test_dataset.map(
+            self.get_phonemes, num_proc=1, batched=True, batch_size=1000
+        )
 
     def _partition_to_destination(self, partition_name):
         if "train" in partition_name:
             return "train"
         elif "dev" in partition_name or "test" in partition_name:
             return "test"
+
+    def get_phonemes(self, example):
+        text = example["text"]
+        phoneme_str = phonemize(
+            text,
+            language="en-us",
+            backend="espeak",
+            separator=sep,
+            strip=True,
+            preserve_punctuation=False,
+            njobs=1,
+        )
+        example["phonemes"] = phoneme_str
+        return example
 
 
 # if __name__ == "__main__":

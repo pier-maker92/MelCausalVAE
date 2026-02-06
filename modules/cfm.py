@@ -100,7 +100,9 @@ class DiT(torch.nn.Module):
         self.hubert_norm = nn.LayerNorm(self.audio_latent_dim)
         # hubert + context projection
         self.hubert_and_context_proj = nn.Sequential(
-            nn.Linear(self.audio_latent_dim + self.audio_latent_dim, self.audio_latent_dim),
+            nn.Linear(
+                self.audio_latent_dim + self.audio_latent_dim, self.audio_latent_dim
+            ),
             nn.LayerNorm(self.audio_latent_dim),
         )
         # noise projection
@@ -110,12 +112,14 @@ class DiT(torch.nn.Module):
                 nn.LayerNorm(self.unet_dim),
             )
             self.prior_proj = nn.Sequential(
-                nn.Linear(self.audio_latent_dim, self.mel_channels), nn.LayerNorm(self.mel_channels)
+                nn.Linear(self.audio_latent_dim, self.mel_channels),
+                nn.LayerNorm(self.mel_channels),
             )
 
         else:
             self.noise_proj = nn.Sequential(
-                nn.Linear(self.unet_dim + self.mel_channels, self.unet_dim), nn.LayerNorm(self.unet_dim)
+                nn.Linear(self.unet_dim + self.mel_channels, self.unet_dim),
+                nn.LayerNorm(self.unet_dim),
             )
 
         # transformer
@@ -130,7 +134,9 @@ class DiT(torch.nn.Module):
         )
         self.transformer.to(dtype=torch.bfloat16)
 
-    def reparameterize(self, mu: torch.FloatTensor, std: Optional[float] = None) -> torch.FloatTensor:
+    def reparameterize(
+        self, mu: torch.FloatTensor, std: Optional[float] = None
+    ) -> torch.FloatTensor:
         eps = torch.randn_like(mu)
         if std is None:
             std = self.sample_scalar_std(mu)
@@ -149,42 +155,110 @@ class DiT(torch.nn.Module):
         target: Optional[torch.FloatTensor] = None,
         hubert_guidance: Optional = None,
         padding_mask: Optional[torch.BoolTensor] = None,
+        frame_durations: Optional[torch.BoolTensor] = None,
     ):
-        if hubert_guidance is None:
-            context_vector = context_vector.repeat_interleave(self.expansion_factor, dim=1)
-        else:
-            durations = hubert_guidance.durations * self.expansion_factor
-            assert (
-                context_vector.shape[0] == hubert_guidance.semantic_embeddings.shape[0] == durations.shape[0]
-            ), "number of context vectors and semantic embeddings and durations must match"
-            assert (
-                context_vector.shape[1] == hubert_guidance.semantic_embeddings.shape[1] == durations.shape[1]
-            ), "time dimension must match"
-            context_vector = self.hubert_and_context_proj(
-                torch.cat([context_vector, self.hubert_norm(hubert_guidance.semantic_embeddings)], dim=-1)
+        if hubert_guidance or frame_durations is None:
+            context_vector = context_vector.repeat_interleave(
+                self.expansion_factor, dim=1
             )
-            context_vector_batch = []
-            if padding_mask is not None:
-                padding_mask_batch = []
-            for batch_idx in range(context_vector.shape[0]):
-                duration_sequence = durations[batch_idx]
-                context_vector_sequence = []
-                padding_mask_sequence = []
-                for idx, duration in enumerate(duration_sequence):
-                    if duration:
-                        context_vector_sequence.append(context_vector[batch_idx][idx].repeat(duration, 1))
-                        if padding_mask is not None:
-                            padding_mask_sequence.append(padding_mask[batch_idx][idx].repeat(duration))
-                    else:
-                        context_vector_sequence.append(torch.zeros_like(context_vector[batch_idx][:1]))
-                        if padding_mask is not None:
-                            padding_mask_sequence.append(torch.ones_like(padding_mask[batch_idx][:1]))
-
-                context_vector_batch.append(torch.cat(context_vector_sequence, dim=0))
+        else:
+            if frame_durations is not None:
+                durations = frame_durations * self.expansion_factor
+                assert (
+                    context_vector.shape[0] == durations.shape[0]
+                ), "number of context vectors and durations must match"
+                assert (
+                    context_vector.shape[1] == durations.shape[1]
+                ), "time dimension must match"
+                context_vector_batch = []
                 if padding_mask is not None:
-                    padding_mask_batch.append(torch.cat(padding_mask_sequence, dim=0))
+                    padding_mask_batch = []
+                for batch_idx in range(context_vector.shape[0]):
+                    duration_sequence = durations[batch_idx]
+                    context_vector_sequence = []
+                    padding_mask_sequence = []
+                    for idx, duration in enumerate(duration_sequence):
+                        duration = round(duration.item())
+                        if duration:
+                            context_vector_sequence.append(
+                                context_vector[batch_idx][idx].repeat(duration, 1)
+                            )
+                            if padding_mask is not None:
+                                padding_mask_sequence.append(
+                                    padding_mask[batch_idx][idx].repeat(duration)
+                                )
+                        else:
+                            context_vector_sequence.append(
+                                torch.zeros_like(context_vector[batch_idx][:1])
+                            )
+                            if padding_mask is not None:
+                                padding_mask_sequence.append(
+                                    torch.ones_like(padding_mask[batch_idx][:1])
+                                )
+                    context_vector_batch.append(
+                        torch.cat(context_vector_sequence, dim=0)
+                    )
+                    if padding_mask is not None:
+                        padding_mask_batch.append(
+                            torch.cat(padding_mask_sequence, dim=0)
+                        )
+            else:
+                durations = hubert_guidance.durations * self.expansion_factor
+                assert (
+                    context_vector.shape[0]
+                    == hubert_guidance.semantic_embeddings.shape[0]
+                    == durations.shape[0]
+                ), "number of context vectors and semantic embeddings and durations must match"
+                assert (
+                    context_vector.shape[1]
+                    == hubert_guidance.semantic_embeddings.shape[1]
+                    == durations.shape[1]
+                ), "time dimension must match"
+                context_vector = self.hubert_and_context_proj(
+                    torch.cat(
+                        [
+                            context_vector,
+                            self.hubert_norm(hubert_guidance.semantic_embeddings),
+                        ],
+                        dim=-1,
+                    )
+                )
+                context_vector_batch = []
+                if padding_mask is not None:
+                    padding_mask_batch = []
+                for batch_idx in range(context_vector.shape[0]):
+                    duration_sequence = durations[batch_idx]
+                    context_vector_sequence = []
+                    padding_mask_sequence = []
+                    for idx, duration in enumerate(duration_sequence):
+                        if duration:
+                            context_vector_sequence.append(
+                                context_vector[batch_idx][idx].repeat(duration, 1)
+                            )
+                            if padding_mask is not None:
+                                padding_mask_sequence.append(
+                                    padding_mask[batch_idx][idx].repeat(duration)
+                                )
+                        else:
+                            context_vector_sequence.append(
+                                torch.zeros_like(context_vector[batch_idx][:1])
+                            )
+                            if padding_mask is not None:
+                                padding_mask_sequence.append(
+                                    torch.ones_like(padding_mask[batch_idx][:1])
+                                )
+
+                    context_vector_batch.append(
+                        torch.cat(context_vector_sequence, dim=0)
+                    )
+                    if padding_mask is not None:
+                        padding_mask_batch.append(
+                            torch.cat(padding_mask_sequence, dim=0)
+                        )
             # pad the context vector sequence to the same length using orch.nn.utils.rnn.pad_sequence
-            context_vector = torch.nn.utils.rnn.pad_sequence(context_vector_batch, batch_first=True, padding_value=0)
+            context_vector = torch.nn.utils.rnn.pad_sequence(
+                context_vector_batch, batch_first=True, padding_value=0
+            )
             if padding_mask is not None:
                 padding_mask = torch.nn.utils.rnn.pad_sequence(
                     padding_mask_batch, batch_first=True, padding_value=False
@@ -269,6 +343,7 @@ class DiT(torch.nn.Module):
             context_vector,
             target,
             hubert_guidance=kwargs.get("hubert_guidance", None),
+            frame_durations=kwargs.get("frame_durations", None),
             padding_mask=target_padding_mask,
         )
 
@@ -280,7 +355,9 @@ class DiT(torch.nn.Module):
         target_padding_mask = target_padding_mask[:, : target.shape[1]]
 
         # ---- get the flow ----
-        loss = self.let_it_flow(times=times, state=state, target=v_target, flow_mask=target_padding_mask)
+        loss = self.let_it_flow(
+            times=times, state=state, target=v_target, flow_mask=target_padding_mask
+        )
 
         return DiTOutput(
             loss=loss,
@@ -296,6 +373,7 @@ class DiT(torch.nn.Module):
         generator: Optional[torch.Generator] = None,
         std: float = 1.0,
         hubert_guidance: Optional[torch.Tensor] = None,
+        frame_durations: Optional[torch.Tensor] = None,
     ):
         cfg_scale = guidance_scale
         # ---- context vector z ----
@@ -303,6 +381,7 @@ class DiT(torch.nn.Module):
             context_vector,
             hubert_guidance=hubert_guidance,
             padding_mask=padding_mask,
+            frame_durations=frame_durations,
         )
         if self.learned_prior:
             y0 = context_vector
@@ -330,12 +409,16 @@ class DiT(torch.nn.Module):
             else:
                 raise ValueError("Padding mask is required for batch size > 1")
         else:
-            if hubert_guidance is None:
-                padding_mask = padding_mask.repeat_interleave(self.expansion_factor, dim=1)
+            if hubert_guidance is None and frame_durations is None:
+                padding_mask = padding_mask.repeat_interleave(
+                    self.expansion_factor, dim=1
+                )
         self.transformer.to(device=context_vector.device, dtype=context_vector.dtype)
 
         # ---- time span ----
-        t_span = torch.linspace(0, 1, num_steps, device=context_vector.device, dtype=context_vector.dtype)
+        t_span = torch.linspace(
+            0, 1, num_steps, device=context_vector.device, dtype=context_vector.dtype
+        )
         # t_span = t_lin**gamma
 
         # ---- ODE ----
@@ -378,7 +461,9 @@ class DiT(torch.nn.Module):
         if cfg_scale == 1.0:
             return cond_out
         uncond_state = (
-            self.noise_proj(torch.cat([torch.zeros_like(context_vector), state], dim=-1))
+            self.noise_proj(
+                torch.cat([torch.zeros_like(context_vector), state], dim=-1)
+            )
             if not self.learned_prior
             else self.noise_proj(torch.randn_like(state))
         )
@@ -388,6 +473,8 @@ class DiT(torch.nn.Module):
             attention_mask=attention_mask,
         )
 
-        final = (cfg_scale * cond_out + (1 - cfg_scale) * uncond_out).to(context_vector.dtype)
+        final = (cfg_scale * cond_out + (1 - cfg_scale) * uncond_out).to(
+            context_vector.dtype
+        )
 
         return final

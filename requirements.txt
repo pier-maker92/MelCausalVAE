@@ -14,3 +14,4 @@ deepspeed==0.18.4
 numpy==1.26.4
 mpi4py
 soundfile
+phonemizer

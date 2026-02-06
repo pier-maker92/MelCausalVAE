@@ -32,7 +32,9 @@ class SimpleAudioDataset(Dataset):
     def _process_audio_component(self, audio_data, target_sr, max_duration=None):
         """Helper method to process audio components with optional duration limiting"""
         audio_array = torch.Tensor(audio_data["array"]).to(torch.float32)
-        audio, sr = self._process_audio(audio_array, audio_data["sampling_rate"], target_sr)
+        audio, sr = self._process_audio(
+            audio_array, audio_data["sampling_rate"], target_sr
+        )
         if max_duration and audio.shape[0] > sr * max_duration:
             audio = audio[: sr * max_duration]
         return audio, sr
@@ -42,9 +44,13 @@ class SimpleAudioDataset(Dataset):
 
     def _process_audio_output(self, data_dict, audio_data, target_sr=24000):
         audio_output, sr_output = self._process_audio_component(
-            audio_data, target_sr=target_sr, max_duration=None  # FIXME hardcoded duration
+            audio_data,
+            target_sr=target_sr,
+            max_duration=None,  # FIXME hardcoded duration
         )
-        data_dict.update({"audio_output": [audio_output], "audio_output_sr": [sr_output]})
+        data_dict.update(
+            {"audio_output": [audio_output], "audio_output_sr": [sr_output]}
+        )
 
 
 @dataclass
@@ -64,7 +70,7 @@ class DataCollator(object):
         batch_ids = [None] * len(instances)
         batch_tokenized_units = [None] * len(instances)
         batch_tokenized_units_durations = [None] * len(instances)
-        batch_transcriptions = [None] * len(instances)
+        batch_phonemes = [None] * len(instances)
         for i, instance in enumerate(instances):
             if "audio_input" in instance:
                 batch_input_audios_srs[i] = (
@@ -84,7 +90,9 @@ class DataCollator(object):
             if "transcription_ids" in instance:
                 batch_transcription_ids[i] = instance["transcription_ids"]
             if "aligned_transcription_ids" in instance:
-                batch_aligned_transcription_ids[i] = instance["aligned_transcription_ids"]
+                batch_aligned_transcription_ids[i] = instance[
+                    "aligned_transcription_ids"
+                ]
             if "transcription" in instance:
                 batch_transcription[i] = instance["transcription"]
             if "language" in instance:
@@ -94,9 +102,12 @@ class DataCollator(object):
             if "tokenized_units" in instance:
                 batch_tokenized_units[i] = torch.LongTensor(instance["tokenized_units"])
             if "tokenized_units_durations" in instance:
-                batch_tokenized_units_durations[i] = torch.LongTensor(instance["tokenized_units_durations"])
-            if "transcription" in instance:
-                batch_transcriptions[i] = instance["transcription"]
+                batch_tokenized_units_durations[i] = torch.LongTensor(
+                    instance["tokenized_units_durations"]
+                )
+            if "phonemes" in instance:
+                batch_phonemes[i] = instance["phonemes"]
+
         # if not all none add to the batch
         def all_none(batch):
             return all([x is None for x in batch])
@@ -117,7 +128,9 @@ class DataCollator(object):
             batch["language"] = batch_language
         if not all_none(batch_ids):
             batch["ids"] = batch_ids
-        if not all_none(batch_tokenized_units) and not all_none(batch_tokenized_units_durations):
+        if not all_none(batch_tokenized_units) and not all_none(
+            batch_tokenized_units_durations
+        ):
             # pad the tokenized units to the same length using rnn padding
             tokenized_units = torch.nn.utils.rnn.pad_sequence(
                 batch_tokenized_units,
@@ -129,21 +142,35 @@ class DataCollator(object):
                 batch_first=True,
                 padding_value=0,
             )
-            batch["hubert_guidance"] = BPEOutput(semantic_ids=tokenized_units, durations=tokenized_units_durations)
-        if not all_none(batch_transcriptions):
-            batch["transcriptions"] = batch_transcriptions
+            batch["hubert_guidance"] = BPEOutput(
+                semantic_ids=tokenized_units, durations=tokenized_units_durations
+            )
+        if not all_none(batch_phonemes):
+            batch["phonemes"] = batch_phonemes
         return batch
 
 
 class TrainDatasetWrapper(SimpleAudioDataset):
-    def __init__(self, dataset: SimpleAudioDataset, split: str, hubert_guidance: bool = False, phonemes: bool = False):
+    def __init__(
+        self,
+        dataset: SimpleAudioDataset,
+        split: str,
+        hubert_guidance: bool = False,
+        phonemes: bool = False,
+    ):
         super().__init__()
         assert split in ["train", "test"], "split must be either train or test"
         self.dataset = getattr(dataset, f"{split}_dataset")
-        self.tokenizer = BPETokenizer(n_initial_units=1024, target_vocab_size=16384, deduplicate=True, verbose=True)
+        self.tokenizer = BPETokenizer(
+            n_initial_units=1024,
+            target_vocab_size=16384,
+            deduplicate=True,
+            verbose=True,
+        )
         self.tokenizer.load("data/tokenizer.json")
         self.hubert_guidance = hubert_guidance
         self.phonemes = phonemes
+
     def __len__(self):
         return len(self.dataset)
 
@@ -154,11 +181,11 @@ class TrainDatasetWrapper(SimpleAudioDataset):
         data_dict["ids"] = data.get("id")
         data_dict["language"] = data.get("language", "en-us")
         if self.phonemes:
-            data_dict["transcription"] = data.get("text", None)
+            data_dict["phonemes"] = data.get("phonemes", None)
         # FIXME creating this monstrosity to test the padding system with a A10 gpu of only 16 GB
         limit = 50
         if self.hubert_guidance:
-            data_dict["units"] = data.get("audio_codes", None)#[:limit]
+            data_dict["units"] = data.get("audio_codes", None)  # [:limit]
             audio_codes, durations = self.tokenizer.encode(data_dict["units"])
             data_dict["tokenized_units"] = audio_codes
             data_dict["tokenized_units_durations"] = durations
@@ -171,7 +198,12 @@ class HubertDatasetWrapper(SimpleAudioDataset):
         super().__init__()
         assert split in ["train", "test"], "split must be either train or test"
         self.dataset = getattr(dataset, f"{split}_dataset")
-        self.tokenizer = BPETokenizer(n_initial_units=1024, target_vocab_size=16384, deduplicate=True, verbose=True)
+        self.tokenizer = BPETokenizer(
+            n_initial_units=1024,
+            target_vocab_size=16384,
+            deduplicate=True,
+            verbose=True,
+        )
         self.tokenizer.load("data/tokenizer.json")
 
     def __len__(self):
@@ -181,7 +213,9 @@ class HubertDatasetWrapper(SimpleAudioDataset):
         data_dict = {}
         data = self.dataset[idx]
         data_dict["audio_codes"] = data.get("audio_codes", None)
-        data_dict["audio_codes"] = self.tokenizer.encode_batch([data_dict["audio_codes"]])
+        data_dict["audio_codes"] = self.tokenizer.encode_batch(
+            [data_dict["audio_codes"]]
+        )
         return data_dict
 
 
@@ -198,7 +232,9 @@ class TestDatasetWrapper(SimpleAudioDataset):
         data_dict = {}
         data = self.dataset[idx]
         self._process_audio_output(data_dict, data["audio"])
-        self._process_transcription(data_dict, data.get("text_normalized", "transcript"))
+        self._process_transcription(
+            data_dict, data.get("text_normalized", "transcript")
+        )
         data_dict["language"] = data.get("language", "en")
         return data_dict
 

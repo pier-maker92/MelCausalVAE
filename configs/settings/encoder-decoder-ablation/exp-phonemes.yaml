@@ -13,7 +13,7 @@ training:
   eval_strategy: "steps"
   eval_steps: 100
   save_total_limit: 1
-  gradient_accumulation_steps: 2
+  gradient_accumulation_steps: 1
   dataloader_num_workers: 4
   min_learning_rate: 1e-5
   #from_pretrained: checkpoints/MelCausalVAE/sigma-vae/checkpoint-6000/model.safetensors
@@ -21,11 +21,11 @@ training:
   phonemes: true
 
 convformer:
-  compress_factor_C: 4
+  compress_factor_C: 2
   tf_heads: 8
   tf_layers: 4
   latent_dim: 64
-  n_residual_blocks: 3
+  n_residual_blocks: 1
   logvar_layer: false
   use_sofplus: false
   target_std: 1.0
@@ -33,9 +33,9 @@ convformer:
   kl_loss_weight: 1e-3
 
 cfm:
-  unet_dim: 1024
-  unet_depth: 8
-  unet_heads: 16
+  unet_dim: 512
+  unet_depth: 4
+  unet_heads: 8
   unet_dropout_rate: 0.1
   use_conv_layer: true
   audio_latent_dim: 64
