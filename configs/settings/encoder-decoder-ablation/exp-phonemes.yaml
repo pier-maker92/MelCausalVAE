@@ -6,12 +6,12 @@ training:
   per_device_train_batch_size: 4
   report_to: wandb
   wandb_project: flexi-vae
-  wandb_run_name: exp-phonemes
+  wandb_run_name: exp-phonemes-aligner
   fp16: false
   bf16: true
   save_steps: 1000
   eval_strategy: "steps"
-  eval_steps: 100
+  eval_steps: 250
   save_total_limit: 1
   gradient_accumulation_steps: 2
   dataloader_num_workers: 4

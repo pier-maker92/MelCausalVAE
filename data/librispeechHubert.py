@@ -11,9 +11,12 @@ from torch.utils.data import DataLoader
 from datasets import load_dataset, concatenate_datasets
 from modules.melspecEncoder import MelSpectrogramEncoder, MelSpectrogramConfig
 from data.audio_dataset import SimpleAudioDataset, DataCollator, TrainDatasetWrapper
+from phonemizer.separator import Separator
+from phonemizer import phonemize
 
 # import mel spec encoder
 mel_spec_encoder = MelSpectrogramEncoder(config=MelSpectrogramConfig())
+sep = Separator(phone=" ", word=" <sil> ", syllable=None)
 
 
 def simple_collate_fn(batch):
@@ -47,13 +50,28 @@ class LibriSpeech100h(SimpleAudioDataset):
                 concatenate_datasets(partitions_per_destination[destination]),
             )
         # select only the "audio_codes" column
-        # self.train_dataset = self.train_dataset.select_columns(["audio_codes"])
+        self.train_dataset = self.train_dataset.map(self.get_phonemes, batched=True, num_proc=1, batch_size=1000)
+        self.test_dataset = self.test_dataset.map(self.get_phonemes, batched=True, num_proc=1, batch_size=1000)  # type: ignore
 
     def _partition_to_destination(self, partition_name):
         if "train" in partition_name:
             return "train"
         elif "dev" in partition_name or "test" in partition_name:
             return "test"
+
+    def get_phonemes(self, example):
+        text = example["text"]
+        phoneme_str = phonemize(
+            text,
+            language="en-us",  # FIXME hardcoded language
+            backend="espeak",
+            separator=sep,
+            strip=True,
+            preserve_punctuation=False,
+            njobs=1,
+        )
+        example["phonemes"] = phoneme_str
+        return example
 
 
 # if __name__ == "__main__":

@@ -8,10 +8,12 @@ import torch.nn as nn
 from einops import rearrange
 from dataclasses import dataclass
 from typing import Optional, List, Tuple
-from modules.ctc import CTC
+
+# from modules.ctc import CTC
 from modules.regulator import InterpolateRegulator
 from modules.semantic_module import SeamlessM4Tv2Encoder
 from modules.flash_attn_encoder import FlashTransformerEncoder
+from modules.aligner import PhonemeAligner
 
 
 @dataclass
@@ -307,7 +309,9 @@ class ConvformerEncoder(SigmaVAEEncoder):
         self.semantic_embeddings_proj = nn.Linear(latent_dim, 512)
         self.padding_embedding = nn.Parameter(torch.randn(512))
 
-        self.ctc = CTC(input_size=512, hidden_size=512, output_size=250)
+        self.aligner = PhonemeAligner(
+            input_size=512, hidden_size=512, num_heads=8, max_phonemes=250, phoneme_embed_dim=256
+        )
 
     def collapse_frame(self, latent_frames: torch.FloatTensor, durations: torch.LongTensor) -> torch.FloatTensor:
         # get the mean value of latent_frames based on the durations
@@ -341,7 +345,7 @@ class ConvformerEncoder(SigmaVAEEncoder):
         x: torch.FloatTensor,
         padding_mask: torch.BoolTensor = None,
         hubert_guidance: Optional[List[any]] = None,
-        transcriptions: Optional[List[str]] = None,
+        phonemes: Optional[List[str]] = None,
         **kwargs,
     ):  # x: [B, T, 100]
         B, T, F = x.shape
@@ -376,14 +380,14 @@ class ConvformerEncoder(SigmaVAEEncoder):
         semantic_loss = None
         ctc_loss = None
         ctc_boundaries = None
-        if transcriptions is not None:
+        alignment_loss = None
+        if phonemes is not None:
             assert padding_mask is not None, "padding_mask is required for ctc loss"
-            ctc_loss, boundaries, durations, log_probs = self.ctc(
+            ctc_loss, ctc_boundaries, durations, attention_weights = self.aligner(
                 z,
-                transcriptions,
+                phonemes,
                 input_lengths=((~padding_mask).long().sum(dim=1)),
             )
-            ctc_boundaries = boundaries
 
         if hubert_guidance is not None:
             assert (

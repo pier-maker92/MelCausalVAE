@@ -60,7 +60,7 @@ class PhonemeAligner(nn.Module):
         self.register_buffer("pos_encoding", self._generate_pos_encoding(5000, hidden_size))
 
         # Dynamic vocabulary for phoneme-to-index mapping (blank=0, unk=1)
-        self.vocab = {"<blank>": 0, "<unk>": 1}
+        self.vocab = {"<blank>": 0, "<unk>": 1, "<sil>": 2}
         self._unk_warnings = set()
 
     def _generate_pos_encoding(self, max_len: int, d_model: int) -> torch.Tensor:
@@ -108,42 +108,17 @@ class PhonemeAligner(nn.Module):
             self.vocab["<unk>"] = 1
         self._unk_warnings = set()
 
-    def get_phonemes(self, transcript: List[str], language: str = "en-us") -> List[List[str]]:
+    def get_phonemes(self, phonemes: List[str], language: str = "en-us") -> List[List[str]]:
         """
         Convert transcripts to phoneme tokens.
         Returns: List[B] of List[phoneme]
         """
         phonemes_batch = []
-        sep = Separator(phone=" ", word=" | ", syllable=None)
 
-        for text in transcript:
-            if not text or text.strip() == "":
-                phonemes_batch.append([])
-                continue
-
-            try:
-                phoneme_str = phonemize(
-                    text,
-                    language=language,
-                    backend="espeak",
-                    separator=sep,
-                    strip=True,
-                    preserve_punctuation=False,
-                    njobs=1,
-                )
-            except RuntimeError as e:
-                if "failed to find espeak" in str(e).lower() or "espeak" in str(e).lower():
-                    msg = (
-                        "Phonemizer non trova la libreria espeak. "
-                        "Soluzione: export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH"
-                    )
-                    raise RuntimeError(msg) from e
-                raise
-
+        for phoneme_str in phonemes:
+            phoneme_str = f"<sil> {phoneme_str} <sil>"
             tokens = phoneme_str.split()
-            tokens = [t for t in tokens if t != "|"]
             phonemes_batch.append(tokens)
-
         return phonemes_batch
 
     def phonemes_to_indices(self, phonemes: List[List[str]]) -> Tuple[torch.LongTensor, torch.LongTensor]:
@@ -282,13 +257,13 @@ class PhonemeAligner(nn.Module):
     def forward(
         self,
         z: torch.FloatTensor,
-        transcript: List[str],
+        phonemes: List[str],
         input_lengths: torch.LongTensor = None,
     ):
         """
         Args:
             z: [B, T, D] audio features (mel spectrogram latents)
-            transcript: [B] list of transcriptions
+            phonemes: [B] list of phonemes
             input_lengths: [B] actual lengths of sequences (excluding padding)
 
         Returns:
@@ -311,7 +286,7 @@ class PhonemeAligner(nn.Module):
         audio_features = audio_features + pos_enc
 
         # Get phonemes and convert to indices
-        phonemes = self.get_phonemes(transcript)
+        phonemes = self.get_phonemes(phonemes)
         phoneme_indices, phoneme_lengths = self.phonemes_to_indices(phonemes)
         phoneme_indices = phoneme_indices.to(z.device)
         phoneme_lengths = phoneme_lengths.to(z.device)
@@ -345,8 +320,8 @@ class PhonemeAligner(nn.Module):
             average_attn_weights=False,  # Get attention per head
         )
 
-        # Average attention over heads: [P, B, T] -> [B, P, T]
-        attention_weights = attention_weights.mean(dim=1).permute(1, 0, 2)
+        # Average attention over heads: [B, num_heads, P, T] -> [B, P, T]
+        attention_weights = attention_weights.mean(dim=1)
 
         # Compute alignment loss
         loss = self.compute_alignment_loss(attention_weights, phoneme_lengths, input_lengths)

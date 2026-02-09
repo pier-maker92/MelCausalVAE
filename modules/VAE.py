@@ -107,7 +107,7 @@ class VAE(torch.nn.Module):
             step=kwargs.get("training_step", None),
             semantic_guidance=semantic_output,
             hubert_guidance=kwargs.get("hubert_guidance", None),
-            transcriptions=kwargs.get("transcriptions", None),
+            phonemes=kwargs.get("phonemes", None),
         )
         context_vector = convformer_output.z  # if not self.encoder.config.logvar_layer else convformer_output.z
 
@@ -198,7 +198,7 @@ class VAE(torch.nn.Module):
         guidance_scale: float = 1.0,
         generator: Optional[torch.Generator] = None,
         hubert_guidance: Optional[torch.Tensor] = None,
-        transcriptions: Optional[list] = None,
+        phonemes: Optional[list] = None,
     ):
         """
         Encode audio to latent space and generate mel spectrogram.
@@ -215,7 +215,7 @@ class VAE(torch.nn.Module):
             padding_mask=encoded_audios.padding_mask,
             step=None,
             hubert_guidance=hubert_guidance,
-            transcriptions=transcriptions,
+            phonemes=phonemes,
         )
         context_vector = convformer_output.z  # if not self.encoder.config.logvar_layer else convformer_output.z
         # Generate mel spectrogram from latent

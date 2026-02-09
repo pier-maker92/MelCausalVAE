@@ -65,6 +65,7 @@ class DataCollator(object):
         batch_tokenized_units = [None] * len(instances)
         batch_tokenized_units_durations = [None] * len(instances)
         batch_transcriptions = [None] * len(instances)
+        batch_phonemes = [None] * len(instances)
         for i, instance in enumerate(instances):
             if "audio_input" in instance:
                 batch_input_audios_srs[i] = (
@@ -97,6 +98,9 @@ class DataCollator(object):
                 batch_tokenized_units_durations[i] = torch.LongTensor(instance["tokenized_units_durations"])
             if "transcription" in instance:
                 batch_transcriptions[i] = instance["transcription"]
+            if "phonemes" in instance:
+                batch_phonemes[i] = instance["phonemes"]
+
         # if not all none add to the batch
         def all_none(batch):
             return all([x is None for x in batch])
@@ -132,6 +136,8 @@ class DataCollator(object):
             batch["hubert_guidance"] = BPEOutput(semantic_ids=tokenized_units, durations=tokenized_units_durations)
         if not all_none(batch_transcriptions):
             batch["transcriptions"] = batch_transcriptions
+        if not all_none(batch_phonemes):
+            batch["phonemes"] = batch_phonemes
         return batch
 
 
@@ -144,6 +150,7 @@ class TrainDatasetWrapper(SimpleAudioDataset):
         self.tokenizer.load("data/tokenizer.json")
         self.hubert_guidance = hubert_guidance
         self.phonemes = phonemes
+
     def __len__(self):
         return len(self.dataset)
 
@@ -154,11 +161,11 @@ class TrainDatasetWrapper(SimpleAudioDataset):
         data_dict["ids"] = data.get("id")
         data_dict["language"] = data.get("language", "en-us")
         if self.phonemes:
-            data_dict["transcription"] = data.get("text", None)
+            data_dict["phonemes"] = data.get("phonemes", None)
         # FIXME creating this monstrosity to test the padding system with a A10 gpu of only 16 GB
         limit = 50
         if self.hubert_guidance:
-            data_dict["units"] = data.get("audio_codes", None)#[:limit]
+            data_dict["units"] = data.get("audio_codes", None)  # [:limit]
             audio_codes, durations = self.tokenizer.encode(data_dict["units"])
             data_dict["tokenized_units"] = audio_codes
             data_dict["tokenized_units_durations"] = durations
