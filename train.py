@@ -11,6 +11,8 @@ import matplotlib.pyplot as plt
 from modules.cfm import DiTConfig
 from modules.VAE import VAE, VAEConfig
 from modules.Encoder import ConvformerEncoderConfig
+from modules.Tadastride.alignement import plot_duration_regions
+from einops import rearrange
 from modules.melspecEncoder import MelSpectrogramConfig
 from transformers import (
     Trainer,
@@ -102,7 +104,7 @@ class VAEtrainer(Trainer):
         super().__init__(**kwargs)
         self.phonemes = phonemes
         # Register granular losses
-        granular_losses = ["audio_loss", "kl_loss", "mu_mean", "mu_var"]
+        granular_losses = ["audio_loss", "kl_loss", "mu_mean", "mu_var", "align_loss"]
         try:
             if getattr(self.model.encoder.config, "semantic_regulation", False):
                 granular_losses.append("semantic_loss")
@@ -131,6 +133,7 @@ class VAEtrainer(Trainer):
             kl_loss = outputs.kl_loss
             semantic_loss = getattr(outputs, "semantic_loss", None)
             ctc_loss = getattr(outputs, "ctc_loss", None)
+            align_loss = getattr(outputs, "align_loss", None)
             mu_mean = getattr(outputs, "mu_mean")
             mu_var = getattr(outputs, "mu_var")
             loss = (
@@ -138,15 +141,17 @@ class VAEtrainer(Trainer):
                 + kl_loss
                 + (semantic_loss if semantic_loss is not None else 0.0)
                 + (ctc_loss if ctc_loss is not None else 0.0)
+                + (align_loss if align_loss is not None else 0.0)
             )
 
             # Accumulate granular losses
             if self.args.n_gpu > 1:
                 audio_loss = audio_loss.mean()
                 kl_loss = kl_loss.mean()
-
+                align_loss = align_loss.mean()
             self.control.granular_losses["audio_loss"] += audio_loss.detach() / self.args.gradient_accumulation_steps
             self.control.granular_losses["kl_loss"] += kl_loss.detach() / self.args.gradient_accumulation_steps
+            self.control.granular_losses["align_loss"] += align_loss.detach() / self.args.gradient_accumulation_steps
             if semantic_loss is not None:
                 if self.args.n_gpu > 1:
                     semantic_loss = semantic_loss.mean()
@@ -183,11 +188,13 @@ class VAEtrainer(Trainer):
             audio_loss = outputs.audio_loss
             kl_loss = outputs.kl_loss
             semantic_loss = getattr(outputs, "semantic_loss", None)
+            align_loss = getattr(outputs, "align_loss", None)
             loss = (
                 audio_loss
                 + kl_loss
                 + (semantic_loss if semantic_loss is not None else 0.0)
                 + (ctc_loss if ctc_loss is not None else 0.0)
+                + (align_loss if align_loss is not None else 0.0)
             )
             return (loss, outputs) if return_outputs else loss
 
@@ -312,21 +319,12 @@ class VAEtrainer(Trainer):
                 phonemes=phonemes,
             )
 
-        boundaries_mel = None
-        if self.phonemes and "ctc_boundaries" in results:
-            C = self.model.encoder.config.compress_factor_C
-            boundaries_mel = [
-                [(s * C, e * C, ph) for s, e, ph in sample_bounds]
-                for sample_bounds in results["ctc_boundaries"]
-            ]
-
         device_id = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
-        images, audios = [], []
+        boundaries_images, images, audios = [], [], []
 
         for idx in range(len(audios_srs)):
             pad_mask = results["padding_mask"][idx]
             valid_len = (~pad_mask).sum()
-            b_mel = boundaries_mel[idx] if boundaries_mel else None
 
             fig = self._create_mel_comparison_plot(
                 original=results["original_mel"][idx],
@@ -334,9 +332,21 @@ class VAEtrainer(Trainer):
                 padding_mask=pad_mask,
                 sample_idx=idx,
                 device_id=device_id,
-                boundaries_mel=b_mel,
             )
-            images.append(wandb.Image(fig, caption=f"Sample {idx} - Step {self.state.global_step} - Device {device_id}"))
+            images.append(
+                wandb.Image(fig, caption=f"Sample {idx} - Step {self.state.global_step} - Device {device_id}")
+            )
+            plt.close(fig)
+
+            fig = plot_duration_regions(
+                mel_spectrogram=rearrange(results["original_mel"][idx][:valid_len].float(), "t c -> c t"),
+                durations=results["durations"][idx],
+                z_length=results["z_lengths"][idx],
+                title=f"Sample {idx} - Step {self.state.global_step} - Device {device_id}",
+            )
+            boundaries_images.append(
+                wandb.Image(fig, caption=f"Sample {idx} - Step {self.state.global_step} - Device {device_id}")
+            )
             plt.close(fig)
 
             for mel_data, label in [
@@ -355,7 +365,14 @@ class VAEtrainer(Trainer):
                 )
 
         if wandb.run is not None:
-            wandb.log({"reconstructions": images, "reconstructions_audio": audios, "step": self.state.global_step})
+            wandb.log(
+                {
+                    "reconstructions": images,
+                    "boundaries": boundaries_images,
+                    "reconstructions_audio": audios,
+                    "step": self.state.global_step,
+                }
+            )
             logger.info(f"Logged {len(images)} reconstruction samples to wandb")
 
     def _create_mel_comparison_plot(

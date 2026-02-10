@@ -5,23 +5,23 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import torch
 import safetensors
 from typing import Optional
+from einops import rearrange
 from .cfm import DiT, DiTConfig
 from dataclasses import dataclass, asdict
 from .semantic_module import SeamlessM4Tv2Encoder
 from .semantic_mapper import SemanticMapperConfig, Z2YMapper
 from .Encoder import ConvformerEncoderConfig, ConvformerEncoder
 from .melspecEncoder import MelSpectrogramEncoder, MelSpectrogramConfig
-from data.tokenizer import BPETokenizer
+from .Tadastride.alignement import upsample_soft_train, upsample_hard_infer, compose_alignments
 
 
 @dataclass
 class VAEOutput:
     audio_loss: torch.Tensor
     kl_loss: torch.Tensor
-    semantic_loss: Optional[torch.Tensor] = None
     mu_mean: Optional[torch.Tensor] = None
     mu_var: Optional[torch.Tensor] = None
-    ctc_loss: Optional[torch.FloatTensor] = None
+    align_loss: Optional[torch.Tensor] = None
 
 
 @dataclass
@@ -97,35 +97,32 @@ class VAE(torch.nn.Module):
 
     def forward(self, audios_srs, **kwargs):
         encoded_audios = self.wav2mel(audios_srs)
-        semantic_output = None
-        if self.config.add_semantic_distillation:
-            semantic_output = self.semantic_module(audios_srs)
 
         convformer_output = self.encoder(
             x=encoded_audios.audio_features,
             padding_mask=encoded_audios.padding_mask,
             step=kwargs.get("training_step", None),
-            semantic_guidance=semantic_output,
-            hubert_guidance=kwargs.get("hubert_guidance", None),
             phonemes=kwargs.get("phonemes", None),
         )
-        context_vector = convformer_output.z  # if not self.encoder.config.logvar_layer else convformer_output.z
+        z = rearrange(convformer_output.z, "b t c -> b c t")
+        A = compose_alignments([a for a in convformer_output.align_list if a is not None])
+        context_vector = upsample_soft_train(z, A)
+        context_vector = rearrange(context_vector, "b c t -> b t c")
 
         audio_loss = self.decoder(
             target=encoded_audios.audio_features,
             target_padding_mask=encoded_audios.padding_mask,
             context_vector=context_vector,
-            hubert_guidance=convformer_output.hubert_guidance,
         ).loss
-        mu_mean = context_vector[~convformer_output.padding_mask].mean()
-        mu_var = context_vector[~convformer_output.padding_mask].var()
+
+        mu_mean = convformer_output.z[~convformer_output.padding_mask].mean()
+        mu_var = convformer_output.z[~convformer_output.padding_mask].var()
         return VAEOutput(
             audio_loss=audio_loss,
             kl_loss=convformer_output.kl_loss,
-            semantic_loss=convformer_output.semantic_loss,
+            align_loss=convformer_output.align_loss,
             mu_mean=mu_mean,
             mu_var=mu_var,
-            ctc_loss=convformer_output.ctc_loss,
         )
 
     @torch.no_grad()
@@ -209,15 +206,13 @@ class VAE(torch.nn.Module):
         encoded_audios = self.wav2mel(audios_srs)
         original_mel = encoded_audios.audio_features
 
-        # Encode to latent space (with optional transcriptions for CTC boundaries)
-        convformer_output = self.encoder(
+        convformer_output = self.encoder.encode(
             x=original_mel,
             padding_mask=encoded_audios.padding_mask,
-            step=None,
-            hubert_guidance=hubert_guidance,
-            phonemes=phonemes,
         )
-        context_vector = convformer_output.z  # if not self.encoder.config.logvar_layer else convformer_output.z
+        z = rearrange(convformer_output.z, "b t c -> b c t")
+        context_vector, mask = upsample_hard_infer(z, convformer_output.durations)
+        context_vector = rearrange(context_vector, "b c t -> b t c")
         # Generate mel spectrogram from latent
         reconstructed_mel = self.decoder.generate(
             num_steps=num_steps,
@@ -225,8 +220,7 @@ class VAE(torch.nn.Module):
             temperature=temperature,
             guidance_scale=guidance_scale,
             generator=generator,
-            padding_mask=convformer_output.padding_mask,
-            hubert_guidance=convformer_output.hubert_guidance,
+            padding_mask=~mask,
         )
         if self.config.mel_spec_config.normalize:
             original_mel = self.denormalize_mel(original_mel)
@@ -235,9 +229,8 @@ class VAE(torch.nn.Module):
         result = {
             "original_mel": original_mel,
             "reconstructed_mel": reconstructed_mel,
-            "context_vector": context_vector,
+            "durations": convformer_output.durations,
+            "z_lengths": convformer_output.z_lengths,
             "padding_mask": encoded_audios.padding_mask,
         }
-        if convformer_output.ctc_boundaries is not None:
-            result["ctc_boundaries"] = convformer_output.ctc_boundaries
         return result
