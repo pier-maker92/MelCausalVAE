@@ -32,6 +32,8 @@ class LibriSpeech100h(SimpleAudioDataset):
                     os.cpu_count(),
                     16,
                 ),
+                cache_dir="./clean_cache_dir",
+                
             )
             datasets.append(ds)
 
