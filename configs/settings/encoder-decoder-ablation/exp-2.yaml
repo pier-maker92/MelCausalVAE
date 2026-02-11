@@ -17,7 +17,7 @@ training:
   dataloader_num_workers: 4
   min_learning_rate: 1e-5
   #from_pretrained: checkpoints/MelCausalVAE/sigma-vae/checkpoint-6000/model.safetensors
-  resume_from_checkpoint: /workspace/MelCausalVAE/checkpoints/MelCausalVAE/exp-2/checkpoint-1000
+  #resume_from_checkpoint: /workspace/MelCausalVAE/checkpoints/MelCausalVAE/exp-2/checkpoint-1000
 
 convformer:
   compress_factor_C: 2
