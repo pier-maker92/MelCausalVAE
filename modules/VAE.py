@@ -12,7 +12,6 @@ from .semantic_module import SeamlessM4Tv2Encoder
 from .semantic_mapper import SemanticMapperConfig, Z2YMapper
 from .Encoder import ConvformerEncoderConfig, ConvformerEncoder
 from .melspecEncoder import MelSpectrogramEncoder, MelSpectrogramConfig
-from .Tadastride.alignement import upsample_soft_train, upsample_hard_infer, compose_alignments
 
 
 @dataclass
@@ -104,11 +103,7 @@ class VAE(torch.nn.Module):
             step=kwargs.get("training_step", None),
             phonemes=kwargs.get("phonemes", None),
         )
-        z = rearrange(convformer_output.z, "b t c -> b c t")
-        A = compose_alignments([a for a in convformer_output.align_list if a is not None])
-        context_vector = upsample_soft_train(z, A)
-        context_vector = rearrange(context_vector, "b c t -> b t c")
-
+        breakpoint()
         audio_loss = self.decoder(
             target=encoded_audios.audio_features,
             target_padding_mask=encoded_audios.padding_mask,
@@ -132,59 +127,6 @@ class VAE(torch.nn.Module):
     @torch.no_grad()
     def normalize_mel(self, mel: torch.Tensor):
         return (mel - self.wav2mel.mean) / self.wav2mel.std
-
-    @torch.no_grad()
-    def encode(self, audios_srs, return_original_mel: bool = False):
-        encoded_audios = self.wav2mel(audios_srs)
-        convformer_output = self.encoder(
-            x=encoded_audios.audio_features,
-            padding_mask=encoded_audios.padding_mask,
-            step=None,
-        )
-        if self.config.add_semantic_mapper:
-            convformer_output.semantic_features = self.semantic_mapper(convformer_output.mu).y.to(
-                convformer_output.mu.dtype
-            )
-        if not return_original_mel:
-            return convformer_output
-        else:
-            encoded_audios.audio_features = self.denormalize_mel(encoded_audios.audio_features)
-            return convformer_output, encoded_audios
-
-    @torch.no_grad()
-    def sample(
-        self,
-        num_steps: int = 4,
-        temperature: float = 1.0,
-        guidance_scale: float = 1.0,
-        z: Optional[torch.Tensor] = None,
-        mu: Optional[torch.Tensor] = None,
-        generator: Optional[torch.Generator] = None,
-        padding_mask: Optional[torch.BoolTensor] = None,
-        std: float = 1.0,
-    ):
-        """
-        Sample from the VAE.
-        """
-        # if z is not None:
-        #     context_vector = z
-        # elif µ is not None:
-        #     context_vector = self.encoder.reparameterize(µ)
-        # else:
-        #     raise ValueError("Either z or µ must be provided")
-
-        reconstructed_mel = self.decoder.generate(
-            num_steps=num_steps,
-            generator=generator,
-            temperature=temperature,
-            padding_mask=padding_mask,
-            context_vector=mu,
-            guidance_scale=guidance_scale,
-            std=std,
-        )
-        if self.config.mel_spec_config.normalize:
-            reconstructed_mel = self.denormalize_mel(reconstructed_mel)
-        return reconstructed_mel
 
     @torch.no_grad()
     def encode_and_sample(

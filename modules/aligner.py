@@ -1,335 +1,351 @@
-import os
+import json
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import List, Tuple, Dict
-from phonemizer import phonemize
-from phonemizer.separator import Separator
 
 
-class PhonemeAligner(nn.Module):
-    """
-    Attention-based phoneme alignment module.
-    Uses cross-attention between phoneme embeddings and audio features to find
-    frame-level phoneme boundaries.
-    """
+class PhonemesEmbeddings(nn.Module):
+    def __init__(self, num_embeddings, embedding_dim):
+        super(PhonemesEmbeddings, self).__init__()
+        self.embedding = nn.Embedding(num_embeddings, embedding_dim)
 
+    def forward(self, phonemes):
+        """
+        Args:
+            phonemes: [Batch, T_phonemes]
+        Returns:
+            phoneme_embeddings: [Batch, T_phonemes, embedding_dim]
+        """
+        return self.embedding(phonemes)
+
+
+class EfficientAlphaAttention(nn.Module):
+    def __init__(self, audio_dim, text_dim, attn_dim):
+        super(EfficientAlphaAttention, self).__init__()
+        self.query_proj = nn.Linear(audio_dim, attn_dim)
+        self.key_proj = nn.Linear(text_dim, attn_dim)
+        self.scale = 1.0 / math.sqrt(attn_dim)
+
+    def forward(self, L1, phonemes_embeddings, audio_mask=None, text_mask=None):
+        """
+        Args:
+            L1: [Batch, T_L1, audio_dim]
+            phonemes_embeddings: [Batch, T_phonemes, embedding_dim]
+            audio_mask: [Batch, T_L1] - 1 per i frame reali, 0 per padding
+            text_mask: [Batch, T_phonemes] - 1 per i fonemi reali, 0 per padding
+
+        Returns:
+            alpha: [Batch, T_phonemes, T_L1]
+        """
+        B, T_L1, _ = L1.shape
+        T_P = phonemes_embeddings.shape[1]
+
+        # 1. Proiezioni
+        Q = self.query_proj(L1)  # [B, T_L1, attn_dim]
+        K = self.key_proj(phonemes_embeddings)  # [B, T_P, attn_dim]
+
+        # 2. Score [B, T_L1, T_P]
+        scores = torch.matmul(Q, K.transpose(1, 2)) * self.scale
+
+        # 3. Applicazione della Text Mask (prima della Softmax)
+        # Impedisce a ogni frame audio di assegnare peso ai fonemi di padding
+        if text_mask is not None:
+            # Espandiamo la maschera per il broadcasting: [B, 1, T_P]
+            t_mask = text_mask.unsqueeze(1)
+            scores = scores.masked_fill(t_mask == 0, -1e9)
+
+        # Softmax sulla dimensione dei fonemi
+        alpha_prime = F.softmax(scores, dim=-1)  # [B, T_L1, T_P]
+
+        # 4. Applicazione della Audio Mask (dopo la Softmax)
+        # Impedisce ai frame audio di padding di avere pesi validi
+        if audio_mask is not None:
+            # Espandiamo la maschera per il broadcasting: [B, T_L1, 1]
+            a_mask = audio_mask.unsqueeze(2)
+            alpha_prime = alpha_prime * a_mask
+
+        # alpha shape: [Batch, T_phonemes, T_L1]
+        alpha = alpha_prime.transpose(1, 2)
+
+        return alpha
+
+
+class IMV(torch.nn.Module):
     def __init__(
         self,
-        input_size: int,
-        hidden_size: int,
-        num_heads: int = 4,
-        max_phonemes: int = 250,
-        phoneme_embed_dim: int = 128,
+        sigma: float = 0.5,
+        delta: float = 0.1,
     ):
-        super(PhonemeAligner, self).__init__()
+        super().__init__()
+        self.sigma = sigma
+        self.delta = delta
 
-        self.hidden_size = hidden_size
-        self.num_heads = num_heads
-        self.max_phonemes = max_phonemes
-        self.phoneme_embed_dim = phoneme_embed_dim
-
-        # Audio feature encoder
-        self.audio_encoder = nn.Sequential(
-            nn.LayerNorm(input_size),
-            nn.Linear(input_size, hidden_size),
-            nn.GELU(),
-            nn.Linear(hidden_size, hidden_size),
-            nn.GELU(),
-            nn.LayerNorm(hidden_size),
-            nn.Dropout(0.1),
+    def generate_index_vector(self, text_mask):
+        """Create index vector of text sequence.
+        Args:
+            text_mask: text_mask: mask of text-sequence. [B,T1]
+        returns:
+            index vector of text sequence. [B,T1]
+        """
+        p = (
+            torch.arange(0, text_mask.size(-1))
+            .repeat(text_mask.size(0), 1)
+            .float()
+            .to(text_mask.device)
         )
+        return p * text_mask
 
-        # Phoneme embedding layer
-        self.phoneme_embedding = nn.Embedding(max_phonemes, phoneme_embed_dim)
+    def imv_generator(self, alpha, p, mel_mask, text_length):
+        """Compute imv from alignment matrix alpha. Implementation of HMA
+        Args:
+            alpha: scaled dot attention [B,T1,T2]
+            p: index vector, output of generate_index_vector. [B,T1]
+            mel_mask: mask of mel-spectrogram [B, T2]
+            text_length: lengths of input text-sequence [B]
+        returns:
+            Index mapping vector (IMV) [B,T2]
+        """
+        imv_dummy = torch.bmm(alpha.transpose(1, 2), p.unsqueeze(-1)).squeeze(
+            -1
+        )  # [B,T2]
+        delta_imv = torch.relu(imv_dummy[:, 1:] - imv_dummy[:, :-1])  # [B, T2-1]
+        delta_imv = torch.cat(
+            (torch.zeros(alpha.size(0), 1).type_as(alpha), delta_imv), -1
+        )  # [B, T2-1] -> [B, T2]
+        imv = torch.cumsum(delta_imv, -1) * mel_mask.float()
+        last_imv = torch.max(imv, dim=-1)[0]  # get last element of imv
+        last_imv = torch.clamp(last_imv, min=1e-8).unsqueeze(-1)  # avoid zeros
+        imv = (
+            imv / last_imv * (text_length.float().unsqueeze(-1))
+        )  # multiply imv by a positive scalar to enforce 0<imv<T1-1
+        return imv
 
-        # Phoneme encoder
-        self.phoneme_encoder = nn.Sequential(
-            nn.Linear(phoneme_embed_dim, hidden_size), nn.GELU(), nn.LayerNorm(hidden_size), nn.Dropout(0.1)
+    def get_aligned_positions(self, imv, p, mel_mask, text_mask):
+        """compute aligned positions from imv
+        Args:
+            imv: index mapping vector #[B,T2]
+            p: index vector, output of generate_index_vector. [B,T1]
+            sigma: a scalar, default 0.5
+            mel_mask: mask of mel-spectrogram [B, T2]
+        returns:
+            Aligned positions [B,T1]
+        """
+        energies = -1 * ((imv.unsqueeze(1) - p.unsqueeze(-1)) ** 2) * self.sigma
+        energies = energies.masked_fill(
+            ~(mel_mask.unsqueeze(1).repeat(1, energies.size(1), 1)), -float("inf")
         )
-
-        # Cross-attention: phonemes (query) attend to audio frames (key, value)
-        self.cross_attention = nn.MultiheadAttention(
-            embed_dim=hidden_size,
-            num_heads=num_heads,
-            dropout=0.1,
-            batch_first=False,  # Expects [seq_len, batch, embed_dim]
+        beta = torch.softmax(energies, dim=-1)
+        q = (
+            torch.arange(0, mel_mask.size(-1))
+            .unsqueeze(0)
+            .repeat(imv.size(0), 1)
+            .float()
+            .to(imv.device)
         )
+        q = q * mel_mask.float()  # generate index vector of target sequence.
+        return torch.bmm(beta, q.unsqueeze(-1)) * text_mask.unsqueeze(-1)
 
-        # Positional encoding for audio frames
-        self.register_buffer("pos_encoding", self._generate_pos_encoding(5000, hidden_size))
-
-        # Dynamic vocabulary for phoneme-to-index mapping (blank=0, unk=1)
-        self.vocab = {"<blank>": 0, "<unk>": 1, "<sil>": 2}
-        self._unk_warnings = set()
-
-    def _generate_pos_encoding(self, max_len: int, d_model: int) -> torch.Tensor:
-        """Generate sinusoidal positional encoding."""
-        position = torch.arange(max_len).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2) * (-torch.log(torch.tensor(10000.0)) / d_model))
-
-        pos_encoding = torch.zeros(max_len, d_model)
-        pos_encoding[:, 0::2] = torch.sin(position * div_term)
-        pos_encoding[:, 1::2] = torch.cos(position * div_term)
-        return pos_encoding
-
-    def _update_vocab(self, phoneme: str) -> int:
-        """Add a new phoneme to vocabulary and return its index."""
-        if phoneme not in self.vocab:
-            new_idx = len(self.vocab)
-            if new_idx >= self.max_phonemes:
-                if phoneme not in self._unk_warnings:
-                    print(
-                        f"Warning: Vocabulary full (size={self.max_phonemes}). "
-                        f"Mapping phoneme '{phoneme}' to <unk> token."
-                    )
-                    self._unk_warnings.add(phoneme)
-                return self.vocab["<unk>"]
-            self.vocab[phoneme] = new_idx
-        return self.vocab[phoneme]
-
-    def get_vocab_size(self) -> int:
-        """Return current vocabulary size."""
-        return len(self.vocab)
-
-    def get_vocab(self) -> Dict[str, int]:
-        """Return copy of current vocabulary."""
-        return self.vocab.copy()
-
-    def set_vocab(self, vocab: Dict[str, int]):
-        """Set vocabulary (useful for loading pretrained models)."""
-        self.vocab = vocab.copy()
-        if len(self.vocab) > self.max_phonemes:
-            raise ValueError(
-                f"Provided vocabulary size ({len(self.vocab)}) exceeds max_phonemes ({self.max_phonemes})"
+    def reconstruct_align_from_aligned_positions(
+        self, e, mel_mask=None, text_mask=None
+    ):
+        """reconstruct alignment matrix from aligned positions
+        Args:
+            e: aligned positions [B,T1]
+            delta: a scalar, default 0.1
+            mel_mask: mask of mel-spectrogram [B, T2], None if inference or B==1
+            text_mask: mask of text-sequence, None if B==1
+        returns:
+            alignment matrix [B,T1,T2]
+        """
+        if mel_mask is None:  # inference phase:
+            max_length = torch.round(e[:, -1] + (e[:, -1] - e[:, -2]))
+        else:
+            max_length = mel_mask.size(-1)
+        q = (
+            torch.arange(0, max_length)
+            .unsqueeze(0)
+            .repeat(e.size(0), 1)
+            .float()
+            .to(e.device)
+        )
+        if mel_mask is not None:
+            q = q * mel_mask.float()
+        energies = -1 * self.delta * (q.unsqueeze(1) - e.unsqueeze(-1)) ** 2
+        if text_mask is not None:
+            energies = energies.masked_fill(
+                ~(text_mask.unsqueeze(-1).repeat(1, 1, max_length)), -float("inf")
             )
-        if "<unk>" not in self.vocab:
-            print("Warning: Loaded vocabulary missing <unk> token. Adding it at index 1.")
-            self.vocab["<unk>"] = 1
-        self._unk_warnings = set()
+        return torch.softmax(energies, dim=-1)
 
-    def get_phonemes(self, phonemes: List[str], language: str = "en-us") -> List[List[str]]:
+    def algin_frames(self, energies, mels):
+        """Align frames to text
+        Args:
+            energies: energies [B,T1,T2]
+            mels: mels [B,T2,F]
+        Returns:
+            aligned_mels: aligned mels [B,T1,F]
+        """
+        aligned_mels = torch.bmm(energies, mels)
+        return aligned_mels
+
+    def extract_durations(self, alignement):
+        """Align frames to text
+        Args:
+            alignement: alignement [B,T1]
+        Returns:
+            durations: durations [B,T1]
+        """
+        alignement = torch.cat(
+            (torch.zeros(alignement.size(0), 1).type_as(alignement), alignement), -1
+        )
+        delta = alignement.diff(dim=-1)
+        delta = torch.relu(delta)
+        return (
+            delta.cumsum(dim=-1)
+            .round()
+            .diff(dim=-1, prepend=torch.zeros(delta.size(0), 1).type_as(delta))
+        ).long()
+
+    def forward(
+        self,
+        mels: torch.FloatTensor,
+        alpha: torch.FloatTensor,
+        mel_mask: torch.FloatTensor,
+        text_mask: torch.FloatTensor,
+    ):
+        p = self.generate_index_vector(text_mask=text_mask)
+        text_length = text_mask.sum(dim=1)
+        imv = self.imv_generator(
+            alpha=alpha, p=p, mel_mask=mel_mask, text_length=text_length
+        )
+        alignement = self.get_aligned_positions(
+            imv=imv, p=p, mel_mask=mel_mask, text_mask=text_mask
+        ).squeeze(-1)
+        energies = reconstruct_align_from_aligned_positions(
+            alignement=alignement, mel_mask=mel_mask, text_mask=text_mask, delta=0.1
+        )
+        aligned_mels = algin_frames(energies=energies, mels=mels)
+        durations = extract_durations(alignement=alignement)
+
+        return aligned_mels, durations
+
+
+class PhonemeVocab:
+    def __init__(self, path_to_vocab: str):
+        self.vocab = self._load_vocab(path_to_vocab)
+        assert "<pad>" in self.vocab
+        assert "<sil>" in self.vocab
+        assert "<unk>" in self.vocab
+
+    def _load_vocab(self, path_to_vocab: str):
+        # load from json
+        with open(path_to_vocab, "r") as f:
+            vocab = json.load(f)
+        return vocab
+
+    def token2id(self, token: str):
+        token_id = self.vocab.get(token, self.vocab["<unk>"])
+        if token_id == self.vocab["<unk>"]:
+            print(f"Warning: token {token} not found in vocab")
+        return token_id
+
+    def _get_phonemes(self, phonemes: List[str]):
         """
         Convert transcripts to phoneme tokens.
         Returns: List[B] of List[phoneme]
         """
         phonemes_batch = []
-
         for phoneme_str in phonemes:
             phoneme_str = f"<sil> {phoneme_str} <sil>"
             tokens = phoneme_str.split()
-            phonemes_batch.append(tokens)
+            phonemes_batch.append([self.token2id(token) for token in tokens])
         return phonemes_batch
 
-    def phonemes_to_indices(self, phonemes: List[List[str]]) -> Tuple[torch.LongTensor, torch.LongTensor]:
-        """Convert phoneme tokens to indices."""
-        max_len = max(len(p) for p in phonemes) if phonemes else 0
-        batch_size = len(phonemes)
+    def __call__(self, phonemes: List[str], device: torch.device):
+        phoneme_ids = self._get_phonemes(phonemes)
+        phoneme_mask = [torch.ones(len(ph)) for ph in phoneme_ids]
+        # phoneme ids padded
+        phoneme_ids = (
+            torch.nn.utils.rnn.pad_sequence(
+                phoneme_ids, batch_first=True, padding_value=self.vocab["<pad>"]
+            )
+            .to(device)
+            .long()
+        )
+        # phoneme mask --> 1 means valid token, 0 means padding
+        phoneme_mask = (
+            torch.nn.utils.rnn.pad_sequence(
+                phoneme_mask, batch_first=True, padding_value=0
+            )
+            .to(device)
+            .bool()
+        )
+        return phoneme_ids, phoneme_mask
 
-        indices_batch = torch.zeros(batch_size, max_len, dtype=torch.long)
-        lengths = torch.zeros(batch_size, dtype=torch.long)
 
-        for i, phoneme_list in enumerate(phonemes):
-            for j, phoneme in enumerate(phoneme_list):
-                idx = self._update_vocab(phoneme)
-                indices_batch[i, j] = idx
-            lengths[i] = len(phoneme_list)
-
-        return indices_batch, lengths
-
-    def extract_boundaries_from_attention(
+class Aligner(nn.Module):
+    def __init__(
         self,
-        attention_weights: torch.Tensor,
-        phoneme_lengths: torch.Tensor,
-        audio_lengths: torch.Tensor,
-        phonemes: List[List[str]],
-    ) -> Tuple[List[List[Tuple[int, int, str]]], List[List[int]]]:
-        """
-        Extract frame boundaries from attention weights using peak detection.
+        attn_dim: int,
+        text_dim: int,
+        audio_dim: int,
+        embedding_dim: int,
+        num_embeddings: int,
+        sigma: float = 0.5,
+        delta: float = 0.1,
+    ):
+        super().__init__()
+        self.attention = EfficientAlphaAttention(audio_dim, text_dim, attn_dim)
+        self.imv = IMV(sigma, delta)
+        self.phonemes_embeddings = PhonemesEmbeddings(num_embeddings, embedding_dim)
+        self.phoneme_vocab = PhonemeVocab("data/vocab.json")
 
-        Args:
-            attention_weights: [B, num_phonemes, T] attention weights
-            phoneme_lengths: [B] actual phoneme sequence lengths
-            audio_lengths: [B] actual audio frame lengths
-            phonemes: List[B] of phoneme lists
-
-        Returns:
-            boundaries_batch: [(start_frame, end_frame, phoneme), ...]
-            durations_batch: [duration1, duration2, ...]
-        """
-        batch_size = attention_weights.size(0)
-        boundaries_batch = []
-        durations_batch = []
-
-        for b in range(batch_size):
-            num_phonemes = phoneme_lengths[b].item()
-            num_frames = audio_lengths[b].item()
-
-            if num_phonemes == 0:
-                boundaries_batch.append([])
-                durations_batch.append([])
-                continue
-
-            # Get attention weights for this sample [num_phonemes, T]
-            attn = attention_weights[b, :num_phonemes, :num_frames]
-
-            boundaries = []
-            durations = []
-
-            # For each phoneme, find the frame range where attention is highest
-            for p in range(num_phonemes):
-                phoneme_attn = attn[p]  # [T]
-
-                # Find weighted center of attention
-                frame_indices = torch.arange(num_frames, device=phoneme_attn.device, dtype=phoneme_attn.dtype)
-                center = (phoneme_attn * frame_indices).sum() / (phoneme_attn.sum() + 1e-8)
-
-                # Find frames with significant attention (> threshold)
-                threshold = phoneme_attn.max() * 0.1
-                significant_frames = (phoneme_attn > threshold).nonzero(as_tuple=True)[0]
-
-                if len(significant_frames) > 0:
-                    start_frame = significant_frames[0].item()
-                    end_frame = significant_frames[-1].item() + 1  # +1 for exclusive end
-                else:
-                    # Fallback: use center ± 1
-                    start_frame = max(0, int(center.item()) - 1)
-                    end_frame = min(num_frames, int(center.item()) + 2)
-
-                duration = end_frame - start_frame
-                phoneme_text = phonemes[b][p]
-
-                boundaries.append((start_frame, end_frame, phoneme_text))
-                durations.append(duration)
-
-            boundaries_batch.append(boundaries)
-            durations_batch.append(durations)
-
-        return boundaries_batch, durations_batch
-
-    def compute_alignment_loss(
-        self, attention_weights: torch.Tensor, phoneme_lengths: torch.Tensor, audio_lengths: torch.Tensor
+    def generate_pos_encoding(
+        self, max_len: int, d_model: int, device: torch.device, dtype: torch.dtype
     ) -> torch.Tensor:
-        """
-        Compute alignment loss to encourage monotonic and complete alignments.
+        """Generate sinusoidal positional encoding."""
+        position = torch.arange(max_len).unsqueeze(1).to(device)
+        div_term = torch.exp(
+            torch.arange(0, d_model, 2) * (-torch.log(torch.tensor(10000.0)) / d_model)
+        ).to(device)
 
-        Args:
-            attention_weights: [B, max_phonemes, T]
-            phoneme_lengths: [B]
-            audio_lengths: [B]
-        """
-        batch_size = attention_weights.size(0)
-
-        # Monotonicity loss: encourage attention to move forward
-        monotonic_loss = 0.0
-
-        # Coverage loss: ensure all frames are attended to
-        coverage_loss = 0.0
-
-        for b in range(batch_size):
-            num_phonemes = phoneme_lengths[b].item()
-            num_frames = audio_lengths[b].item()
-
-            if num_phonemes == 0:
-                continue
-
-            attn = attention_weights[b, :num_phonemes, :num_frames]  # [P, T]
-
-            # Monotonicity: penalize backward attention
-            # Compute center of mass for each phoneme
-            frame_indices = torch.arange(num_frames, device=attn.device, dtype=attn.dtype)
-            centers = (attn * frame_indices.unsqueeze(0)).sum(dim=1) / (attn.sum(dim=1) + 1e-8)
-
-            # Penalize if center moves backward
-            if num_phonemes > 1:
-                center_diffs = centers[1:] - centers[:-1]
-                monotonic_loss += F.relu(-center_diffs).sum()
-
-            # Coverage: sum of attention over phonemes should be ~1 for each frame
-            coverage = attn.sum(dim=0)  # [T]
-            coverage_loss += ((coverage - 1.0) ** 2).mean()
-
-        monotonic_loss = monotonic_loss / batch_size
-        coverage_loss = coverage_loss / batch_size
-
-        return monotonic_loss + coverage_loss
+        pos_encoding = torch.zeros(max_len, d_model)
+        pos_encoding[:, 0::2] = torch.sin(position * div_term)
+        pos_encoding[:, 1::2] = torch.cos(position * div_term)
+        return pos_encoding.to(device=device, dtype=dtype)
 
     def forward(
         self,
-        z: torch.FloatTensor,
+        mels: torch.FloatTensor,
         phonemes: List[str],
-        input_lengths: torch.LongTensor = None,
+        mels_mask: torch.BoolTensor,
     ):
-        """
-        Args:
-            z: [B, T, D] audio features (mel spectrogram latents)
-            phonemes: [B] list of phonemes
-            input_lengths: [B] actual lengths of sequences (excluding padding)
-
-        Returns:
-            loss: alignment loss
-            boundaries: List of frame boundaries per batch item
-            durations: List of durations per batch item
-            attention_weights: [B, max_phonemes, T] attention weights
-        """
-        batch_size, seq_len, _ = z.shape
-
-        # If input_lengths not provided, assume no padding
-        if input_lengths is None:
-            input_lengths = torch.full((batch_size,), seq_len, dtype=torch.long, device=z.device)
-
-        # Encode audio features
-        audio_features = self.audio_encoder(z)  # [B, T, H]
-
-        # Add positional encoding to audio features
-        pos_enc = self.pos_encoding[:seq_len].unsqueeze(0).to(z.device)  # [1, T, H]
-        audio_features = audio_features + pos_enc
-
-        # Get phonemes and convert to indices
-        phonemes = self.get_phonemes(phonemes)
-        phoneme_indices, phoneme_lengths = self.phonemes_to_indices(phonemes)
-        phoneme_indices = phoneme_indices.to(z.device)
-        phoneme_lengths = phoneme_lengths.to(z.device)
-
-        # Embed and encode phonemes
-        phoneme_embeds = self.phoneme_embedding(phoneme_indices)  # [B, P, E]
-        phoneme_features = self.phoneme_encoder(phoneme_embeds)  # [B, P, H]
-
-        # Prepare for cross-attention: [seq_len, batch, embed_dim]
-        # Query: phonemes, Key/Value: audio
-        query = phoneme_features.permute(1, 0, 2)  # [P, B, H]
-        key = value = audio_features.permute(1, 0, 2)  # [T, B, H]
-
-        # Create attention masks
-        # Key padding mask: [B, T] - True where padding
-        key_padding_mask = torch.arange(seq_len, device=z.device).unsqueeze(0) >= input_lengths.unsqueeze(1)
-
-        # Query padding mask: [B, P] - True where padding
-        max_phoneme_len = phoneme_indices.size(1)
-        query_padding_mask = torch.arange(max_phoneme_len, device=z.device).unsqueeze(0) >= phoneme_lengths.unsqueeze(
-            1
+        # get phonemes
+        phonemes_ids, phonemes_mask = self.phoneme_vocab(phonemes)
+        phonemes_embeddings = self.phonemes_embeddings(phonemes_ids)
+        # add position encoding
+        phonemes_embeddings += self.generate_pos_encoding(
+            phonemes_ids.size(1),
+            self.phonemes_embeddings.embedding_dim,
+            mels.device,
+            mels.dtype,
         )
-
-        # Cross-attention
-        attn_output, attention_weights = self.cross_attention(
-            query=query,
-            key=key,
-            value=value,
-            key_padding_mask=key_padding_mask,
-            need_weights=True,
-            average_attn_weights=False,  # Get attention per head
+        mels += self.generate_pos_encoding(
+            mels.size(1),
+            self.audio_dim,
+            mels.device,
+            mels.dtype,
         )
-
-        # Average attention over heads: [B, num_heads, P, T] -> [B, P, T]
-        attention_weights = attention_weights.mean(dim=1)
-
-        # Compute alignment loss
-        loss = self.compute_alignment_loss(attention_weights, phoneme_lengths, input_lengths)
-
-        # Extract boundaries and durations
-        with torch.no_grad():
-            boundaries, durations = self.extract_boundaries_from_attention(
-                attention_weights, phoneme_lengths, input_lengths, phonemes
-            )
-
-        return loss, boundaries, durations, attention_weights
+        # get scores
+        alpha = self.attention(
+            mels=mels,
+            phonemes_embeddings=phonemes_embeddings,
+            mels_mask=mels_mask,
+            phonemes_mask=phonemes_mask,
+        )
+        # get aligned mels and durations
+        aligned_mels, durations = self.imv(
+            alpha=alpha, mels=mels, mel_mask=mels_mask, text_mask=phonemes_mask
+        )
+        return aligned_mels, durations

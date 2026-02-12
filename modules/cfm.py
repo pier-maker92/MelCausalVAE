@@ -36,40 +36,6 @@ class DiTConfig:
     learned_prior: bool = False
     use_vp_schedule: bool = False
     is_causal: bool = True
-    # def __init__(
-    #     self,
-    #     audio_latent_dim: int,
-    #     unet_dim: int = 512,
-    #     unet_depth: int = 6,
-    #     unet_heads: int = 8,
-    #     unet_dropout_rate: float = 0.0,
-    #     use_conv_layer: bool = False,
-    #     use_sos_token: bool = False,
-    #     sigma: float = 1e-5,
-    #     expansion_factor: int = 1,
-    #     mel_channels: int = 100,
-    #     uncond_prob: float = 0.0,
-    # ):
-    #     """
-    #     depformer_dim: int - Hidden dimension of the Depth Transformer
-    #     depformer_dim_feedforward: int - Feedforward dimension of the Depth Transformer
-    #     depformer_num_heads: int - Number of heads in the Depth Transformer
-    #     depformer_num_layers: int - Number of layers in the Depth Transformer
-    #     depformer_casual: bool - Whether the Depth Transformer is causal
-    #     """
-
-    #     # unet specific
-    #     self.sigma = sigma
-    #     self.unet_dim = unet_dim
-    #     self.unet_heads = unet_heads
-    #     self.unet_depth = unet_depth
-    #     self.use_sos_token = use_sos_token
-    #     self.use_conv_layer = use_conv_layer
-    #     self.audio_latent_dim = audio_latent_dim
-    #     self.unet_dropout_rate = unet_dropout_rate
-    #     self.expansion_factor = expansion_factor
-    #     self.mel_channels = mel_channels
-    #     self.uncond_prob = uncond_prob
 
 
 class DiT(torch.nn.Module):
@@ -100,7 +66,9 @@ class DiT(torch.nn.Module):
         self.hubert_norm = nn.LayerNorm(self.audio_latent_dim)
         # hubert + context projection
         self.hubert_and_context_proj = nn.Sequential(
-            nn.Linear(self.audio_latent_dim + self.audio_latent_dim, self.audio_latent_dim),
+            nn.Linear(
+                self.audio_latent_dim + self.audio_latent_dim, self.audio_latent_dim
+            ),
             nn.LayerNorm(self.audio_latent_dim),
         )
         # noise projection
@@ -110,12 +78,14 @@ class DiT(torch.nn.Module):
                 nn.LayerNorm(self.unet_dim),
             )
             self.prior_proj = nn.Sequential(
-                nn.Linear(self.audio_latent_dim, self.mel_channels), nn.LayerNorm(self.mel_channels)
+                nn.Linear(self.audio_latent_dim, self.mel_channels),
+                nn.LayerNorm(self.mel_channels),
             )
 
         else:
             self.noise_proj = nn.Sequential(
-                nn.Linear(self.unet_dim + self.mel_channels, self.unet_dim), nn.LayerNorm(self.unet_dim)
+                nn.Linear(self.unet_dim + self.mel_channels, self.unet_dim),
+                nn.LayerNorm(self.unet_dim),
             )
 
         # transformer
@@ -130,7 +100,9 @@ class DiT(torch.nn.Module):
         )
         self.transformer.to(dtype=torch.bfloat16)
 
-    def reparameterize(self, mu: torch.FloatTensor, std: Optional[float] = None) -> torch.FloatTensor:
+    def reparameterize(
+        self, mu: torch.FloatTensor, std: Optional[float] = None
+    ) -> torch.FloatTensor:
         eps = torch.randn_like(mu)
         if std is None:
             std = self.sample_scalar_std(mu)
@@ -224,7 +196,9 @@ class DiT(torch.nn.Module):
         )
 
         # ---- get the flow ----
-        loss = self.let_it_flow(times=times, state=state, target=v_target, flow_mask=target_padding_mask)
+        loss = self.let_it_flow(
+            times=times, state=state, target=v_target, flow_mask=target_padding_mask
+        )
 
         return DiTOutput(
             loss=loss,
@@ -270,7 +244,9 @@ class DiT(torch.nn.Module):
                 raise ValueError("Padding mask is required for batch size > 1")
         self.transformer.to(device=context_vector.device, dtype=context_vector.dtype)
         # ---- time span ----
-        t_span = torch.linspace(0, 1, num_steps, device=context_vector.device, dtype=context_vector.dtype)
+        t_span = torch.linspace(
+            0, 1, num_steps, device=context_vector.device, dtype=context_vector.dtype
+        )
 
         # t_span = t_lin**gamma
         # ---- ODE ----
@@ -309,7 +285,9 @@ class DiT(torch.nn.Module):
         )
         if cfg_scale == 1.0:
             return cond_out
-        uncond_state = self.noise_proj(torch.cat([torch.zeros_like(context_vector), state], dim=-1))
+        uncond_state = self.noise_proj(
+            torch.cat([torch.zeros_like(context_vector), state], dim=-1)
+        )
 
         uncond_out = self.transformer(
             x=uncond_state,
@@ -317,6 +295,8 @@ class DiT(torch.nn.Module):
             attention_mask=attention_mask,
         )
 
-        final = (cfg_scale * cond_out + (1 - cfg_scale) * uncond_out).to(context_vector.dtype)
+        final = (cfg_scale * cond_out + (1 - cfg_scale) * uncond_out).to(
+            context_vector.dtype
+        )
 
         return final
