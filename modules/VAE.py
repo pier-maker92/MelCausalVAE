@@ -94,6 +94,15 @@ class VAE(torch.nn.Module):
         self.load_state_dict(state_dict, strict=False)
         print(f"Loaded checkpoint from {checkpoint_path}")
 
+    def repeat_tokens(self, z, durations):
+        return torch.nn.utils.rnn.pad_sequence(
+            [
+                torch.repeat_interleave(z[i], d, dim=0)
+                for i, d in enumerate(durations.round().long())
+            ],
+            batch_first=True,
+        )
+
     def forward(self, audios_srs, **kwargs):
         encoded_audios = self.wav2mel(audios_srs)
 
@@ -103,11 +112,16 @@ class VAE(torch.nn.Module):
             step=kwargs.get("training_step", None),
             phonemes=kwargs.get("phonemes", None),
         )
-        breakpoint()
+
+        upsampled_z = self.repeat_tokens(
+            convformer_output.z,
+            convformer_output.durations * 2,  # FIXME this is hardcoded
+        )
+
         audio_loss = self.decoder(
             target=encoded_audios.audio_features,
             target_padding_mask=encoded_audios.padding_mask,
-            context_vector=context_vector,
+            context_vector=upsampled_z,
         ).loss
 
         mu_mean = convformer_output.z[~convformer_output.padding_mask].mean()

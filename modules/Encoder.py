@@ -14,7 +14,7 @@ from typing import Optional, List, Tuple
 from modules.regulator import InterpolateRegulator
 from modules.semantic_module import SeamlessM4Tv2Encoder
 from modules.flash_attn_encoder import FlashTransformerEncoder
-from modules.aligner import IMV, EfficientAlphaAttention
+from modules.aligner import IMV, EfficientAlphaAttention, Aligner
 
 
 @dataclass
@@ -48,7 +48,9 @@ class ConvformerEncoderConfig(SigmaVAEencoderConfig):
     latent_dim: int = 64
     n_residual_blocks: int = 3
     num_embeddings: int = 100
-    embedding_dim: int = 256
+    embedding_dim: int = 80
+    phoneme_parsing_mode: str = "phoneme"
+    vocab_path: str = "data/vocab.json"
 
 
 class SigmaVAEEncoder(nn.Module):
@@ -353,13 +355,14 @@ class ConvformerEncoder(SigmaVAEEncoder):
         if config.logvar_layer:
             self.logvar = nn.Linear(512, latent_dim)
 
-        self.aligner = IMV()
-        self.efficient_alpha_attention = EfficientAlphaAttention(
-            num_embeddings=config.num_embeddings,
-            embedding_dim=config.embedding_dim,
-            audio_dim=512,
-            text_dim=config.embedding_dim,
+        self.aligner = Aligner(
             attn_dim=config.embedding_dim,
+            text_dim=config.embedding_dim,
+            audio_dim=512,
+            embedding_dim=config.embedding_dim,
+            num_embeddings=config.num_embeddings,
+            parsing_mode=config.phoneme_parsing_mode,
+            vocab_path=config.vocab_path,
         )
 
     def forward(
@@ -394,14 +397,15 @@ class ConvformerEncoder(SigmaVAEEncoder):
 
         # Flatten freq to tokens and run causal Transformer
         hiddens = x.transpose(1, 2)  # [B, T/C, 512]
-        padding_mask = self._resize_padding_mask(padding_mask, z.shape[1])
+        padding_mask = self._resize_padding_mask(padding_mask, hiddens.shape[1])
 
         # get alignement
-        z, durations = self.aligner(
+        z, durations, padding_mask = self.aligner(
             mels=hiddens,
             phonemes=phonemes,
             mels_mask=~padding_mask,  # NOTE: padding_mask is False for padding tokens, but aligner expects True for padding tokens
         )
+        assert not torch.isnan(z).any(), "z contains nan after aligner"
         z = self.transformer(z)  # [B, T/C, 512]
 
         mu = self.mu(z)

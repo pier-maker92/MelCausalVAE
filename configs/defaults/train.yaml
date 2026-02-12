@@ -30,3 +30,5 @@ training:
   min_learning_rate: 1e-6
   hubert_guidance: false
   phonemes: false
+  phoneme_parsing_mode: "phoneme"
+  vocab_path: "data/vocab.json"

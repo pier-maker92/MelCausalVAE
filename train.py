@@ -71,9 +71,14 @@ def get_cosine_schedule_with_warmup_and_min_lr(
     def lr_lambda(current_step):
         if current_step < num_warmup_steps:
             return float(current_step) / float(max(1, num_warmup_steps))
-        progress = float(current_step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))
+        progress = float(current_step - num_warmup_steps) / float(
+            max(1, num_training_steps - num_warmup_steps)
+        )
         # Cosine annealing with minimum learning rate
-        cosine_value = 0.5 * (1.0 + torch.cos(torch.tensor(num_cycles * 2.0 * 3.141592653589793 * progress)))
+        cosine_value = 0.5 * (
+            1.0
+            + torch.cos(torch.tensor(num_cycles * 2.0 * 3.141592653589793 * progress))
+        )
         # Scale cosine from [lr_min, initial_lr] instead of [0, initial_lr]
         return (lr_min / initial_lr) + (1.0 - lr_min / initial_lr) * cosine_value
 
@@ -93,7 +98,9 @@ class AddGranularLossesToTrainerState(TrainerCallback):
         control: TrainerControl,
         **kwargs,
     ):
-        control.granular_losses = {k: torch.tensor(0.0).to(args.device) for k in self.granular_losses}
+        control.granular_losses = {
+            k: torch.tensor(0.0).to(args.device) for k in self.granular_losses
+        }
         return control
 
 
@@ -149,9 +156,16 @@ class VAEtrainer(Trainer):
                 audio_loss = audio_loss.mean()
                 kl_loss = kl_loss.mean()
                 align_loss = align_loss.mean()
-            self.control.granular_losses["audio_loss"] += audio_loss.detach() / self.args.gradient_accumulation_steps
-            self.control.granular_losses["kl_loss"] += kl_loss.detach() / self.args.gradient_accumulation_steps
-            self.control.granular_losses["align_loss"] += align_loss.detach() / self.args.gradient_accumulation_steps
+            self.control.granular_losses["audio_loss"] += (
+                audio_loss.detach() / self.args.gradient_accumulation_steps
+            )
+            self.control.granular_losses["kl_loss"] += (
+                kl_loss.detach() / self.args.gradient_accumulation_steps
+            )
+            if align_loss is not None:
+                self.control.granular_losses["align_loss"] += (
+                    align_loss.detach() / self.args.gradient_accumulation_steps
+                )
             if semantic_loss is not None:
                 if self.args.n_gpu > 1:
                     semantic_loss = semantic_loss.mean()
@@ -161,20 +175,24 @@ class VAEtrainer(Trainer):
             if ctc_loss is not None:
                 if self.args.n_gpu > 1:
                     ctc_loss = ctc_loss.mean()
-                self.control.granular_losses["ctc_loss"] += ctc_loss.detach() / self.args.gradient_accumulation_steps
+                self.control.granular_losses["ctc_loss"] += (
+                    ctc_loss.detach() / self.args.gradient_accumulation_steps
+                )
             if mu_mean is not None:
                 val = mu_mean.detach().float()
                 if val.dim() > 0:
                     val = val.mean()
                 self.control.granular_losses["mu_mean"] += (
-                    val.to(self.control.granular_losses["mu_mean"].dtype) / self.args.gradient_accumulation_steps
+                    val.to(self.control.granular_losses["mu_mean"].dtype)
+                    / self.args.gradient_accumulation_steps
                 )
             if mu_var is not None:
                 val = mu_var.detach().float()
                 if val.dim() > 0:
                     val = val.mean()
                 self.control.granular_losses["mu_var"] += (
-                    val.to(self.control.granular_losses["mu_var"].dtype) / self.args.gradient_accumulation_steps
+                    val.to(self.control.granular_losses["mu_var"].dtype)
+                    / self.args.gradient_accumulation_steps
                 )
 
             return (loss, outputs) if return_outputs else loss
@@ -227,9 +245,20 @@ class VAEtrainer(Trainer):
             super().create_scheduler(num_training_steps, optimizer)
 
     def _maybe_log_save_evaluate(
-        self, tr_loss, grad_norm, model, trial, epoch, ignore_keys_for_eval, start_time, learning_rate=None
+        self,
+        tr_loss,
+        grad_norm,
+        model,
+        trial,
+        epoch,
+        ignore_keys_for_eval,
+        start_time,
+        learning_rate=None,
     ):
-        if self.control.should_log and self.state.global_step > self._globalstep_last_logged:
+        if (
+            self.control.should_log
+            and self.state.global_step > self._globalstep_last_logged
+        ):
 
             logs: Dict[str, float] = {}
 
@@ -240,7 +269,8 @@ class VAEtrainer(Trainer):
             tr_loss -= tr_loss
 
             logs["loss"] = round(
-                tr_loss_scalar / (self.state.global_step - self._globalstep_last_logged),
+                tr_loss_scalar
+                / (self.state.global_step - self._globalstep_last_logged),
                 4,
             )
 
@@ -251,7 +281,9 @@ class VAEtrainer(Trainer):
                     # reset the loss
                     self.control.granular_losses[k] -= self.control.granular_losses[k]
 
-                    avg_val = logs[k] / (self.state.global_step - self._globalstep_last_logged)
+                    avg_val = logs[k] / (
+                        self.state.global_step - self._globalstep_last_logged
+                    )
                     if k in ("mu_mean", "mu_var"):
                         logs[k] = round(avg_val, 8)
                     else:
@@ -260,7 +292,9 @@ class VAEtrainer(Trainer):
             logs["learning_rate"] = self._get_learning_rate()
 
             if grad_norm is not None:
-                logs["grad_norm"] = grad_norm if isinstance(grad_norm, float) else grad_norm.item()
+                logs["grad_norm"] = (
+                    grad_norm if isinstance(grad_norm, float) else grad_norm.item()
+                )
 
             self._total_loss_scalar += tr_loss_scalar
             self._globalstep_last_logged = self.state.global_step
@@ -278,7 +312,9 @@ class VAEtrainer(Trainer):
                 model,
                 trial,
             )  # metrics=metrics
-            self.control = self.callback_handler.on_save(self.args, self.state, self.control)
+            self.control = self.callback_handler.on_save(
+                self.args, self.state, self.control
+            )
 
     def evaluate(
         self,
@@ -303,7 +339,10 @@ class VAEtrainer(Trainer):
         eval_dataloader = self.get_eval_dataloader(self.eval_dataset)
         for batch in eval_dataloader:
             if "output_audios_srs" in batch:
-                audios_srs = [(a.to(self.args.device, torch.bfloat16), sr) for a, sr in batch["output_audios_srs"]]
+                audios_srs = [
+                    (a.to(self.args.device, torch.bfloat16), sr)
+                    for a, sr in batch["output_audios_srs"]
+                ]
                 break
 
         hubert_guidance = batch.get("hubert_guidance", None)
@@ -319,7 +358,9 @@ class VAEtrainer(Trainer):
                 phonemes=phonemes,
             )
 
-        device_id = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+        device_id = (
+            torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+        )
         boundaries_images, images, audios = [], [], []
 
         for idx in range(len(audios_srs)):
@@ -334,18 +375,26 @@ class VAEtrainer(Trainer):
                 device_id=device_id,
             )
             images.append(
-                wandb.Image(fig, caption=f"Sample {idx} - Step {self.state.global_step} - Device {device_id}")
+                wandb.Image(
+                    fig,
+                    caption=f"Sample {idx} - Step {self.state.global_step} - Device {device_id}",
+                )
             )
             plt.close(fig)
 
             fig = plot_duration_regions(
-                mel_spectrogram=rearrange(results["original_mel"][idx][:valid_len].float(), "t c -> c t"),
+                mel_spectrogram=rearrange(
+                    results["original_mel"][idx][:valid_len].float(), "t c -> c t"
+                ),
                 durations=results["durations"][idx],
                 z_length=results["z_lengths"][idx],
                 title=f"Sample {idx} - Step {self.state.global_step} - Device {device_id}",
             )
             boundaries_images.append(
-                wandb.Image(fig, caption=f"Sample {idx} - Step {self.state.global_step} - Device {device_id}")
+                wandb.Image(
+                    fig,
+                    caption=f"Sample {idx} - Step {self.state.global_step} - Device {device_id}",
+                )
             )
             plt.close(fig)
 
@@ -353,7 +402,13 @@ class VAEtrainer(Trainer):
                 (results["reconstructed_mel"][idx], "Reconstructed"),
                 (results["original_mel"][idx], "Original"),
             ]:
-                features = mel_data[:valid_len].unsqueeze(0).permute(0, 2, 1).to(torch.bfloat16).to(self.args.device)
+                features = (
+                    mel_data[:valid_len]
+                    .unsqueeze(0)
+                    .permute(0, 2, 1)
+                    .to(torch.bfloat16)
+                    .to(self.args.device)
+                )
                 wav = vocos.decode(features).float().squeeze(0).detach().cpu()
                 wav = wav / (wav.abs().max() + 1e-8)
                 audios.append(
@@ -395,10 +450,18 @@ class VAEtrainer(Trainer):
         n_frames = original.shape[0]
 
         has_phonemes = boundaries_mel is not None and len(boundaries_mel) > 0
-        fig, (ax_orig, ax_recon) = plt.subplots(2, 1, figsize=(14, 10 if has_phonemes else 8))
+        fig, (ax_orig, ax_recon) = plt.subplots(
+            2, 1, figsize=(14, 10 if has_phonemes else 8)
+        )
 
         # Original mel
-        ax_orig.imshow(original.T, aspect="auto", origin="lower", interpolation="nearest", cmap="viridis")
+        ax_orig.imshow(
+            original.T,
+            aspect="auto",
+            origin="lower",
+            interpolation="nearest",
+            cmap="viridis",
+        )
         ax_orig.set_title(f"Original - Sample {sample_idx} - Device {device_id}")
         ax_orig.set_ylabel("Mel Bin")
 
@@ -411,11 +474,26 @@ class VAEtrainer(Trainer):
                 ax_orig.axvline(x=start, color="red", linewidth=1.0, alpha=0.6)
                 mid = (start + end) / 2.0
                 label = ph if len(ph) <= 6 else ph[:5] + "…"
-                ax_orig.text(mid, -0.05, label, transform=trans, ha="center", va="top", fontsize=5, clip_on=False)
+                ax_orig.text(
+                    mid,
+                    -0.05,
+                    label,
+                    transform=trans,
+                    ha="center",
+                    va="top",
+                    fontsize=5,
+                    clip_on=False,
+                )
             ax_orig.set_xlim(0, n_frames)
 
         # Reconstructed mel
-        ax_recon.imshow(reconstructed.T, aspect="auto", origin="lower", interpolation="nearest", cmap="viridis")
+        ax_recon.imshow(
+            reconstructed.T,
+            aspect="auto",
+            origin="lower",
+            interpolation="nearest",
+            cmap="viridis",
+        )
         ax_recon.set_title(f"Reconstructed - Sample {sample_idx} - Device {device_id}")
         ax_recon.set_xlabel("Time (frames)")
         ax_recon.set_ylabel("Mel Bin")
@@ -469,7 +547,9 @@ def main():
     cfg_root = Path(__file__).resolve().parent / "configs"
     defaults = {
         "training": load_yaml(cfg_root / "defaults" / "train.yaml").get("training", {}),
-        "convformer": load_yaml(cfg_root / "defaults" / "convformer.yaml").get("convformer", {}),
+        "convformer": load_yaml(cfg_root / "defaults" / "convformer.yaml").get(
+            "convformer", {}
+        ),
         "cfm": load_yaml(cfg_root / "defaults" / "cfm.yaml").get("cfm", {}),
     }
     custom = load_yaml(args.exp_config_path)
@@ -503,19 +583,34 @@ def main():
     elif dataset_name == "libritts":
         dataset = LibriTTS()
     elif dataset_name == "librispeech100h":
-        dataset = LibriSpeech100h()
+        phoneme_parsing_mode = training_cfg.pop("phoneme_parsing_mode", "phoneme")
+        vocab_path = training_cfg.pop("vocab_path", "data/vocab.json")
+        dataset = LibriSpeech100h(
+            phoneme_parsing_mode=phoneme_parsing_mode, vocab_path=vocab_path
+        )
     else:
         raise ValueError(f"Dataset {dataset_name} not supported")
     hubert_guidance = training_cfg.pop("hubert_guidance", False)
     phonemes = training_cfg.pop("phonemes", False)
-    train_dataset = TrainDatasetWrapper(dataset, "train", hubert_guidance=hubert_guidance, phonemes=phonemes)
-    test_dataset = TrainDatasetWrapper(dataset, "test", hubert_guidance=hubert_guidance, phonemes=phonemes)
+
+    # Inject into convformer config for the model
+    convformer_cfg["phoneme_parsing_mode"] = phoneme_parsing_mode
+    convformer_cfg["vocab_path"] = vocab_path
+
+    train_dataset = TrainDatasetWrapper(
+        dataset, "train", hubert_guidance=hubert_guidance, phonemes=phonemes
+    )
+    test_dataset = TrainDatasetWrapper(
+        dataset, "test", hubert_guidance=hubert_guidance, phonemes=phonemes
+    )
 
     # handle wandb - only initialize on main process (rank 0)
     wandb_project = training_cfg.pop("wandb_project", None)
     wandb_run_name = training_cfg.pop("wandb_run_name", None)
     local_rank = int(os.environ.get("LOCAL_RANK", -1))
-    if training_cfg.get("report_to", "none") == "wandb" and (local_rank == -1 or local_rank == 0):
+    if training_cfg.get("report_to", "none") == "wandb" and (
+        local_rank == -1 or local_rank == 0
+    ):
         wandb.init(
             project=wandb_project,
             name=wandb_run_name,
@@ -547,7 +642,9 @@ def main():
             training_cfg["lr_scheduler_kwargs"] = {}
         # Set lr_min for cosine scheduler
         training_cfg["lr_scheduler_kwargs"]["lr_min"] = float(min_learning_rate)
-        logger.info(f"Setting minimum learning rate to {min_learning_rate} in scheduler kwargs")
+        logger.info(
+            f"Setting minimum learning rate to {min_learning_rate} in scheduler kwargs"
+        )
 
     # Add DeepSpeed config if provided
     if args.deepspeed:

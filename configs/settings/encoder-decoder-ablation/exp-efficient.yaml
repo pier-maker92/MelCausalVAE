@@ -1,12 +1,12 @@
 training:
   dataset_name: librispeech100h
-  output_dir: checkpoints/MelCausalVAE/exp-phonemes # variable rate training
+  output_dir: checkpoints/MelCausalVAE/exp-efficient # variable rate training
   num_train_epochs: 2
   learning_rate: 1e-4
   per_device_train_batch_size: 4
   report_to: none
   wandb_project: flexi-vae
-  wandb_run_name: exp-phonemes-aligner
+  wandb_run_name: exp-efficient-aligner
   fp16: false
   bf16: true
   save_steps: 1000
@@ -19,8 +19,6 @@ training:
   #from_pretrained: checkpoints/MelCausalVAE/sigma-vae/checkpoint-6000/model.safetensors
   #resume_from_checkpoint: /workspace/MelCausalVAE/checkpoints/MelCausalVAE/exp-2/checkpoint-1000
   phonemes: true
-  phoneme_parsing_mode: "phoneme" # "phoneme" or "char"
-  vocab_path: "data/vocab.json"
 
 convformer:
   compress_factor_C: 4
@@ -35,9 +33,9 @@ convformer:
   kl_loss_weight: 1e-3
 
 cfm:
-  unet_dim: 1024
-  unet_depth: 8
-  unet_heads: 16
+  unet_dim: 512
+  unet_depth: 4
+  unet_heads: 8
   unet_dropout_rate: 0.1
   use_conv_layer: true
   audio_latent_dim: 64

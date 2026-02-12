@@ -23,8 +23,44 @@ def simple_collate_fn(batch):
     return batch
 
 
+class Vocab:
+    def __init__(self, output_path, mode="phoneme"):
+        self.output_path = output_path
+        self.mode = mode
+        self.tokens = set(["<pad>", "<sil>", "<unk>"])
+
+    def update(self, phoneme_sequences):
+        """Update vocab with a list of phoneme strings."""
+        for seq in phoneme_sequences:
+            if not seq:
+                continue
+            
+            # Add implicit silences just like in the Aligner/Training
+            seq = f"<sil> {seq} <sil>"
+            
+            if self.mode == "phoneme":
+                self.tokens.update(seq.split())
+            elif self.mode == "char":
+                for p in seq.split():
+                    if p == "<sil>":
+                        self.tokens.add(p)
+                    else:
+                        self.tokens.update(list(p))
+            else:
+                 raise ValueError(f"Unknown mode: {self.mode}")
+
+    def save(self):
+        """Save vocabulary to json."""
+        vocab_dict = {token: i for i, token in enumerate(sorted(list(self.tokens)))}
+        os.makedirs(os.path.dirname(self.output_path), exist_ok=True)
+        import json
+        with open(self.output_path, "w", encoding="utf-8") as f:
+            json.dump(vocab_dict, f, ensure_ascii=False, indent=2)
+        print(f"Vocabulary saved to {self.output_path} with {len(vocab_dict)} tokens.")
+
+
 class LibriSpeech100h(SimpleAudioDataset):
-    def __init__(self):
+    def __init__(self, phoneme_parsing_mode="phoneme", vocab_path="data/vocab.json"):
         super().__init__()
         # Load the two datasets
         datasets = []
@@ -50,8 +86,30 @@ class LibriSpeech100h(SimpleAudioDataset):
                 concatenate_datasets(partitions_per_destination[destination]),
             )
         # select only the "audio_codes" column
-        self.train_dataset = self.train_dataset.map(self.get_phonemes, batched=True, num_proc=1, batch_size=1000)
-        self.test_dataset = self.test_dataset.map(self.get_phonemes, batched=True, num_proc=1, batch_size=1000)  # type: ignore
+        # select only the "audio_codes" column
+        self.train_dataset = self.train_dataset.map(self.get_phonemes, batched=True, num_proc=16, batch_size=1000)
+        self.test_dataset = self.test_dataset.map(self.get_phonemes, batched=True, num_proc=16, batch_size=1000)  # type: ignore
+
+        # Build vocabulary
+        self.phoneme_parsing_mode = phoneme_parsing_mode
+        self.vocab_path = vocab_path
+        vocab = Vocab(self.vocab_path, self.phoneme_parsing_mode)
+        print(f"Building vocabulary with mode: {self.phoneme_parsing_mode}...")
+        
+        # Simple iteration over batches using indices to avoid loading everything at once
+        phoneme_dataset = self.train_dataset.select_columns("phonemes")
+        batch_size = 512
+        for i in tqdm(range(0, len(phoneme_dataset), batch_size), desc="Building Vocab"):
+            batch = phoneme_dataset[i : i + batch_size]
+            vocab.update(batch["phonemes"])
+        
+        phoneme_dataset = self.test_dataset.select_columns("phonemes")
+        batch_size = 512
+        for i in tqdm(range(0, len(phoneme_dataset), batch_size), desc="Building Vocab"):
+            batch = phoneme_dataset[i : i + batch_size]
+            vocab.update(batch["phonemes"])
+            
+        vocab.save()
 
     def _partition_to_destination(self, partition_name):
         if "train" in partition_name:

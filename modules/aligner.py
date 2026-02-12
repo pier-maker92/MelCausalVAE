@@ -2,6 +2,7 @@ import json
 import math
 import torch
 import torch.nn as nn
+from typing import List
 import torch.nn.functional as F
 
 
@@ -27,25 +28,31 @@ class EfficientAlphaAttention(nn.Module):
         self.key_proj = nn.Linear(text_dim, attn_dim)
         self.scale = 1.0 / math.sqrt(attn_dim)
 
-    def forward(self, L1, phonemes_embeddings, audio_mask=None, text_mask=None):
+    def forward(
+        self,
+        frames: torch.FloatTensor,
+        phonemes_embeddings: torch.FloatTensor,
+        audio_mask: torch.BoolTensor = None,
+        text_mask: torch.BoolTensor = None,
+    ):
         """
         Args:
-            L1: [Batch, T_L1, audio_dim]
+            frames: [Batch, T_frames, audio_dim]
             phonemes_embeddings: [Batch, T_phonemes, embedding_dim]
-            audio_mask: [Batch, T_L1] - 1 per i frame reali, 0 per padding
+            audio_mask: [Batch, T_frames] - 1 per i frame reali, 0 per padding
             text_mask: [Batch, T_phonemes] - 1 per i fonemi reali, 0 per padding
 
         Returns:
-            alpha: [Batch, T_phonemes, T_L1]
+            alpha: [Batch, T_phonemes, T_frames]
         """
-        B, T_L1, _ = L1.shape
+        B, T_frames, _ = frames.shape
         T_P = phonemes_embeddings.shape[1]
 
         # 1. Proiezioni
-        Q = self.query_proj(L1)  # [B, T_L1, attn_dim]
+        Q = self.query_proj(frames)  # [B, T_frames, attn_dim]
         K = self.key_proj(phonemes_embeddings)  # [B, T_P, attn_dim]
 
-        # 2. Score [B, T_L1, T_P]
+        # 2. Score [B, T_frames, T_P]
         scores = torch.matmul(Q, K.transpose(1, 2)) * self.scale
 
         # 3. Applicazione della Text Mask (prima della Softmax)
@@ -56,16 +63,16 @@ class EfficientAlphaAttention(nn.Module):
             scores = scores.masked_fill(t_mask == 0, -1e9)
 
         # Softmax sulla dimensione dei fonemi
-        alpha_prime = F.softmax(scores, dim=-1)  # [B, T_L1, T_P]
+        alpha_prime = F.softmax(scores, dim=-1)  # [B, T_frames, T_P]
 
         # 4. Applicazione della Audio Mask (dopo la Softmax)
         # Impedisce ai frame audio di padding di avere pesi validi
         if audio_mask is not None:
-            # Espandiamo la maschera per il broadcasting: [B, T_L1, 1]
+            # Espandiamo la maschera per il broadcasting: [B, T_frames, 1]
             a_mask = audio_mask.unsqueeze(2)
             alpha_prime = alpha_prime * a_mask
 
-        # alpha shape: [Batch, T_phonemes, T_L1]
+        # alpha shape: [Batch, T_phonemes, T_frames]
         alpha = alpha_prime.transpose(1, 2)
 
         return alpha
@@ -133,7 +140,7 @@ class IMV(torch.nn.Module):
         """
         energies = -1 * ((imv.unsqueeze(1) - p.unsqueeze(-1)) ** 2) * self.sigma
         energies = energies.masked_fill(
-            ~(mel_mask.unsqueeze(1).repeat(1, energies.size(1), 1)), -float("inf")
+            ~(mel_mask.unsqueeze(1).repeat(1, energies.size(1), 1)), -1e9
         )
         beta = torch.softmax(energies, dim=-1)
         q = (
@@ -174,7 +181,7 @@ class IMV(torch.nn.Module):
         energies = -1 * self.delta * (q.unsqueeze(1) - e.unsqueeze(-1)) ** 2
         if text_mask is not None:
             energies = energies.masked_fill(
-                ~(text_mask.unsqueeze(-1).repeat(1, 1, max_length)), -float("inf")
+                ~(text_mask.unsqueeze(-1).repeat(1, 1, max_length)), -1e9
             )
         return torch.softmax(energies, dim=-1)
 
@@ -222,18 +229,19 @@ class IMV(torch.nn.Module):
         alignement = self.get_aligned_positions(
             imv=imv, p=p, mel_mask=mel_mask, text_mask=text_mask
         ).squeeze(-1)
-        energies = reconstruct_align_from_aligned_positions(
-            alignement=alignement, mel_mask=mel_mask, text_mask=text_mask, delta=0.1
+        energies = self.reconstruct_align_from_aligned_positions(
+            e=alignement, mel_mask=mel_mask, text_mask=text_mask
         )
-        aligned_mels = algin_frames(energies=energies, mels=mels)
-        durations = extract_durations(alignement=alignement)
+        aligned_mels = self.algin_frames(energies=energies, mels=mels)
+        durations = self.extract_durations(alignement=alignement)
 
         return aligned_mels, durations
 
 
 class PhonemeVocab:
-    def __init__(self, path_to_vocab: str):
+    def __init__(self, path_to_vocab: str, parsing_mode: str = "phoneme"):
         self.vocab = self._load_vocab(path_to_vocab)
+        self.parsing_mode = parsing_mode
         assert "<pad>" in self.vocab
         assert "<sil>" in self.vocab
         assert "<unk>" in self.vocab
@@ -247,7 +255,8 @@ class PhonemeVocab:
     def token2id(self, token: str):
         token_id = self.vocab.get(token, self.vocab["<unk>"])
         if token_id == self.vocab["<unk>"]:
-            print(f"Warning: token {token} not found in vocab")
+            # print(f"Warning: token {token} not found in vocab")
+            pass
         return token_id
 
     def _get_phonemes(self, phonemes: List[str]):
@@ -258,8 +267,22 @@ class PhonemeVocab:
         phonemes_batch = []
         for phoneme_str in phonemes:
             phoneme_str = f"<sil> {phoneme_str} <sil>"
-            tokens = phoneme_str.split()
-            phonemes_batch.append([self.token2id(token) for token in tokens])
+
+            if self.parsing_mode == "phoneme":
+                tokens = phoneme_str.split()
+            elif self.parsing_mode == "char":
+                tokens = []
+                for p in phoneme_str.split():
+                    if p == "<sil>":
+                        tokens.append(p)
+                    else:
+                        tokens.extend(list(p))
+            else:
+                raise ValueError(f"Unknown parsing mode: {self.parsing_mode}")
+
+            phonemes_batch.append(
+                torch.tensor([self.token2id(token) for token in tokens]).long()
+            )
         return phonemes_batch
 
     def __call__(self, phonemes: List[str], device: torch.device):
@@ -294,12 +317,16 @@ class Aligner(nn.Module):
         num_embeddings: int,
         sigma: float = 0.5,
         delta: float = 0.1,
+        vocab_path: str = "data/vocab.json",
+        parsing_mode: str = "phoneme",
     ):
         super().__init__()
         self.attention = EfficientAlphaAttention(audio_dim, text_dim, attn_dim)
         self.imv = IMV(sigma, delta)
+        self.audio_dim = audio_dim
+        self.embedding_dim = embedding_dim
         self.phonemes_embeddings = PhonemesEmbeddings(num_embeddings, embedding_dim)
-        self.phoneme_vocab = PhonemeVocab("data/vocab.json")
+        self.phoneme_vocab = PhonemeVocab(vocab_path, parsing_mode=parsing_mode)
 
     def generate_pos_encoding(
         self, max_len: int, d_model: int, device: torch.device, dtype: torch.dtype
@@ -322,30 +349,30 @@ class Aligner(nn.Module):
         mels_mask: torch.BoolTensor,
     ):
         # get phonemes
-        phonemes_ids, phonemes_mask = self.phoneme_vocab(phonemes)
+        phonemes_ids, phonemes_mask = self.phoneme_vocab(phonemes, device=mels.device)
         phonemes_embeddings = self.phonemes_embeddings(phonemes_ids)
         # add position encoding
         phonemes_embeddings += self.generate_pos_encoding(
-            phonemes_ids.size(1),
-            self.phonemes_embeddings.embedding_dim,
-            mels.device,
-            mels.dtype,
+            max_len=phonemes_ids.size(1),
+            d_model=self.embedding_dim,
+            device=mels.device,
+            dtype=mels.dtype,
         )
         mels += self.generate_pos_encoding(
-            mels.size(1),
-            self.audio_dim,
-            mels.device,
-            mels.dtype,
+            max_len=mels.size(1),
+            d_model=self.audio_dim,
+            device=mels.device,
+            dtype=mels.dtype,
         )
         # get scores
         alpha = self.attention(
-            mels=mels,
+            frames=mels,
             phonemes_embeddings=phonemes_embeddings,
-            mels_mask=mels_mask,
-            phonemes_mask=phonemes_mask,
+            audio_mask=mels_mask,
+            text_mask=phonemes_mask,
         )
         # get aligned mels and durations
         aligned_mels, durations = self.imv(
             alpha=alpha, mels=mels, mel_mask=mels_mask, text_mask=phonemes_mask
         )
-        return aligned_mels, durations
+        return aligned_mels, durations, ~phonemes_mask
