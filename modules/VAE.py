@@ -105,9 +105,12 @@ class VAE(torch.nn.Module):
 
     def forward(self, audios_srs, **kwargs):
         encoded_audios = self.wav2mel(audios_srs)
+        
+        # Ensure input to encoder matches model dtype
+        x = encoded_audios.audio_features.to(dtype=self.dtype)
 
         convformer_output = self.encoder(
-            x=encoded_audios.audio_features,
+            x=x,
             padding_mask=encoded_audios.padding_mask,
             step=kwargs.get("training_step", None),
             phonemes=kwargs.get("phonemes", None),
@@ -117,9 +120,10 @@ class VAE(torch.nn.Module):
             convformer_output.z,
             convformer_output.durations * self.config.encoder_config.compress_factor_C,
         )
+        breakpoint()
 
         audio_loss = self.decoder(
-            target=encoded_audios.audio_features,
+            target=x,
             target_padding_mask=encoded_audios.padding_mask,
             context_vector=upsampled_z,
         ).loss
@@ -141,7 +145,7 @@ class VAE(torch.nn.Module):
     @torch.no_grad()
     def normalize_mel(self, mel: torch.Tensor):
         return (mel - self.wav2mel.mean) / self.wav2mel.std
-
+    
     @torch.no_grad()
     def encode_and_sample(
         self,
@@ -160,11 +164,13 @@ class VAE(torch.nn.Module):
 
         # Encode audio to mel spectrogram
         encoded_audios = self.wav2mel(audios_srs)
-        original_mel = encoded_audios.audio_features
+        original_mel = encoded_audios.audio_features.to(dtype=self.dtype)
 
-        convformer_output = self.encoder.encode(
+        convformer_output = self.encoder(
             x=original_mel,
             padding_mask=encoded_audios.padding_mask,
+            step=None,
+            phonemes=phonemes
         )
 
         upsampled_z = self.repeat_tokens(
@@ -188,7 +194,7 @@ class VAE(torch.nn.Module):
         result = {
             "original_mel": original_mel,
             "reconstructed_mel": reconstructed_mel,
-            "durations": convformer_output.durations,
+            "durations": (convformer_output.durations * self.config.encoder_config.compress_factor_C).long()    ,
             "padding_mask": encoded_audios.padding_mask,
         }
         return result

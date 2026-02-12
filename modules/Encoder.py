@@ -60,9 +60,9 @@ class SigmaVAEEncoder(nn.Module):
         )
         self.kl_loss_weight = float(config.kl_loss_weight)
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.semantic_regulator = InterpolateRegulator(
-            depth=2, in_channels=1024, channels=256, out_channels=config.latent_dim
-        )
+        # self.semantic_regulator = InterpolateRegulator(
+        #     depth=2, in_channels=1024, channels=256, out_channels=config.latent_dim
+        # )
 
     def forward(self, **kwargs):
         pass
@@ -158,7 +158,7 @@ class ConvformerEncoder(SigmaVAEEncoder):
         # n_residual_blocks = config.n_residual_blocks FIXME handle
 
         self.downsampler = DownSampler(
-            d_in=config.embedding_dim,
+            d_in=100,
             d_hidden=512,
             d_out=512,
             compress_factor=compress_factor_C,
@@ -193,12 +193,15 @@ class ConvformerEncoder(SigmaVAEEncoder):
     ):  # x: [B, T, 100]
 
         x, padding_mask = self.downsampler(x, padding_mask)
+
         # get alignement
         z, durations, padding_mask = self.aligner(
             mels=x,
             phonemes=phonemes,
             mels_mask=~padding_mask,  # NOTE: padding_mask is False for padding tokens, but aligner expects True for padding tokens
         )
+        z = z.to(x.dtype)
+
         assert not torch.isnan(z).any(), "z contains nan after aligner"
         z = self.transformer(z)  # [B, T/C, 512]
 

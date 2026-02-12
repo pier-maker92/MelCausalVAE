@@ -10,19 +10,24 @@ import torch.nn.functional as F
 def plot_durations_on_mel(
     mels,
     durations,
+    mel_mask,
     text_length,
     batch_idx=0,
     step=0,
     labels=None,
     device_id=0,
 ):
-    mel = mels[batch_idx, : mel_mask[batch_idx].sum()].T.detach().cpu().numpy()
-    dur = durations[batch_idx, : text_length[batch_idx]].detach().cpu().numpy()
+    # mel_mask is True for padding. We want valid length.
+    valid_len = (~mel_mask[batch_idx]).long().sum().item()
+    
+    mel = mels[batch_idx, :valid_len].detach().float().cpu().numpy().T
+    dur = durations[batch_idx, : text_length[batch_idx]].detach().float().cpu().numpy()
 
     positions = dur.cumsum()
     fig, (ax_mel, ax_dur) = plt.subplots(2, 1, figsize=(16, 6))
 
     ax_mel.imshow(mel, origin="lower", aspect="auto")
+    ax_mel.set_xlim(0, mel.shape[1])
     for pos in positions:
         ax_mel.axvline(pos, color="white", linestyle="--", linewidth=0.8, alpha=0.7)
 
@@ -132,7 +137,7 @@ class IMV(torch.nn.Module):
         self.sigma = sigma
         self.delta = delta
 
-    def generate_index_vector(self, text_mask):
+    def generate_index_vector(self, text_mask, dtype=torch.float32):
         """Create index vector of text sequence.
         Args:
             text_mask: text_mask: mask of text-sequence. [B,T1]
@@ -142,10 +147,9 @@ class IMV(torch.nn.Module):
         p = (
             torch.arange(0, text_mask.size(-1))
             .repeat(text_mask.size(0), 1)
-            .float()
-            .to(text_mask.device)
+            .to(device=text_mask.device, dtype=dtype)
         )
-        return p * text_mask
+        return p * text_mask.to(dtype)
 
     def imv_generator(self, alpha, p, mel_mask, text_length):
         """Compute imv from alignment matrix alpha. Implementation of HMA
@@ -164,11 +168,11 @@ class IMV(torch.nn.Module):
         delta_imv = torch.cat(
             (torch.zeros(alpha.size(0), 1).type_as(alpha), delta_imv), -1
         )  # [B, T2-1] -> [B, T2]
-        imv = torch.cumsum(delta_imv, -1) * mel_mask.float()
+        imv = torch.cumsum(delta_imv, -1) * mel_mask.to(dtype=alpha.dtype)
         last_imv = torch.max(imv, dim=-1)[0]  # get last element of imv
         last_imv = torch.clamp(last_imv, min=1e-8).unsqueeze(-1)  # avoid zeros
         imv = (
-            imv / last_imv * (text_length.float().unsqueeze(-1))
+            imv / last_imv * (text_length.to(dtype=alpha.dtype).unsqueeze(-1))
         )  # multiply imv by a positive scalar to enforce 0<imv<T1-1
         return imv
 
@@ -191,11 +195,10 @@ class IMV(torch.nn.Module):
             torch.arange(0, mel_mask.size(-1))
             .unsqueeze(0)
             .repeat(imv.size(0), 1)
-            .float()
-            .to(imv.device)
+            .to(device=imv.device, dtype=imv.dtype)
         )
-        q = q * mel_mask.float()  # generate index vector of target sequence.
-        return torch.bmm(beta, q.unsqueeze(-1)) * text_mask.unsqueeze(-1)
+        q = q * mel_mask.to(dtype=imv.dtype)  # generate index vector of target sequence.
+        return torch.bmm(beta, q.unsqueeze(-1)) * text_mask.unsqueeze(-1).to(dtype=imv.dtype)
 
     def reconstruct_align_from_aligned_positions(
         self, e, mel_mask=None, text_mask=None
@@ -217,11 +220,10 @@ class IMV(torch.nn.Module):
             torch.arange(0, max_length)
             .unsqueeze(0)
             .repeat(e.size(0), 1)
-            .float()
-            .to(e.device)
+            .to(device=e.device, dtype=e.dtype)
         )
         if mel_mask is not None:
-            q = q * mel_mask.float()
+            q = q * mel_mask.to(dtype=e.dtype)
         energies = -1 * self.delta * (q.unsqueeze(1) - e.unsqueeze(-1)) ** 2
         if text_mask is not None:
             energies = energies.masked_fill(
@@ -265,7 +267,7 @@ class IMV(torch.nn.Module):
         mel_mask: torch.FloatTensor,
         text_mask: torch.FloatTensor,
     ):
-        p = self.generate_index_vector(text_mask=text_mask)
+        p = self.generate_index_vector(text_mask=text_mask, dtype=alpha.dtype)
         text_length = text_mask.sum(dim=1)
         imv = self.imv_generator(
             alpha=alpha, p=p, mel_mask=mel_mask, text_length=text_length

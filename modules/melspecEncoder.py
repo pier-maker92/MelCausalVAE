@@ -111,8 +111,7 @@ class MelSpectrogramEncoder(torch.nn.Module):
             torch.nn.functional.interpolate(
                 padding_mask.unsqueeze(0).unsqueeze(0).to(mel_spec.dtype),
                 size=(mel_spec.shape[:2]),
-                mode="bicubic",
-                align_corners=False,
+                mode="nearest",
             )
             .to(dtype=torch.bool)
             .squeeze(0)

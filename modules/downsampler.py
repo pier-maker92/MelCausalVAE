@@ -4,6 +4,21 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def _resize_padding_mask(
+    padding_mask: torch.BoolTensor, target_length: int
+) -> torch.BoolTensor:
+    padding_mask = (
+        torch.nn.functional.interpolate(
+            padding_mask.unsqueeze(1).float(),
+            size=target_length,
+            mode="linear",
+            align_corners=False,
+        ).squeeze(1)
+        > 0.5  # Use threshold instead of .bool()
+    )
+    return padding_mask
+
+
 class LayerNorm1d(nn.Module):
     def __init__(
         self, channels: int, eps: float = 1e-5, elementwise_affine: bool = True
@@ -71,9 +86,16 @@ class ResNetBlock(nn.Module):
 
     def forward(self, x, mask=None):
         residual = self.shortcut(x)
-        if mask is not None:
-            residual = residual * mask
 
+        # Handle mask downsampling if stride > 1
+        stride = self.conv1.stride[0]
+        if mask is not None:
+            if stride > 1:
+                mask = _resize_padding_mask(
+                    mask.squeeze(1), residual.shape[2]
+                ).unsqueeze(1)
+
+        residual = residual * mask
         out = self.act(self.norm1(self.conv1(x, mask)))
         out = self.norm2(self.conv2(out, mask))
 
@@ -114,8 +136,7 @@ class DownSampler(nn.Module):
 
         mask = None
         if x_mask is not None:
-            mask = 1.0 - x_mask.to(x.dtype)
-            mask = mask.unsqueeze(1)
+            mask = (~x_mask).unsqueeze(1).to(dtype=x.dtype)
 
         # Step 1: Expansion
         x = self.input_proj(x)
@@ -126,15 +147,12 @@ class DownSampler(nn.Module):
         for layer in self.layers:
             # Applichiamo il blocco
             x = layer(x, mask)
-
-            # Se il layer ha fatto downsampling, aggiorniamo la maschera
-            # (Controlliamo se lo stride del primo conv del blocco è > 1)
-            if hasattr(layer.conv1, "stride") and layer.conv1.stride[0] > 1:
-                if mask is not None:
-                    mask = mask[:, :, :: layer.conv1.stride[0]]
+            mask = _resize_padding_mask(mask.squeeze(1), x.shape[2]).unsqueeze(1)
 
         # Step 3: Final Compression
         x = self.output_proj(x)
         if mask is not None:
             x = x * mask
+            # questo per ritornare la modalità padding mask
+            mask = ~mask
         return x.transpose(1, 2), mask.squeeze(1).bool() if mask is not None else None

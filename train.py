@@ -390,6 +390,7 @@ class VAEtrainer(Trainer):
                 text_length=[len(p) for p in phonemes],
                 labels=phonemes[idx],
                 device_id=device_id,
+                mel_mask=results["padding_mask"],
             )
             boundaries_images.append(
                 wandb.Image(
