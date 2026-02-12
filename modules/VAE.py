@@ -115,7 +115,7 @@ class VAE(torch.nn.Module):
 
         upsampled_z = self.repeat_tokens(
             convformer_output.z,
-            convformer_output.durations * 2,  # FIXME this is hardcoded
+            convformer_output.durations * self.config.encoder_config.compress_factor_C,
         )
 
         audio_loss = self.decoder(
@@ -166,17 +166,20 @@ class VAE(torch.nn.Module):
             x=original_mel,
             padding_mask=encoded_audios.padding_mask,
         )
-        z = rearrange(convformer_output.z, "b t c -> b c t")
-        context_vector, mask = upsample_hard_infer(z, convformer_output.durations)
-        context_vector = rearrange(context_vector, "b c t -> b t c")
+
+        upsampled_z = self.repeat_tokens(
+            convformer_output.z,
+            convformer_output.durations * self.config.encoder_config.compress_factor_C,
+        )
+
         # Generate mel spectrogram from latent
         reconstructed_mel = self.decoder.generate(
             num_steps=num_steps,
-            context_vector=context_vector,
+            context_vector=upsampled_z,
             temperature=temperature,
             guidance_scale=guidance_scale,
             generator=generator,
-            padding_mask=~mask,
+            padding_mask=encoded_audios.padding_mask,
         )
         if self.config.mel_spec_config.normalize:
             original_mel = self.denormalize_mel(original_mel)
@@ -186,7 +189,6 @@ class VAE(torch.nn.Module):
             "original_mel": original_mel,
             "reconstructed_mel": reconstructed_mel,
             "durations": convformer_output.durations,
-            "z_lengths": convformer_output.z_lengths,
             "padding_mask": encoded_audios.padding_mask,
         }
         return result

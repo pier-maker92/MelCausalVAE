@@ -1,4 +1,3 @@
-import modulefinder
 import os
 import sys
 
@@ -8,13 +7,12 @@ import torch
 import torch.nn as nn
 from einops import rearrange
 from dataclasses import dataclass
-from typing import Optional, List, Tuple
+from typing import Optional, List
 
-# from modules.ctc import CTC
-from modules.regulator import InterpolateRegulator
-from modules.semantic_module import SeamlessM4Tv2Encoder
+
 from modules.flash_attn_encoder import FlashTransformerEncoder
-from modules.aligner import IMV, EfficientAlphaAttention, Aligner
+from modules.downsampler import DownSampler
+from modules.aligner import Aligner
 
 
 @dataclass
@@ -134,126 +132,6 @@ class SigmaVAEEncoder(nn.Module):
         return self.kl_loss_weight * cosine
 
 
-# ---------- utils ----------
-
-
-class ChannelLastLayerNorm(nn.Module):
-    # LayerNorm over channels for tensors in [B, C, T, F]
-    def __init__(self, num_channels):
-        super().__init__()
-        self.ln = nn.LayerNorm(num_channels)
-
-    def forward(self, x):  # x: [B, C, T, F]
-        x = rearrange(x, "b c t f -> b t f c")  # [B, T, F, C]
-        x = self.ln(x)  # normalize over C
-        return rearrange(x, "b t f c -> b c t f")  # [B, C, T, F]
-
-
-class TimeCausalConv2d(nn.Conv2d):
-    # Causal in time (left pad only); "same" in frequency (symmetric left/right)
-    def __init__(self, c_in, c_out, kt, kf, dt=1, df=1, st=1, sf=1):
-        super().__init__(
-            c_in, c_out, (kt, kf), dilation=(dt, df), stride=(st, sf), padding=0
-        )
-        self.kt, self.kf, self.dt, self.df, self.st, self.sf = kt, kf, dt, df, st, sf
-
-    def _same_freq_pad(self, F_in):
-        # Solve for total pad so L_out = ceil(F_in / sf)
-        # L_out = floor((F_in + p - df*(kf-1) - 1)/sf + 1)
-        target = (F_in + self.sf - 1) // self.sf
-        p_total = max(0, (target - 1) * self.sf + self.df * (self.kf - 1) + 1 - F_in)
-        left = p_total // 2
-        right = p_total - left
-        return left, right
-
-    def forward(self, x):  # x: [B, C, T, F]
-        t_left = (self.kt - 1) * self.dt  # causal time pad (left only)
-        f_left, f_right = self._same_freq_pad(x.shape[-1])
-        x = torch.nn.functional.pad(x, (f_left, f_right, t_left, 0))
-        return super().forward(x)
-
-
-class ChannelLastLinear(nn.Module):
-    # Linear over frequency dimension F: [B, C, T, F_in] -> [B, C, T, F_out]
-    def __init__(self, f_in, f_out):
-        super().__init__()
-        self.lin = nn.Linear(f_in, f_out)
-
-    def forward(self, x):
-        B, C, T, F_in = x.shape
-        x = rearrange(x, "b c t f -> b t c f")
-        x = self.lin(x)  # [B, T, C, F_out]
-        return rearrange(x, "b t c f -> b c t f")  # [B, C, T, F_out]
-
-
-class PreNormResCausalBlock(nn.Module):
-    # LN -> act -> causal conv; skip mirrors stride if T or F changes, else 1x1
-    def __init__(
-        self,
-        c_in,
-        c_out,
-        *,
-        kt=3,
-        kf=7,
-        dt=1,
-        df=1,
-        st=1,
-        sf=1,
-        act=nn.GELU,
-        drop_p=0.1,
-    ):
-        super().__init__()
-        self.ln = ChannelLastLayerNorm(c_in)
-        self.act = act()
-        self.main = TimeCausalConv2d(
-            c_in, c_out, kt=kt, kf=kf, dt=dt, df=df, st=st, sf=sf
-        )
-        shape_changes = (c_in != c_out) or (st != 1) or (sf != 1)
-        if shape_changes:
-            # Match spatial sizes when stride or non-same padding is used
-            self.skip = TimeCausalConv2d(
-                c_in, c_out, kt=1, kf=1, dt=1, df=1, st=st, sf=sf
-            )
-        else:
-            if c_in != c_out:
-                self.skip = nn.Conv2d(c_in, c_out, kernel_size=1, stride=1)
-            else:
-                self.skip = nn.Identity()
-        self.dropout = nn.Dropout(drop_p)
-
-    def forward(self, x):
-        h = self.act(self.ln(x))
-        h = self.dropout(h)
-        return self.main(h) + self.skip(x)
-
-
-class CausalDownsamplingBlock(nn.Module):
-    def __init__(self, c_in, c_out, n_residual_blocks=2, compress_freq=4, drop_p=0.1):
-        super().__init__()
-        # residual blocks
-        dilations = [1, 2, 4, 8]
-        self.residual_blocks = nn.ModuleList(
-            [
-                PreNormResCausalBlock(
-                    c_in, c_in, kt=3, kf=5, dt=dilation, df=1, st=1, sf=1, drop_p=drop_p
-                )
-                for dilation in dilations[:n_residual_blocks]
-            ]
-        )
-        # downsampler
-        self.downsampling = PreNormResCausalBlock(
-            c_in, c_out, kt=5, kf=7, dt=1, df=1, st=2, sf=compress_freq, drop_p=drop_p
-        )
-
-    def forward(self, x):
-        for residual_block in self.residual_blocks:
-            x = residual_block(x)
-        return self.downsampling(x)
-
-
-# ---------- causal Transformer tail ----------
-
-
 class CausalTransformerTail(nn.Module):
     def __init__(self, d_model=512, nheads=8, nlayers=4, drop_p=0.1):
         super().__init__()
@@ -267,19 +145,8 @@ class CausalTransformerTail(nn.Module):
 
 # TransformerEncoder with causal masking via is_causal for left-only attention [web:84][web:92]
 
-# ---------- full model as specified ----------
-
 
 class ConvformerEncoder(SigmaVAEEncoder):
-    """
-    Spec:
-      - Start with 3 causal conv2d blocks (dilations 1,2,4) that reach 512 channels and reduce frequency to 64.
-      - Then two downsamplers: ds2 (time/2, freq/4) and ds4 (time/4, freq/4), with channels 256 then 512.
-      - Then extra temporal downsampling to reach T/C with sf=1, keeping channels at 512.
-      - Collapse frequency from 4 -> 1 with a causal conv (no pooling), channels remain 512.
-      - Finally a causal Transformer over tokens of size 512.
-    """
-
     def __init__(self, config: ConvformerEncoderConfig):
         super().__init__(config)
 
@@ -288,62 +155,14 @@ class ConvformerEncoder(SigmaVAEEncoder):
         tf_layers = config.tf_layers
         drop_p = config.drop_p
         latent_dim = config.latent_dim
-        n_residual_blocks = config.n_residual_blocks
+        # n_residual_blocks = config.n_residual_blocks FIXME handle
 
-        assert (
-            compress_factor_C & (compress_factor_C - 1)
-        ) == 0, "C must be power of 2"
-
-        self.C = compress_factor_C
-        self.in_freq_proj = nn.Linear(100, 100)
-
-        # Input projection: [B, T, 100] -> [B, 32, T, 100]
-        self.in_proj = TimeCausalConv2d(1, 32, kt=3, kf=5, dt=1, df=1, st=1, sf=1)
-
-        # Three causal blocks with dilations 1,2,4; last block also projects frequency -> 64
-        self.freq_mixer = nn.Sequential(
-            PreNormResCausalBlock(
-                32, 64, kt=7, kf=7, dt=1, df=1, st=1, sf=1, drop_p=drop_p
-            ),
-            PreNormResCausalBlock(
-                64, 128, kt=5, kf=5, dt=1, df=4, st=1, sf=1, drop_p=drop_p
-            ),
-            PreNormResCausalBlock(
-                128, 256, kt=3, kf=3, dt=1, df=8, st=1, sf=1, drop_p=drop_p
-            ),
-        )
-
-        # Two downsamplers:
-        # ds2: time /2, freq /4, channels 512 -> 256
-        self.downsampling = nn.ModuleDict(
-            {
-                "downsample@2": CausalDownsamplingBlock(
-                    256,
-                    512,
-                    n_residual_blocks=n_residual_blocks,
-                    compress_freq=16,
-                    drop_p=drop_p,
-                ),
-                # "downsample@4": CausalDownsamplingBlock(512, 512, n_residual_blocks=n_residual_blocks, drop_p=drop_p),
-            }
-        )
-        # Extra temporal downsampling to reach T/C (sf=1), keeping channels at 512
-        extra_stages = (
-            int(math.log2(self.C)) - 2
-        )  # we already did /4 in time via ds2 and ds4
-        for i in range(max(0, extra_stages)):
-            self.downsampling[f"downsample@{2**(i+2+1)}"] = CausalDownsamplingBlock(
-                512,
-                512,
-                n_residual_blocks=n_residual_blocks,
-                compress_freq=1,
-                drop_p=drop_p,
-            )
-
-        # Collapse frequency 4 -> 1 with a single causal conv, keep channels at 512
-        # Use kf=4, sf=4, no frequency padding so F_out = 1 exactly when F_in = 4
-        self.freq_collapse = TimeCausalConv2d(
-            512, 512, kt=1, kf=8, dt=1, df=1, st=1, sf=8
+        self.downsampler = DownSampler(
+            d_in=config.embedding_dim,
+            d_hidden=512,
+            d_out=512,
+            compress_factor=compress_factor_C,
+            causal=True,
         )
 
         # Causal Transformer tail operating on tokens of size 512
@@ -372,36 +191,11 @@ class ConvformerEncoder(SigmaVAEEncoder):
         padding_mask: Optional[torch.BoolTensor] = None,
         **kwargs,
     ):  # x: [B, T, 100]
-        B, T, F = x.shape
-        assert not torch.isnan(x).any(), "x contains nan before in_freq_proj"
-        x = self.in_freq_proj(x)
-        assert not torch.isnan(x).any(), "x contains nan after in_freq_proj"
 
-        x = x.unsqueeze(1)  # [B, 1, T, 100]
-        x = self.in_proj(x)  # [B, 32, T, 100]
-        assert not torch.isnan(x).any(), "x contains nan after in_proj"
-
-        # Three dilated causal blocks; end with [B, 512, T, 64]
-        x = self.freq_mixer(x)  # [B, 512, T, 64]
-        assert not torch.isnan(x).any(), "x contains nan after freq_mixer"
-
-        # Downsampling blocks
-        for layer in self.downsampling.values():
-            x = layer(x)
-
-        assert not torch.isnan(x).any(), "x contains nan after downsampling"
-
-        # Collapse frequency 4 -> 1 without changing channels
-        x = self.freq_collapse(x).squeeze(-1)  # [B, 512, T/C]
-        assert not torch.isnan(x).any(), "x contains nan after freq_collapse"
-
-        # Flatten freq to tokens and run causal Transformer
-        hiddens = x.transpose(1, 2)  # [B, T/C, 512]
-        padding_mask = self._resize_padding_mask(padding_mask, hiddens.shape[1])
-
+        x, padding_mask = self.downsampler(x, padding_mask)
         # get alignement
         z, durations, padding_mask = self.aligner(
-            mels=hiddens,
+            mels=x,
             phonemes=phonemes,
             mels_mask=~padding_mask,  # NOTE: padding_mask is False for padding tokens, but aligner expects True for padding tokens
         )
@@ -414,14 +208,6 @@ class ConvformerEncoder(SigmaVAEEncoder):
             logvar = self.logvar(z)
         z = self.reparameterize(mu, logvar)
         assert not torch.isnan(z).any(), "z contains nan after reparameterization"
-
-        if kwargs.get("semantic_guidance", None) is not None:
-            semantic_loss = self.semantic_regulator(
-                target=z,
-                guidance=kwargs["semantic_guidance"].semantic_features,
-                guidance_mask=kwargs["semantic_guidance"].padding_mask,
-                target_padding_mask=padding_mask,
-            )
 
         kl_loss = None
         if kwargs.get("step", None) is not None:

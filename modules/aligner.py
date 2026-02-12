@@ -3,7 +3,51 @@ import math
 import torch
 import torch.nn as nn
 from typing import List
+import matplotlib.pyplot as plt
 import torch.nn.functional as F
+
+
+def plot_durations_on_mel(
+    mels,
+    durations,
+    text_length,
+    batch_idx=0,
+    step=0,
+    labels=None,
+    device_id=0,
+):
+    mel = mels[batch_idx, : mel_mask[batch_idx].sum()].T.detach().cpu().numpy()
+    dur = durations[batch_idx, : text_length[batch_idx]].detach().cpu().numpy()
+
+    positions = dur.cumsum()
+    fig, (ax_mel, ax_dur) = plt.subplots(2, 1, figsize=(16, 6))
+
+    ax_mel.imshow(mel, origin="lower", aspect="auto")
+    for pos in positions:
+        ax_mel.axvline(pos, color="white", linestyle="--", linewidth=0.8, alpha=0.7)
+
+    ax_mel.set_ylabel("Mel bin")
+    ax_mel.set_title(f"Sample {batch_idx} - Step {step} - Device {device_id}")
+    ax_mel.set_xticks([])
+
+    norm_dur = (dur - dur.min()) / (dur.max() - dur.min() + 1e-8) * 0.7 + 0.3
+    ax_dur.bar(
+        range(len(dur)),
+        dur,
+        color=plt.cm.Blues(norm_dur),
+        edgecolor="black",
+        linewidth=0.5,
+    )
+    ax_dur.set_xlabel("z position")
+    ax_dur.set_ylabel("Duration (frames)")
+    ax_dur.set_xlim(-0.5, len(dur) - 0.5)
+    ax_dur.set_xticks(range(len(dur)))
+    ax_dur.set_xticklabels(
+        labels[: len(dur)] if labels else range(len(dur)), rotation=0, ha="right"
+    )
+
+    plt.tight_layout()
+    return fig
 
 
 class PhonemesEmbeddings(nn.Module):

@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 from modules.cfm import DiTConfig
 from modules.VAE import VAE, VAEConfig
 from modules.Encoder import ConvformerEncoderConfig
-from modules.Tadastride.alignement import plot_duration_regions
+from modules.aligner import plot_durations_on_mel
 from einops import rearrange
 from modules.melspecEncoder import MelSpectrogramConfig
 from transformers import (
@@ -382,13 +382,14 @@ class VAEtrainer(Trainer):
             )
             plt.close(fig)
 
-            fig = plot_duration_regions(
-                mel_spectrogram=rearrange(
-                    results["original_mel"][idx][:valid_len].float(), "t c -> c t"
-                ),
-                durations=results["durations"][idx],
-                z_length=results["z_lengths"][idx],
-                title=f"Sample {idx} - Step {self.state.global_step} - Device {device_id}",
+            fig = plot_durations_on_mel(
+                batch_idx=idx,
+                step=self.state.global_step,
+                mels=results["original_mel"],
+                durations=results["durations"],
+                text_length=[len(p) for p in phonemes],
+                labels=phonemes[idx],
+                device_id=device_id,
             )
             boundaries_images.append(
                 wandb.Image(
