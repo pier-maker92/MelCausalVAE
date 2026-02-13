@@ -10,5 +10,6 @@ convformer:
   target_std: null
   use_sofplus: null
   kl_loss_warmup_steps: 1000
+  use_aligner: false
 
 

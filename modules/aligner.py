@@ -164,7 +164,9 @@ class IMV(torch.nn.Module):
         imv_dummy = torch.bmm(alpha.transpose(1, 2), p.unsqueeze(-1)).squeeze(
             -1
         )  # [B,T2]
-        delta_imv = torch.relu(imv_dummy[:, 1:] - imv_dummy[:, :-1])  # [B, T2-1]
+        delta_imv_raw = imv_dummy[:, 1:] - imv_dummy[:, :-1]
+        delta_imv = torch.relu(delta_imv_raw)  # [B, T2-1]
+        # delta_imv = F.leaky_relu(delta_imv_raw, negative_slope=0.01)  # [B, T2-1]
         delta_imv = torch.cat(
             (torch.zeros(alpha.size(0), 1).type_as(alpha), delta_imv), -1
         )  # [B, T2-1] -> [B, T2]
@@ -247,22 +249,23 @@ class IMV(torch.nn.Module):
         return aligned_mels
 
     def extract_durations(self, alignement):
-        """Align frames to text
-        Args:
-            alignement: alignement [B,T1]
-        Returns:
-            durations: durations [B,T1]
         """
+        Estrae durate float garantendo che siano sempre positive (monotonicità).
+        """
+        # alignement: [B, T1] - posizioni temporali crescenti
         alignement = torch.cat(
-            (torch.zeros(alignement.size(0), 1).type_as(alignement), alignement), -1
+            (torch.zeros(alignement.size(0), 1).to(alignement), alignement), -1
         )
+
         delta = alignement.diff(dim=-1)
-        delta = torch.relu(delta)
-        return (
-            delta.cumsum(dim=-1)
-            .round()
-            .diff(dim=-1, prepend=torch.zeros(delta.size(0), 1).type_as(delta))
-        ).long()
+
+        # FORZA LA MONOTONICITÀ:
+        # Ogni fonema DEVE durare almeno epsilon.
+        # Questo impedisce a delta di essere negativo o zero.
+        epsilon = 1e-4
+        durations = torch.clamp(delta, min=epsilon)
+
+        return durations
 
     def forward(
         self,
@@ -378,6 +381,7 @@ class Aligner(nn.Module):
         self.embedding_dim = embedding_dim
         self.phonemes_embeddings = PhonemesEmbeddings(num_embeddings, embedding_dim)
         self.phoneme_vocab = PhonemeVocab(vocab_path, parsing_mode=parsing_mode)
+        self.layernorm_mel = nn.LayerNorm(audio_dim)
 
     def generate_pos_encoding(
         self, max_len: int, d_model: int, device: torch.device, dtype: torch.dtype
@@ -392,6 +396,39 @@ class Aligner(nn.Module):
         pos_encoding[:, 0::2] = torch.sin(position * div_term)
         pos_encoding[:, 1::2] = torch.cos(position * div_term)
         return pos_encoding.to(device=device, dtype=dtype)
+
+    def compute_guided_attention_loss(
+        self, alpha, text_lengths, mel_lengths, sigma=0.2
+    ):
+        """
+        Args:
+            alpha: [B, T_phonemes, T_frames] - Matrice di attenzione grezza
+            text_lengths: [B] - Lunghezze reali dei fonemi
+            mel_lengths: [B] - Lunghezze reali dei frame (mels)
+            sigma: Forza della "morbidezza" della diagonale. Più è piccolo, più è rigida.
+        """
+        B, T_p, T_f = alpha.shape
+        device = alpha.device
+
+        # Creiamo le griglie di indici normalizzate [0, 1]
+        # grid_p: [T_p] -> [1, T_p, 1]
+        grid_p = torch.arange(T_p, device=device).view(
+            1, T_p, 1
+        ).float() / text_lengths.view(-1, 1, 1)
+        # grid_f: [T_f] -> [1, 1, T_f]
+        grid_f = torch.arange(T_f, device=device).view(
+            1, 1, T_f
+        ).float() / mel_lengths.view(-1, 1, 1)
+
+        # Matrice di costo W: 0 sulla diagonale, sale verso 1 lontano da essa
+        # W_ij = 1 - exp(-(n/N - m/M)^2 / (2 * sigma^2))
+        distance_sq = (grid_p - grid_f) ** 2
+        W = 1.0 - torch.exp(-distance_sq / (2 * sigma**2))
+
+        # Applichiamo la maschera per sicurezza (opzionale se alpha è già mascherata)
+        # La loss è la media del prodotto elemento per elemento
+        guided_loss = (alpha * W).sum() / B
+        return guided_loss
 
     def forward(
         self,
@@ -409,6 +446,7 @@ class Aligner(nn.Module):
             device=mels.device,
             dtype=mels.dtype,
         )
+        mels = self.layernorm_mel(mels)
         mels += self.generate_pos_encoding(
             max_len=mels.size(1),
             d_model=self.audio_dim,
@@ -426,4 +464,11 @@ class Aligner(nn.Module):
         aligned_mels, durations = self.imv(
             alpha=alpha, mels=mels, mel_mask=mels_mask, text_mask=phonemes_mask
         )
-        return aligned_mels, durations, ~phonemes_mask
+        print(durations[0, :20])
+
+        # compute guided attention loss
+        align_loss = None
+        align_loss = self.compute_guided_attention_loss(
+            alpha=alpha, text_lengths=phonemes_mask.sum(1), mel_lengths=mels_mask.sum(1)
+        )
+        return aligned_mels, durations, ~phonemes_mask, align_loss * 0.05

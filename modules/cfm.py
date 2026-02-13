@@ -12,7 +12,7 @@ from einops import rearrange
 from torchdiffeq import odeint
 from dataclasses import dataclass
 from torch.nn import functional as F
-from modules.Decoder import Transformer
+from modules.DIT import Transformer
 
 
 @dataclass
@@ -36,6 +36,7 @@ class DiTConfig:
     learned_prior: bool = False
     use_vp_schedule: bool = False
     is_causal: bool = True
+    decoder_type: str = "dit"
 
 
 class DiT(torch.nn.Module):

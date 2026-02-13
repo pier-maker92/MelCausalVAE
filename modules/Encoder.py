@@ -2,7 +2,6 @@ import os
 import sys
 
 
-
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import math
 import torch
@@ -51,6 +50,7 @@ class ConvformerEncoderConfig(SigmaVAEencoderConfig):
     embedding_dim: int = 80
     phoneme_parsing_mode: str = "phoneme"
     vocab_path: str = "data/vocab.json"
+    use_aligner: bool = False
 
 
 class SigmaVAEEncoder(nn.Module):
@@ -147,6 +147,7 @@ class CausalTransformerTail(nn.Module):
 
 # TransformerEncoder with causal masking via is_causal for left-only attention [web:84][web:92]
 
+
 class ConvformerEncoder(SigmaVAEEncoder):
     def __init__(self, config: ConvformerEncoderConfig):
         super().__init__(config)
@@ -175,18 +176,17 @@ class ConvformerEncoder(SigmaVAEEncoder):
         if config.logvar_layer:
             self.logvar = nn.Linear(512, latent_dim)
 
-        self.aligner = Aligner(
-            attn_dim=2048,
-            text_dim=config.embedding_dim,
-            audio_dim=512,
-            embedding_dim=config.embedding_dim,
-            num_embeddings=config.num_embeddings,
-            parsing_mode=config.phoneme_parsing_mode,
-            vocab_path=config.vocab_path,
-        )
+        if config.use_aligner:
+            self.aligner = Aligner(
+                attn_dim=2048,
+                text_dim=config.embedding_dim,
+                audio_dim=512,
+                embedding_dim=config.embedding_dim,
+                num_embeddings=config.num_embeddings,
+                parsing_mode=config.phoneme_parsing_mode,
+                vocab_path=config.vocab_path,
+            )
         # print number of parameters
-
-
 
     def forward(
         self,
@@ -197,19 +197,19 @@ class ConvformerEncoder(SigmaVAEEncoder):
     ):  # x: [B, T, 100]
 
         x, padding_mask = self.downsampler(x, padding_mask)
-
-        x = self.transformer(x)  # [B, T/C, 512]
+        z = self.transformer(x)  # [B, T/C, 512]
 
         # get alignement
-        z, durations, padding_mask = self.aligner(
-            mels=x,
-            phonemes=phonemes,
-            mels_mask=~padding_mask,  # NOTE: padding_mask is False for padding tokens, but aligner expects True for padding tokens
-        )
-        z = z.to(x.dtype)
-
-        assert not torch.isnan(z).any(), "z contains nan after aligner"
-        z = self.transformer(z)  # [B, T/C, 512]
+        align_loss, durations = None, None
+        if self.config.use_aligner:
+            z_aligned, durations, padding_mask_aligned, align_loss = self.aligner(
+                mels=z,
+                phonemes=phonemes,
+                mels_mask=~padding_mask,  # NOTE: padding_mask is False for padding tokens, but aligner expects True for padding tokens
+            )
+            # z = z_aligned.to(x.dtype)
+            #padding_mask = padding_mask_aligned
+            assert not torch.isnan(z).any(), "z contains nan after aligner"
 
         mu = self.mu(z)
         logvar = None
@@ -230,6 +230,7 @@ class ConvformerEncoder(SigmaVAEEncoder):
             padding_mask=padding_mask,
             mu=mu,
             durations=durations,
+            align_loss=align_loss,
         )
 
 

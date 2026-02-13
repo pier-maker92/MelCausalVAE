@@ -2,6 +2,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from typing import Optional
 
 
 def _resize_padding_mask(
@@ -103,9 +104,61 @@ class ResNetBlock(nn.Module):
         return self.act(out + residual)
 
 
-class DownSampler(nn.Module):
+class UpsampleResNetBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, stride=1, causal=True):
+        super().__init__()
+        self.stride = stride
+
+        # Upsampling handled manually via interpolate, so Conv1 has stride=1
+        self.conv1 = Conv1d(
+            in_channels,
+            out_channels,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            causal=causal,
+        )
+        self.norm1 = LayerNorm1d(out_channels)
+        self.act = nn.SiLU()
+
+        self.conv2 = Conv1d(
+            out_channels,
+            out_channels,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            causal=causal,
+        )
+        self.norm2 = LayerNorm1d(out_channels)
+
+        self.shortcut = nn.Identity()
+        if in_channels != out_channels:
+            self.shortcut = nn.Sequential(
+                nn.Conv1d(in_channels, out_channels, kernel_size=1),
+                LayerNorm1d(out_channels),
+            )
+
+    def forward(self, x, mask=None):
+        # Upsample at input
+        if self.stride > 1:
+            x = F.interpolate(x, scale_factor=self.stride, mode="nearest")
+            if mask is not None:
+                mask = _resize_padding_mask(mask.squeeze(1), x.shape[2]).unsqueeze(1)
+
+        residual = self.shortcut(x)
+
+        if mask is not None:
+            residual = residual * mask
+
+        out = self.act(self.norm1(self.conv1(x, mask)))
+        out = self.norm2(self.conv2(out, mask))
+
+        return self.act(out + residual)
+
+
+class Upsampler(nn.Module):
     def __init__(
-        self, d_in=100, d_hidden=256, d_out=64, compress_factor=4, causal=True
+        self, d_in=64, d_hidden=256, d_out=100, compress_factor=4, causal=True
     ):
         super().__init__()
 
@@ -114,27 +167,40 @@ class DownSampler(nn.Module):
 
         # 1. Input Projection
         self.input_proj = nn.Sequential(
-            nn.Conv1d(d_in, d_hidden, kernel_size=1), LayerNorm1d(d_hidden), nn.SiLU()
+            nn.Conv1d(d_in, d_hidden, kernel_size=1),
+            LayerNorm1d(d_hidden),
+            nn.SiLU(),
         )
 
-        # 2. ResNet Stack con raffinamento
+        # 2. ResNet Stack con upsampling
         self.layers = nn.ModuleList()
-        num_downsampling_steps = int(math.log2(compress_factor))
+        # Num steps is same as DownSampler
+        num_upsampling_steps = int(math.log2(compress_factor))
 
-        for _ in range(num_downsampling_steps):
-            # Downsampling (stride 2)
-            self.layers.append(ResNetBlock(d_hidden, d_hidden, stride=2, causal=causal))
-            # Raffinamento (stride 1)
+        for _ in range(num_upsampling_steps):
+            # 1. Raffinamento (stride 1)
             self.layers.append(ResNetBlock(d_hidden, d_hidden, stride=1, causal=causal))
+            # 2. Upsampling (stride 2)
+            self.layers.append(
+                UpsampleResNetBlock(d_hidden, d_hidden, stride=2, causal=causal)
+            )
 
         # 3. Output Projection
         self.output_proj = nn.Sequential(
             nn.Conv1d(d_hidden, d_out, kernel_size=1), LayerNorm1d(d_out)
         )
 
-    def forward(self, x, x_mask=None):
-        x = x.transpose(1, 2)
+        # 4. Loss
+        self.criterion = nn.L1Loss()
 
+    def forward(
+        self,
+        x: torch.FloatTensor,
+        x_mask: Optional[torch.BoolTensor] = None,
+        target: Optional[torch.FloatTensor] = None,
+        target_mask: Optional[torch.BoolTensor] = None,
+    ):
+        x = x.transpose(1, 2)
         mask = None
         if x_mask is not None:
             mask = (~x_mask).unsqueeze(1).to(dtype=x.dtype)
@@ -148,6 +214,7 @@ class DownSampler(nn.Module):
         for layer in self.layers:
             # Applichiamo il blocco
             x = layer(x, mask)
+            # Resize mask to match x output (needed after upsampling)
             if mask is not None:
                 mask = _resize_padding_mask(mask.squeeze(1), x.shape[2]).unsqueeze(1)
 
@@ -155,6 +222,20 @@ class DownSampler(nn.Module):
         x = self.output_proj(x)
         if mask is not None:
             x = x * mask
-            # questo per ritornare la modalità padding mask
+            # Restore mask convention
             mask = ~mask
-        return x.transpose(1, 2), mask.squeeze(1).bool() if mask is not None else None
+
+        x = x.transpose(1, 2)
+        mask = mask.squeeze(1).bool() if mask is not None else None
+
+        loss = None
+        if target is not None and target_mask is not None:
+            min_length = min(x.shape[1], target.shape[1])
+            x = x[:, :min_length, :]
+            target = target[:, :min_length, :]
+            target_mask = target_mask[:, :min_length]
+
+            loss_l1 = self.criterion(x[~target_mask], target[~target_mask])
+            loss = loss_l1
+
+        return x, mask, loss

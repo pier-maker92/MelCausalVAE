@@ -6,13 +6,14 @@ import logging
 import argparse
 from vocos import Vocos
 from pathlib import Path
+from einops import rearrange
 from typing import Dict, List
 import matplotlib.pyplot as plt
 from modules.cfm import DiTConfig
 from modules.VAE import VAE, VAEConfig
-from modules.Encoder import ConvformerEncoderConfig
 from modules.aligner import plot_durations_on_mel
-from einops import rearrange
+from modules.Encoder import ConvformerEncoderConfig
+from modules.decoder_standard_vae import DecoderConfig
 from modules.melspecEncoder import MelSpectrogramConfig
 from transformers import (
     Trainer,
@@ -31,6 +32,7 @@ from data.libri_tts import LibriTTS
 from data.librispeechHubert import LibriSpeech100h
 from data.audio_dataset import TrainDatasetWrapper
 from data.audio_dataset import DataCollator, HubertDatasetWrapper
+
 
 # Set up logging
 logging.basicConfig(
@@ -410,23 +412,24 @@ class VAEtrainer(Trainer):
             )
             plt.close(fig)
 
-            fig = plot_durations_on_mel(
-                batch_idx=idx,
-                step=self.state.global_step,
-                mels=results["original_mel"],
-                durations=results["durations"],
-                text_length=[len(p) for p in phonemes],
-                labels=phonemes[idx],
-                device_id=device_id,
-                mel_mask=results["padding_mask"],
-            )
-            boundaries_images.append(
-                wandb.Image(
-                    fig,
-                    caption=f"Sample {idx} - Step {self.state.global_step} - Device {device_id}",
+            if results["durations"] is not None:
+                fig = plot_durations_on_mel(
+                    batch_idx=idx,
+                    step=self.state.global_step,
+                    mels=results["original_mel"],
+                    durations=results["durations"],
+                    text_length=[len(p) for p in phonemes],
+                    labels=phonemes[idx],
+                    device_id=device_id,
+                    mel_mask=results["padding_mask"],
                 )
-            )
-            plt.close(fig)
+                boundaries_images.append(
+                    wandb.Image(
+                        fig,
+                        caption=f"Sample {idx} - Step {self.state.global_step} - Device {device_id}",
+                    )
+                )
+                plt.close(fig)
 
             for mel_data, label in [
                 (results["reconstructed_mel"][idx], "Reconstructed"),
@@ -450,14 +453,14 @@ class VAEtrainer(Trainer):
                 )
 
         if wandb.run is not None:
-            wandb.log(
-                {
-                    "reconstructions": images,
-                    "boundaries": boundaries_images,
-                    "reconstructions_audio": audios,
-                    "step": self.state.global_step,
-                }
-            )
+            to_log = {
+                "reconstructions": images,
+                "reconstructions_audio": audios,
+                "step": self.state.global_step,
+            }
+            if boundaries_images:
+                to_log["boundaries"] = boundaries_images
+            wandb.log(to_log)
             logger.info(f"Logged {len(images)} reconstruction samples to wandb")
 
     def _create_mel_comparison_plot(
@@ -631,7 +634,7 @@ def main():
         dataset, "train", hubert_guidance=hubert_guidance, phonemes=phonemes
     )
     test_dataset = TrainDatasetWrapper(
-        dataset, "test", hubert_guidance=hubert_guidance, phonemes=phonemes
+        dataset, "train", hubert_guidance=hubert_guidance, phonemes=phonemes
     )
 
     # handle wandb - only initialize on main process (rank 0)
@@ -649,7 +652,12 @@ def main():
 
     # Create model config
     # Build model configs from merged YAML
-    decoder_config = DiTConfig(**cfm_cfg)
+    if cfm_cfg.get("decoder_type") == "dit":
+        decoder_config = DiTConfig(**cfm_cfg)
+    elif cfm_cfg.get("decoder_type") == "Convformer":
+        decoder_config = DecoderConfig(**cfm_cfg)
+    else:
+        raise ValueError(f"Decoder type {cfm_cfg.get('decoder_type')} not supported")
     encoder_config = ConvformerEncoderConfig(**convformer_cfg)
     # Create model
     logger.info("Creating VAE model...")

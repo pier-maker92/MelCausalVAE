@@ -12,5 +12,6 @@ cfm:
   mel_channels: 100
   learned_prior: false
   is_causal: false
+  decoder_type: "dit"
 
 

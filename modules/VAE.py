@@ -12,14 +12,14 @@ from .semantic_module import SeamlessM4Tv2Encoder
 from .semantic_mapper import SemanticMapperConfig, Z2YMapper
 from .Encoder import ConvformerEncoderConfig, ConvformerEncoder
 from .melspecEncoder import MelSpectrogramEncoder, MelSpectrogramConfig
+from .decoder_standard_vae import DecoderVAE, DecoderConfig
+
 
 def count_parameters_by_module(model):
     for name, module in model.named_children():
         total = sum(p.numel() for p in module.parameters())
         trainable = sum(p.numel() for p in module.parameters() if p.requires_grad)
         print(f"{name:15s} total={total:12,}  trainable={trainable:12,}")
-
-
 
 
 @dataclass
@@ -41,6 +41,7 @@ class VAEConfig:
     semantic_mapper_config: Optional[SemanticMapperConfig] = None
     add_semantic_distillation: bool = False
     add_semantic_mapper: bool = False
+    use_aligner: bool = False
 
     @property
     def hidden_size(self):
@@ -56,6 +57,7 @@ class VAEConfig:
             "mel_spec_config": asdict(self.mel_spec_config),
             "add_semantic_distillation": self.add_semantic_distillation,
             "add_semantic_mapper": self.add_semantic_mapper,
+            "use_aligner": self.use_aligner,
         }
 
 
@@ -63,7 +65,12 @@ class VAE(torch.nn.Module):
     def __init__(self, config: VAEConfig, dtype: torch.dtype):
         super().__init__()
         self.config = config
-        self.decoder = DiT(config.decoder_config)
+        if config.decoder_config.decoder_type == "dit":
+            self.decoder = DiT(config.decoder_config)
+        elif config.decoder_config.decoder_type == "vae":
+            self.decoder = DecoderVAE(config.decoder_config)
+        else:
+            raise ValueError("Decoder type not supported")
         # if config.encoder_config.compress_factor_C < 4:
         #     print(f"WARNING: compress_factor_C is less than 4, but the minimum downsampling factor is 4")
         #     print(f"Setting compress_factor_C to 4")
@@ -78,9 +85,8 @@ class VAE(torch.nn.Module):
         self.dtype = dtype
         self.set_dtype(dtype)
 
-        
         count_parameters_by_module(self.encoder)
-        #breakpoint()
+        # breakpoint()
 
     def set_dtype(self, dtype: torch.dtype):
         self.dtype = dtype
@@ -115,6 +121,44 @@ class VAE(torch.nn.Module):
             batch_first=True,
         )
 
+    def soft_upsampling(self, z, durations, compress_factor_C):
+        """
+        z: [B, T_phonemes, D] - I tuoi vettori latenti
+        durations: [B, T_phonemes] - Durate float estratte sopra
+        """
+        B, T_p, D = z.shape
+        device = z.device
+
+        # 1. Scala le durate per il fattore di compressione (es. 25Hz -> 80Hz)
+        scaled_durations = durations * compress_factor_C
+
+        # 2. Trova i centri di ogni fonema nel tempo target (mel-scale)
+        # Calcoliamo i punti di fine e poi il centro
+        ends = torch.cumsum(scaled_durations, dim=-1)
+        starts = ends - scaled_durations
+        centers = (starts + ends) / 2.0  # [B, T_p]
+
+        # 3. Determina quanti frame totali generare
+        T_f = torch.round(ends[:, -1].max()).long()
+
+        # 4. Crea una griglia di frame: [T_f]
+        grid_f = torch.arange(T_f, device=device).float().view(1, 1, T_f)  # [1, 1, T_f]
+
+        # 5. Gaussian Upsampling: calcola la vicinanza di ogni frame a ogni centro di fonema
+        # Usiamo una sigma fissa (es. 0.5) per controllare la "morbidezza" del passaggio tra fonemi
+        sigma = 0.5
+        dist = (grid_f - centers.unsqueeze(-1)) ** 2  # [B, T_p, T_f]
+
+        # W è la nostra matrice di upsampling differenziabile
+        # Per ogni frame (dim=1), facciamo una softmax sui fonemi
+        W = torch.nn.functional.softmax(-dist / (2 * sigma**2), dim=1)
+        W = W.to(dtype=z.dtype)
+
+        # 6. Applica la matrice a z: [B, T_f, D]
+        upsampled_z = torch.bmm(W.transpose(1, 2), z)
+
+        return upsampled_z
+
     def forward(self, audios_srs, **kwargs):
         encoded_audios = self.wav2mel(audios_srs)
 
@@ -127,11 +171,20 @@ class VAE(torch.nn.Module):
             step=kwargs.get("training_step", None),
             phonemes=kwargs.get("phonemes", None),
         )
-
-        upsampled_z = self.repeat_tokens(
-            convformer_output.z,
-            convformer_output.durations * self.config.encoder_config.compress_factor_C,
-        )
+        hardcoded = True
+        if self.config.encoder_config.use_aligner and not hardcoded:
+            upsampled_z = self.soft_upsampling(
+                convformer_output.z,
+                convformer_output.durations,
+                self.config.encoder_config.compress_factor_C,
+            )
+        else:
+            # repeat interleave for compress factor
+            upsampled_z = torch.repeat_interleave(
+                convformer_output.z,
+                self.config.encoder_config.compress_factor_C,
+                dim=1,
+            )
         audio_loss = self.decoder(
             target=x,
             target_padding_mask=encoded_audios.padding_mask,
@@ -182,11 +235,29 @@ class VAE(torch.nn.Module):
             step=None,
             phonemes=phonemes,
         )
-
-        upsampled_z = self.repeat_tokens(
-            convformer_output.z,
-            convformer_output.durations * self.config.encoder_config.compress_factor_C,
-        )
+        durations = None
+        hardcoded = True
+        if self.config.encoder_config.use_aligner and not hardcoded:
+            upsampled_z = self.soft_upsampling(
+                convformer_output.z,
+                convformer_output.durations,
+                self.config.encoder_config.compress_factor_C,
+            )
+            durations = (
+                convformer_output.durations
+                * self.config.encoder_config.compress_factor_C
+            )
+        else:
+            # repeat interleave for compress factor
+            upsampled_z = torch.repeat_interleave(
+                convformer_output.z,
+                self.config.encoder_config.compress_factor_C,
+                dim=1,
+            )
+            durations = (
+                convformer_output.durations
+                * self.config.encoder_config.compress_factor_C
+            )
         # Generate mel spectrogram from latent
         reconstructed_mel = self.decoder.generate(
             num_steps=num_steps,
@@ -203,10 +274,7 @@ class VAE(torch.nn.Module):
         result = {
             "original_mel": original_mel,
             "reconstructed_mel": reconstructed_mel,
-            "durations": (
-                convformer_output.durations
-                * self.config.encoder_config.compress_factor_C
-            ).long(),
+            "durations": durations,
             "padding_mask": encoded_audios.padding_mask,
         }
         return result
