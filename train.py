@@ -41,6 +41,31 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def get_phonemes(phonemes: List[str], parsing_mode: str = "phoneme"):
+    """
+    Convert transcripts to phoneme tokens.
+    Returns: List[B] of List[phoneme]
+    """
+    phonemes_batch = []
+    for phoneme_str in phonemes:
+        phoneme_str = f"<sil> {phoneme_str} <sil>"
+
+        if parsing_mode == "phoneme":
+            tokens = phoneme_str.split()
+        elif parsing_mode == "char":
+            tokens = []
+            for p in phoneme_str.split():
+                if p == "<sil>":
+                    tokens.append(p)
+                else:
+                    tokens.extend(list(p))
+        else:
+            raise ValueError(f"Unknown parsing mode: {parsing_mode}")
+
+        phonemes_batch.append(tokens)
+    return phonemes_batch
+
+
 def get_cosine_schedule_with_warmup_and_min_lr(
     optimizer,
     num_warmup_steps: int,
@@ -357,6 +382,9 @@ class VAEtrainer(Trainer):
                 hubert_guidance=hubert_guidance,
                 phonemes=phonemes,
             )
+
+        if phonemes is not None:
+            phonemes = get_phonemes(phonemes)
 
         device_id = (
             torch.distributed.get_rank() if torch.distributed.is_initialized() else 0

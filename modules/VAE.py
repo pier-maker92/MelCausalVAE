@@ -105,7 +105,7 @@ class VAE(torch.nn.Module):
 
     def forward(self, audios_srs, **kwargs):
         encoded_audios = self.wav2mel(audios_srs)
-        
+
         # Ensure input to encoder matches model dtype
         x = encoded_audios.audio_features.to(dtype=self.dtype)
 
@@ -120,8 +120,6 @@ class VAE(torch.nn.Module):
             convformer_output.z,
             convformer_output.durations * self.config.encoder_config.compress_factor_C,
         )
-        breakpoint()
-
         audio_loss = self.decoder(
             target=x,
             target_padding_mask=encoded_audios.padding_mask,
@@ -145,7 +143,7 @@ class VAE(torch.nn.Module):
     @torch.no_grad()
     def normalize_mel(self, mel: torch.Tensor):
         return (mel - self.wav2mel.mean) / self.wav2mel.std
-    
+
     @torch.no_grad()
     def encode_and_sample(
         self,
@@ -170,14 +168,13 @@ class VAE(torch.nn.Module):
             x=original_mel,
             padding_mask=encoded_audios.padding_mask,
             step=None,
-            phonemes=phonemes
+            phonemes=phonemes,
         )
 
         upsampled_z = self.repeat_tokens(
             convformer_output.z,
             convformer_output.durations * self.config.encoder_config.compress_factor_C,
         )
-
         # Generate mel spectrogram from latent
         reconstructed_mel = self.decoder.generate(
             num_steps=num_steps,
@@ -194,7 +191,10 @@ class VAE(torch.nn.Module):
         result = {
             "original_mel": original_mel,
             "reconstructed_mel": reconstructed_mel,
-            "durations": (convformer_output.durations * self.config.encoder_config.compress_factor_C).long()    ,
+            "durations": (
+                convformer_output.durations
+                * self.config.encoder_config.compress_factor_C
+            ).long(),
             "padding_mask": encoded_audios.padding_mask,
         }
         return result

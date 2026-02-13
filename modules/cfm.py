@@ -246,6 +246,7 @@ class DiT(torch.nn.Module):
             min_len = min(y0.shape[1], padding_mask.shape[1])
             y0 = y0[:, :min_len, :]
             padding_mask = padding_mask[:, :min_len]
+            context_vector = context_vector[:, :min_len, :]
         self.transformer.to(device=context_vector.device, dtype=context_vector.dtype)
         # ---- time span ----
         t_span = torch.linspace(

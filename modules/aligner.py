@@ -19,7 +19,7 @@ def plot_durations_on_mel(
 ):
     # mel_mask is True for padding. We want valid length.
     valid_len = (~mel_mask[batch_idx]).long().sum().item()
-    
+
     mel = mels[batch_idx, :valid_len].detach().float().cpu().numpy().T
     dur = durations[batch_idx, : text_length[batch_idx]].detach().float().cpu().numpy()
 
@@ -197,8 +197,12 @@ class IMV(torch.nn.Module):
             .repeat(imv.size(0), 1)
             .to(device=imv.device, dtype=imv.dtype)
         )
-        q = q * mel_mask.to(dtype=imv.dtype)  # generate index vector of target sequence.
-        return torch.bmm(beta, q.unsqueeze(-1)) * text_mask.unsqueeze(-1).to(dtype=imv.dtype)
+        q = q * mel_mask.to(
+            dtype=imv.dtype
+        )  # generate index vector of target sequence.
+        return torch.bmm(beta, q.unsqueeze(-1)) * text_mask.unsqueeze(-1).to(
+            dtype=imv.dtype
+        )
 
     def reconstruct_align_from_aligned_positions(
         self, e, mel_mask=None, text_mask=None
@@ -291,6 +295,7 @@ class PhonemeVocab:
         assert "<pad>" in self.vocab
         assert "<sil>" in self.vocab
         assert "<unk>" in self.vocab
+        self.inverse_vocab = {v: k for k, v in self.vocab.items()}
 
     def _load_vocab(self, path_to_vocab: str):
         # load from json

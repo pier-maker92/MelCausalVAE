@@ -3,21 +3,21 @@ training:
   output_dir: checkpoints/MelCausalVAE/exp-efficient # variable rate training
   num_train_epochs: 10
   learning_rate: 1e-4
-  per_device_train_batch_size: 4
-  report_to: none
+  per_device_train_batch_size: 32
+  report_to: wandb
   wandb_project: flexi-vae
   wandb_run_name: exp-efficient-aligner
   fp16: false
   bf16: true
   save_steps: 1000
   eval_strategy: "steps"
-  eval_steps: 10
+  eval_steps: 1000
   save_total_limit: 1
   gradient_accumulation_steps: 1
   dataloader_num_workers: 4
   min_learning_rate: 1e-5
   #from_pretrained: checkpoints/MelCausalVAE/sigma-vae/checkpoint-6000/model.safetensors
-  #resume_from_checkpoint: /workspace/MelCausalVAE/checkpoints/MelCausalVAE/exp-2/checkpoint-1000
+  resume_from_checkpoint: /workspace/MelCausalVAE/checkpoints/MelCausalVAE/exp-efficient/checkpoint-3000
   phonemes: true
 
 convformer:
@@ -29,7 +29,7 @@ convformer:
   logvar_layer: false
   use_sofplus: false
   target_std: 1.0
-  kl_loss_warmup_steps: 1000
+  kl_loss_warmup_steps: 250
   kl_loss_weight: 1e-3
 
 cfm:
