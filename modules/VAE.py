@@ -13,6 +13,14 @@ from .semantic_mapper import SemanticMapperConfig, Z2YMapper
 from .Encoder import ConvformerEncoderConfig, ConvformerEncoder
 from .melspecEncoder import MelSpectrogramEncoder, MelSpectrogramConfig
 
+def count_parameters_by_module(model):
+    for name, module in model.named_children():
+        total = sum(p.numel() for p in module.parameters())
+        trainable = sum(p.numel() for p in module.parameters() if p.requires_grad)
+        print(f"{name:15s} total={total:12,}  trainable={trainable:12,}")
+
+
+
 
 @dataclass
 class VAEOutput:
@@ -69,6 +77,10 @@ class VAE(torch.nn.Module):
         self.decoder.expansion_factor = config.encoder_config.compress_factor_C
         self.dtype = dtype
         self.set_dtype(dtype)
+
+        
+        count_parameters_by_module(self.encoder)
+        #breakpoint()
 
     def set_dtype(self, dtype: torch.dtype):
         self.dtype = dtype

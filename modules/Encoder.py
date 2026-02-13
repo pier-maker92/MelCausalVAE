@@ -1,6 +1,8 @@
 import os
 import sys
 
+
+
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import math
 import torch
@@ -145,7 +147,6 @@ class CausalTransformerTail(nn.Module):
 
 # TransformerEncoder with causal masking via is_causal for left-only attention [web:84][web:92]
 
-
 class ConvformerEncoder(SigmaVAEEncoder):
     def __init__(self, config: ConvformerEncoderConfig):
         super().__init__(config)
@@ -175,7 +176,7 @@ class ConvformerEncoder(SigmaVAEEncoder):
             self.logvar = nn.Linear(512, latent_dim)
 
         self.aligner = Aligner(
-            attn_dim=config.embedding_dim,
+            attn_dim=2048,
             text_dim=config.embedding_dim,
             audio_dim=512,
             embedding_dim=config.embedding_dim,
@@ -183,6 +184,9 @@ class ConvformerEncoder(SigmaVAEEncoder):
             parsing_mode=config.phoneme_parsing_mode,
             vocab_path=config.vocab_path,
         )
+        # print number of parameters
+
+
 
     def forward(
         self,
@@ -193,6 +197,8 @@ class ConvformerEncoder(SigmaVAEEncoder):
     ):  # x: [B, T, 100]
 
         x, padding_mask = self.downsampler(x, padding_mask)
+
+        x = self.transformer(x)  # [B, T/C, 512]
 
         # get alignement
         z, durations, padding_mask = self.aligner(
