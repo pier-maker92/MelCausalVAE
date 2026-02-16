@@ -367,7 +367,7 @@ class VAEtrainer(Trainer):
         for batch in eval_dataloader:
             if "output_audios_srs" in batch:
                 audios_srs = [
-                    (a.to(self.args.device, torch.bfloat16), sr)
+                    (a.to(self.args.device, torch.float32), sr)
                     for a, sr in batch["output_audios_srs"]
                 ]
                 break
@@ -378,9 +378,9 @@ class VAEtrainer(Trainer):
         with torch.no_grad():
             results = self.model.encode_and_sample(
                 audios_srs=audios_srs,
-                num_steps=8,
-                temperature=0.8,
-                guidance_scale=1.3,
+                num_steps=16,
+                temperature=1.0,
+                guidance_scale=1.5,
                 hubert_guidance=hubert_guidance,
                 phonemes=phonemes,
             )

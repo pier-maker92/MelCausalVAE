@@ -1,10 +1,12 @@
+# aligner_dp_debug.py
 import json
 import math
+from typing import List, Optional, Dict, Any
+
 import torch
 import torch.nn as nn
-from typing import List
-import matplotlib.pyplot as plt
 import torch.nn.functional as F
+import matplotlib.pyplot as plt
 
 
 def plot_durations_on_mel(
@@ -55,242 +57,46 @@ def plot_durations_on_mel(
     return fig
 
 
-class PhonemesEmbeddings(nn.Module):
-    def __init__(self, num_embeddings, embedding_dim):
-        super(PhonemesEmbeddings, self).__init__()
-        self.embedding = nn.Embedding(num_embeddings, embedding_dim)
-
-    def forward(self, phonemes):
-        """
-        Args:
-            phonemes: [Batch, T_phonemes]
-        Returns:
-            phoneme_embeddings: [Batch, T_phonemes, embedding_dim]
-        """
-        return self.embedding(phonemes)
+# -----------------------------------------------------------------------------
+# Utilities
+# -----------------------------------------------------------------------------
+def neg_inf(dtype: torch.dtype) -> float:
+    """
+    A large negative number that is representable in the given dtype.
+    - fp16: -1e4 is safe-ish (avoid -inf)
+    - bf16/fp32: -1e9 is fine
+    """
+    return -1e4 if dtype == torch.float16 else -1e9
 
 
-class EfficientAlphaAttention(nn.Module):
-    def __init__(self, audio_dim, text_dim, attn_dim):
-        super(EfficientAlphaAttention, self).__init__()
-        self.query_proj = nn.Linear(audio_dim, attn_dim)
-        self.key_proj = nn.Linear(text_dim, attn_dim)
-        self.scale = 1.0 / math.sqrt(attn_dim)
-
-    def forward(
-        self,
-        frames: torch.FloatTensor,
-        phonemes_embeddings: torch.FloatTensor,
-        audio_mask: torch.BoolTensor = None,
-        text_mask: torch.BoolTensor = None,
-    ):
-        """
-        Args:
-            frames: [Batch, T_frames, audio_dim]
-            phonemes_embeddings: [Batch, T_phonemes, embedding_dim]
-            audio_mask: [Batch, T_frames] - 1 per i frame reali, 0 per padding
-            text_mask: [Batch, T_phonemes] - 1 per i fonemi reali, 0 per padding
-
-        Returns:
-            alpha: [Batch, T_phonemes, T_frames]
-        """
-        B, T_frames, _ = frames.shape
-        T_P = phonemes_embeddings.shape[1]
-
-        # 1. Proiezioni
-        Q = self.query_proj(frames)  # [B, T_frames, attn_dim]
-        K = self.key_proj(phonemes_embeddings)  # [B, T_P, attn_dim]
-
-        # 2. Score [B, T_frames, T_P]
-        scores = torch.matmul(Q, K.transpose(1, 2)) * self.scale
-
-        # 3. Applicazione della Text Mask (prima della Softmax)
-        # Impedisce a ogni frame audio di assegnare peso ai fonemi di padding
-        if text_mask is not None:
-            # Espandiamo la maschera per il broadcasting: [B, 1, T_P]
-            t_mask = text_mask.unsqueeze(1)
-            scores = scores.masked_fill(t_mask == 0, -1e9)
-
-        # Softmax sulla dimensione dei fonemi
-        alpha_prime = F.softmax(scores, dim=-1)  # [B, T_frames, T_P]
-
-        # 4. Applicazione della Audio Mask (dopo la Softmax)
-        # Impedisce ai frame audio di padding di avere pesi validi
-        if audio_mask is not None:
-            # Espandiamo la maschera per il broadcasting: [B, T_frames, 1]
-            a_mask = audio_mask.unsqueeze(2)
-            alpha_prime = alpha_prime * a_mask
-
-        # alpha shape: [Batch, T_phonemes, T_frames]
-        alpha = alpha_prime.transpose(1, 2)
-
-        return alpha
+def safe_isfinite(x: torch.Tensor) -> bool:
+    return torch.isfinite(x).all().item()
 
 
-class IMV(torch.nn.Module):
-    def __init__(
-        self,
-        sigma: float = 0.5,
-        delta: float = 0.1,
-    ):
-        super().__init__()
-        self.sigma = sigma
-        self.delta = delta
-
-    def generate_index_vector(self, text_mask, dtype=torch.float32):
-        """Create index vector of text sequence.
-        Args:
-            text_mask: text_mask: mask of text-sequence. [B,T1]
-        returns:
-            index vector of text sequence. [B,T1]
-        """
-        p = (
-            torch.arange(0, text_mask.size(-1))
-            .repeat(text_mask.size(0), 1)
-            .to(device=text_mask.device, dtype=dtype)
-        )
-        return p * text_mask.to(dtype)
-
-    def imv_generator(self, alpha, p, mel_mask, text_length):
-        """Compute imv from alignment matrix alpha. Implementation of HMA
-        Args:
-            alpha: scaled dot attention [B,T1,T2]
-            p: index vector, output of generate_index_vector. [B,T1]
-            mel_mask: mask of mel-spectrogram [B, T2]
-            text_length: lengths of input text-sequence [B]
-        returns:
-            Index mapping vector (IMV) [B,T2]
-        """
-        imv_dummy = torch.bmm(alpha.transpose(1, 2), p.unsqueeze(-1)).squeeze(
-            -1
-        )  # [B,T2]
-        delta_imv_raw = imv_dummy[:, 1:] - imv_dummy[:, :-1]
-        delta_imv = torch.relu(delta_imv_raw)  # [B, T2-1]
-        # delta_imv = F.leaky_relu(delta_imv_raw, negative_slope=0.01)  # [B, T2-1]
-        delta_imv = torch.cat(
-            (torch.zeros(alpha.size(0), 1).type_as(alpha), delta_imv), -1
-        )  # [B, T2-1] -> [B, T2]
-        imv = torch.cumsum(delta_imv, -1) * mel_mask.to(dtype=alpha.dtype)
-        last_imv = torch.max(imv, dim=-1)[0]  # get last element of imv
-        last_imv = torch.clamp(last_imv, min=1e-8).unsqueeze(-1)  # avoid zeros
-        imv = (
-            imv / last_imv * (text_length.to(dtype=alpha.dtype).unsqueeze(-1))
-        )  # multiply imv by a positive scalar to enforce 0<imv<T1-1
-        return imv
-
-    def get_aligned_positions(self, imv, p, mel_mask, text_mask):
-        """compute aligned positions from imv
-        Args:
-            imv: index mapping vector #[B,T2]
-            p: index vector, output of generate_index_vector. [B,T1]
-            sigma: a scalar, default 0.5
-            mel_mask: mask of mel-spectrogram [B, T2]
-        returns:
-            Aligned positions [B,T1]
-        """
-        energies = -1 * ((imv.unsqueeze(1) - p.unsqueeze(-1)) ** 2) * self.sigma
-        energies = energies.masked_fill(
-            ~(mel_mask.unsqueeze(1).repeat(1, energies.size(1), 1)), -1e9
-        )
-        beta = torch.softmax(energies, dim=-1)
-        q = (
-            torch.arange(0, mel_mask.size(-1))
-            .unsqueeze(0)
-            .repeat(imv.size(0), 1)
-            .to(device=imv.device, dtype=imv.dtype)
-        )
-        q = q * mel_mask.to(
-            dtype=imv.dtype
-        )  # generate index vector of target sequence.
-        return torch.bmm(beta, q.unsqueeze(-1)) * text_mask.unsqueeze(-1).to(
-            dtype=imv.dtype
-        )
-
-    def reconstruct_align_from_aligned_positions(
-        self, e, mel_mask=None, text_mask=None
-    ):
-        """reconstruct alignment matrix from aligned positions
-        Args:
-            e: aligned positions [B,T1]
-            delta: a scalar, default 0.1
-            mel_mask: mask of mel-spectrogram [B, T2], None if inference or B==1
-            text_mask: mask of text-sequence, None if B==1
-        returns:
-            alignment matrix [B,T1,T2]
-        """
-        if mel_mask is None:  # inference phase:
-            max_length = torch.round(e[:, -1] + (e[:, -1] - e[:, -2]))
-        else:
-            max_length = mel_mask.size(-1)
-        q = (
-            torch.arange(0, max_length)
-            .unsqueeze(0)
-            .repeat(e.size(0), 1)
-            .to(device=e.device, dtype=e.dtype)
-        )
-        if mel_mask is not None:
-            q = q * mel_mask.to(dtype=e.dtype)
-        energies = -1 * self.delta * (q.unsqueeze(1) - e.unsqueeze(-1)) ** 2
-        if text_mask is not None:
-            energies = energies.masked_fill(
-                ~(text_mask.unsqueeze(-1).repeat(1, 1, max_length)), -1e9
-            )
-        return torch.softmax(energies, dim=-1)
-
-    def algin_frames(self, energies, mels):
-        """Align frames to text
-        Args:
-            energies: energies [B,T1,T2]
-            mels: mels [B,T2,F]
-        Returns:
-            aligned_mels: aligned mels [B,T1,F]
-        """
-        aligned_mels = torch.bmm(energies, mels)
-        return aligned_mels
-
-    def extract_durations(self, alignement):
-        """
-        Estrae durate float garantendo che siano sempre positive (monotonicità).
-        """
-        # alignement: [B, T1] - posizioni temporali crescenti
-        alignement = torch.cat(
-            (torch.zeros(alignement.size(0), 1).to(alignement), alignement), -1
-        )
-
-        delta = alignement.diff(dim=-1)
-
-        # FORZA LA MONOTONICITÀ:
-        # Ogni fonema DEVE durare almeno epsilon.
-        # Questo impedisce a delta di essere negativo o zero.
-        epsilon = 1e-4
-        durations = torch.clamp(delta, min=epsilon)
-
-        return durations
-
-    def forward(
-        self,
-        mels: torch.FloatTensor,
-        alpha: torch.FloatTensor,
-        mel_mask: torch.FloatTensor,
-        text_mask: torch.FloatTensor,
-    ):
-        p = self.generate_index_vector(text_mask=text_mask, dtype=alpha.dtype)
-        text_length = text_mask.sum(dim=1)
-        imv = self.imv_generator(
-            alpha=alpha, p=p, mel_mask=mel_mask, text_length=text_length
-        )
-        alignement = self.get_aligned_positions(
-            imv=imv, p=p, mel_mask=mel_mask, text_mask=text_mask
-        ).squeeze(-1)
-        energies = self.reconstruct_align_from_aligned_positions(
-            e=alignement, mel_mask=mel_mask, text_mask=text_mask
-        )
-        aligned_mels = self.algin_frames(energies=energies, mels=mels)
-        durations = self.extract_durations(alignement=alignement)
-
-        return aligned_mels, durations
+def debug_print(enabled: bool, *args):
+    if enabled:
+        print(*args)
 
 
+def _masked_log_softmax(
+    logits: torch.Tensor, mask: torch.Tensor, dim: int = -1
+) -> torch.Tensor:
+    """
+    logits: [..., K]
+    mask:   same shape broadcastable to logits, True=valid
+    """
+    neg = neg_inf(logits.dtype)
+    logits = logits.masked_fill(~mask, neg)
+
+    # If an entire row is masked, logsumexp becomes neg (or -inf).
+    # We still compute it, but downstream we must detect impossible cases (logZ=-inf).
+    lse = torch.logsumexp(logits, dim=dim, keepdim=True)
+    return logits - lse
+
+
+# -----------------------------------------------------------------------------
+# Vocab + Embeddings (unchanged)
+# -----------------------------------------------------------------------------
 class PhonemeVocab:
     def __init__(self, path_to_vocab: str, parsing_mode: str = "phoneme"):
         self.vocab = self._load_vocab(path_to_vocab)
@@ -301,23 +107,14 @@ class PhonemeVocab:
         self.inverse_vocab = {v: k for k, v in self.vocab.items()}
 
     def _load_vocab(self, path_to_vocab: str):
-        # load from json
         with open(path_to_vocab, "r") as f:
             vocab = json.load(f)
         return vocab
 
     def token2id(self, token: str):
-        token_id = self.vocab.get(token, self.vocab["<unk>"])
-        if token_id == self.vocab["<unk>"]:
-            # print(f"Warning: token {token} not found in vocab")
-            pass
-        return token_id
+        return self.vocab.get(token, self.vocab["<unk>"])
 
     def _get_phonemes(self, phonemes: List[str]):
-        """
-        Convert transcripts to phoneme tokens.
-        Returns: List[B] of List[phoneme]
-        """
         phonemes_batch = []
         for phoneme_str in phonemes:
             phoneme_str = f"<sil> {phoneme_str} <sil>"
@@ -335,14 +132,14 @@ class PhonemeVocab:
                 raise ValueError(f"Unknown parsing mode: {self.parsing_mode}")
 
             phonemes_batch.append(
-                torch.tensor([self.token2id(token) for token in tokens]).long()
+                torch.tensor([self.token2id(t) for t in tokens]).long()
             )
         return phonemes_batch
 
     def __call__(self, phonemes: List[str], device: torch.device):
         phoneme_ids = self._get_phonemes(phonemes)
         phoneme_mask = [torch.ones(len(ph)) for ph in phoneme_ids]
-        # phoneme ids padded
+
         phoneme_ids = (
             torch.nn.utils.rnn.pad_sequence(
                 phoneme_ids, batch_first=True, padding_value=self.vocab["<pad>"]
@@ -350,7 +147,7 @@ class PhonemeVocab:
             .to(device)
             .long()
         )
-        # phoneme mask --> 1 means valid token, 0 means padding
+
         phoneme_mask = (
             torch.nn.utils.rnn.pad_sequence(
                 phoneme_mask, batch_first=True, padding_value=0
@@ -361,114 +158,511 @@ class PhonemeVocab:
         return phoneme_ids, phoneme_mask
 
 
+class PhonemesEmbeddings(nn.Module):
+    def __init__(self, num_embeddings: int, embedding_dim: int):
+        super().__init__()
+        self.embedding = nn.Embedding(num_embeddings, embedding_dim)
+
+    def forward(self, phonemes: torch.Tensor) -> torch.Tensor:
+        return self.embedding(phonemes)
+
+
+# -----------------------------------------------------------------------------
+# Monotonic DP Aligner with FULL DEBUG
+# -----------------------------------------------------------------------------
+class MonotonicDPAligner(nn.Module):
+    """
+    Monotonic alignment with forward-sum / backward-sum (stay or advance by 1).
+    Returns:
+      gamma:    [B, T2, T1] posterior (frame->token)
+      pooled:   [B, T1, D]  frames pooled to tokens
+      context:  [B, T2, D]  tokens expanded back to frames via gamma
+      durations:[B, T1]
+      align_loss: scalar (normalized per-frame)
+      debug: dict (optional)
+    """
+
+    def __init__(
+        self, audio_dim: int, text_dim: int, attn_dim: int = 256, eps: float = 1e-8
+    ):
+        super().__init__()
+        self.q = nn.Linear(audio_dim, attn_dim, bias=False)
+        self.k = nn.Linear(text_dim, attn_dim, bias=False)
+        self.scale = 1.0 / math.sqrt(attn_dim)
+        self.eps = eps
+
+    # ---------------------------
+    # Debug helpers
+    # ---------------------------
+    def _debug_masks(
+        self, audio_mask: torch.Tensor, text_mask: torch.Tensor, debug: bool
+    ):
+        with torch.no_grad():
+            debug_print(
+                debug,
+                f"[DPAligner] audio_mask True(valid) ratio: {audio_mask.float().mean().item():.4f}",
+            )
+            debug_print(
+                debug,
+                f"[DPAligner] text_mask  True(valid) ratio: {text_mask.float().mean().item():.4f}",
+            )
+            debug_print(debug, f"[DPAligner] audio_len: {audio_mask.sum(1).tolist()}")
+            debug_print(debug, f"[DPAligner] text_len : {text_mask.sum(1).tolist()}")
+
+    def compute_logp(
+        self,
+        frames: torch.Tensor,
+        text_emb: torch.Tensor,
+        text_mask: torch.Tensor,
+        debug: bool = False,
+    ) -> torch.Tensor:
+        Q = self.q(frames)  # [B,T2,A]
+        K = self.k(text_emb)  # [B,T1,A]
+        logits = torch.matmul(Q, K.transpose(1, 2)) * self.scale  # [B,T2,T1]
+        logp = _masked_log_softmax(logits, text_mask.unsqueeze(1), dim=-1)
+
+        if debug:
+            with torch.no_grad():
+                ok = safe_isfinite(logp)
+                debug_print(debug, f"[DPAligner] logp finite: {ok}")
+                if not ok:
+                    finite = torch.isfinite(logp)
+                    debug_print(
+                        debug,
+                        f"[DPAligner] logp finite ratio: {finite.float().mean().item():.4f}",
+                    )
+                    debug_print(
+                        debug,
+                        f"[DPAligner] logits dtype={logits.dtype} logp dtype={logp.dtype}",
+                    )
+                    debug_print(
+                        debug,
+                        f"[DPAligner] logits min/max: {logits.min().item():.3f} {logits.max().item():.3f}",
+                    )
+                    # Crash hard so you see the real source
+                    raise RuntimeError("Non-finite logp detected")
+        return logp
+
+    def forward_sum(
+        self,
+        logp: torch.Tensor,
+        audio_mask: torch.Tensor,
+        text_mask: torch.Tensor,
+        debug: bool = False,
+        fail_fast: bool = True,
+    ):
+        """
+        Forward DP in log-space.
+        """
+        B, T2, T1 = logp.shape
+        device = logp.device
+        dtype = logp.dtype
+        neg = neg_inf(dtype)
+
+        text_len = text_mask.sum(dim=1).long().clamp(min=1)  # [B]
+        last_p = (text_len - 1).clamp(min=0)
+
+        # init alpha with NEG
+        log_alpha = torch.full((B, T1), neg, device=device, dtype=dtype)
+
+        # Base case:
+        # if first frame is invalid, this model can't start correctly.
+        # We'll still set alpha[:,0] from t=0, but we'll detect impossibility via logZ.
+        log_alpha[:, 0] = logp[:, 0, 0]
+        log_alpha = log_alpha.masked_fill(~text_mask, neg)
+
+        log_alpha_all = torch.full((B, T2, T1), neg, device=device, dtype=dtype)
+        log_alpha_all[:, 0, :] = log_alpha
+
+        for t in range(1, T2):
+            prev = log_alpha
+
+            stay = prev
+            adv = torch.cat(
+                [torch.full((B, 1), neg, device=device, dtype=dtype), prev[:, :-1]],
+                dim=1,
+            )
+
+            log_alpha_new = logp[:, t, :] + torch.logsumexp(
+                torch.stack([stay, adv], dim=0), dim=0
+            )
+            log_alpha_new = log_alpha_new.masked_fill(~text_mask, neg)
+
+            # If frame t is padding => do not update
+            m = audio_mask[:, t].unsqueeze(1)  # [B,1] True=valid
+            log_alpha = torch.where(m, log_alpha_new, prev)
+            log_alpha_all[:, t, :] = log_alpha
+
+        audio_len = audio_mask.sum(dim=1).long().clamp(min=1)
+        last_t = (audio_len - 1).clamp(min=0)
+
+        logZ = log_alpha_all[torch.arange(B, device=device), last_t, last_p]
+
+        if debug:
+            with torch.no_grad():
+                finiteZ = torch.isfinite(logZ)
+                debug_print(
+                    debug,
+                    f"[DPAligner] logZ finite ratio: {finiteZ.float().mean().item():.4f}",
+                )
+                if (~finiteZ).any():
+                    bad = (~finiteZ).nonzero().squeeze(-1)
+                    debug_print(debug, f"[DPAligner] BAD logZ idx: {bad.tolist()}")
+                    debug_print(
+                        debug, f"[DPAligner] BAD audio_len: {audio_len[bad].tolist()}"
+                    )
+                    debug_print(
+                        debug, f"[DPAligner] BAD text_len : {text_len[bad].tolist()}"
+                    )
+                    debug_print(
+                        debug,
+                        f"[DPAligner] BAD last_t/last_p: {last_t[bad].tolist()} / {last_p[bad].tolist()}",
+                    )
+
+                    # This condition is REQUIRED for stay/advance DP:
+                    # to consume T1 tokens, need at least T1 frames.
+                    impossible = audio_len < text_len
+                    if impossible.any():
+                        ib = impossible.nonzero().squeeze(-1)
+                        debug_print(
+                            debug,
+                            f"[DPAligner] IMPOSSIBLE (audio_len < text_len) idx: {ib.tolist()}",
+                        )
+                        debug_print(
+                            debug, f"[DPAligner] audio_len: {audio_len[ib].tolist()}"
+                        )
+                        debug_print(
+                            debug, f"[DPAligner] text_len : {text_len[ib].tolist()}"
+                        )
+
+                    if fail_fast:
+                        raise RuntimeError(
+                            "logZ is not finite -> no valid monotonic path (mask or lengths issue)."
+                        )
+
+        return log_alpha_all, logZ, last_t, last_p, text_len, audio_len
+
+    def backward_sum(
+        self,
+        logp: torch.Tensor,
+        audio_mask: torch.Tensor,
+        text_mask: torch.Tensor,
+        last_t: torch.Tensor,
+        last_p: torch.Tensor,
+        debug: bool = False,
+    ):
+        """
+        Backward DP in log-space.
+        IMPORTANT: initialize beta at each sample's last valid frame (last_t), not at T2-1.
+        """
+        B, T2, T1 = logp.shape
+        device = logp.device
+        dtype = logp.dtype
+        neg = neg_inf(dtype)
+
+        log_beta = torch.full((B, T1), neg, device=device, dtype=dtype)
+        log_beta.scatter_(
+            1, last_p.unsqueeze(1), torch.zeros((B, 1), device=device, dtype=dtype)
+        )
+
+        log_beta_all = torch.full((B, T2, T1), neg, device=device, dtype=dtype)
+
+        # Place the terminal condition at last_t for each sample
+        log_beta_all[torch.arange(B, device=device), last_t, :] = log_beta
+
+        for t in range(T2 - 2, -1, -1):
+            nxt = log_beta  # beta_{t+1} in "packed" form
+
+            # stay: p -> p
+            stay = logp[:, t + 1, :] + nxt
+            # advance: p -> p+1 (so beta_t[p] depends on beta_{t+1}[p+1])
+            adv = logp[:, t + 1, 1:] + nxt[:, 1:]
+            adv = torch.cat(
+                [adv, torch.full((B, 1), neg, device=device, dtype=dtype)], dim=1
+            )
+
+            log_beta_new = torch.logsumexp(torch.stack([stay, adv], dim=0), dim=0)
+            log_beta_new = log_beta_new.masked_fill(~text_mask, neg)
+
+            # Only propagate if frame t+1 is valid
+            m = audio_mask[:, t + 1].unsqueeze(1)
+            log_beta = torch.where(m, log_beta_new, nxt)
+
+            log_beta_all[:, t, :] = log_beta
+
+        if debug:
+            with torch.no_grad():
+                ok = safe_isfinite(log_beta_all)
+                debug_print(debug, f"[DPAligner] log_beta_all finite: {ok}")
+                if not ok:
+                    raise RuntimeError("Non-finite log_beta_all")
+
+        return log_beta_all
+
+    def posterior(
+        self, log_alpha_all, log_beta_all, logZ, audio_mask, text_mask, debug=False
+    ):
+        # NOTE: logZ qui non serve per gamma; lo lasciamo per align_loss.
+        dtype = log_alpha_all.dtype
+        neg = neg_inf(dtype)
+
+        # valid cells
+        valid = audio_mask.unsqueeze(-1) & text_mask.unsqueeze(1)  # [B,T2,T1]
+
+        # unnormalized log posterior
+        log_post = log_alpha_all + log_beta_all
+        log_post = log_post.masked_fill(~valid, neg)
+
+        if debug:
+            with torch.no_grad():
+                if torch.isnan(log_post).any():
+                    print("[DPAligner] log_post has NaN")
+                    # Debug mirato: capire se nasce in alpha o beta
+                    print("  alpha NaN:", torch.isnan(log_alpha_all).any().item())
+                    print("  beta  NaN:", torch.isnan(log_beta_all).any().item())
+                    # Trova un indice esempio
+                    idx = torch.isnan(log_post).nonzero()[0].tolist()
+                    b, t, p = idx
+                    print("  example idx b,t,p:", idx)
+                    print(
+                        "  alpha:",
+                        log_alpha_all[b, t, p].item(),
+                        "beta:",
+                        log_beta_all[b, t, p].item(),
+                    )
+                    raise RuntimeError("NaN in log_post")
+
+        # normalized posterior per-frame (softmax stabile)
+        # softmax gestisce bene valori molto negativi e -inf
+        gamma = torch.softmax(log_post, dim=-1)
+
+        # (opzionale) ripulisci padding: su frame padding gamma deve essere 0
+        gamma = gamma * audio_mask.unsqueeze(-1).to(gamma.dtype)
+
+        if debug:
+            with torch.no_grad():
+                if torch.isnan(gamma).any():
+                    print("[DPAligner] gamma has NaN AFTER softmax (unexpected)")
+                    raise RuntimeError("NaN in gamma")
+
+        return gamma
+
+    def forward(
+        self,
+        frames: torch.Tensor,
+        text_emb: torch.Tensor,
+        audio_mask: torch.Tensor,
+        text_mask: torch.Tensor,
+        debug: bool = False,
+        fail_fast: bool = True,
+        return_debug: bool = False,
+    ):
+        """
+        frames:    [B,T2,D]
+        text_emb:  [B,T1,Dtext]
+        audio_mask:[B,T2] True=valid
+        text_mask: [B,T1] True=valid
+        """
+        # Basic mask sanity
+        if debug:
+            self._debug_masks(audio_mask, text_mask, debug=True)
+
+        # Critical feasibility check for stay/advance DP
+        # Need at least as many valid frames as valid tokens.
+        # If not, logZ will be -inf. We'll surface it clearly.
+        with torch.no_grad():
+            audio_len = audio_mask.sum(1)
+            text_len = text_mask.sum(1)
+            impossible = audio_len < text_len
+            if debug and impossible.any():
+                idx = impossible.nonzero().squeeze(-1).tolist()
+                debug_print(
+                    True,
+                    f"[DPAligner] IMPOSSIBLE samples (audio_len < text_len): {idx}",
+                )
+                debug_print(
+                    True, f"[DPAligner] audio_len: {audio_len[impossible].tolist()}"
+                )
+                debug_print(
+                    True, f"[DPAligner] text_len : {text_len[impossible].tolist()}"
+                )
+
+        # 1) emissions
+        logp = self.compute_logp(frames, text_emb, text_mask, debug=debug)
+
+        # 2) forward DP
+        log_alpha_all, logZ, last_t, last_p, text_len_i, audio_len_i = self.forward_sum(
+            logp, audio_mask, text_mask, debug=debug, fail_fast=fail_fast
+        )
+
+        # 3) backward DP
+        log_beta_all = self.backward_sum(
+            logp, audio_mask, text_mask, last_t=last_t, last_p=last_p, debug=debug
+        )
+
+        # 4) posterior
+        gamma = self.posterior(
+            log_alpha_all,
+            log_beta_all,
+            logZ,
+            audio_mask,
+            text_mask,
+            debug=debug,
+        )  # [B,T2,T1]
+
+        # 5) durations
+        durations = gamma.sum(dim=1) * text_mask.to(gamma.dtype)  # [B,T1]
+
+        # 6) pooling (token->frame weights)
+        w = gamma.transpose(1, 2)  # [B,T1,T2]
+        w = w * audio_mask.unsqueeze(1).to(w.dtype)
+        denom_w = w.sum(dim=-1, keepdim=True)
+        w = torch.where(denom_w > 0, w / (denom_w + self.eps), torch.zeros_like(w))
+        pooled = torch.bmm(w, frames)  # [B,T1,D]
+
+        # 7) unpool context for decoder
+        context = torch.bmm(gamma.to(pooled.dtype), pooled)  # [B,T2,D]
+
+        # 8) align loss normalized per frame
+        audio_len_f = audio_mask.sum(dim=1).clamp(min=1).to(logZ.dtype)  # [B]
+        align_loss = (-(logZ) / audio_len_f).mean()
+
+        if debug:
+            with torch.no_grad():
+                debug_print(
+                    debug, f"[DPAligner] align_loss(per-frame)={align_loss.item():.4f}"
+                )
+                debug_print(
+                    debug,
+                    f"[DPAligner] durations min/max={durations.min().item():.4f}/{durations.max().item():.4f}",
+                )
+                # Check for NaNs in outputs
+                for name, t in [
+                    ("gamma", gamma),
+                    ("pooled", pooled),
+                    ("context", context),
+                    ("durations", durations),
+                ]:
+                    if torch.isnan(t).any():
+                        debug_print(True, f"[DPAligner] NaN in {name}")
+                        if fail_fast:
+                            raise RuntimeError(f"NaN in {name}")
+
+        dbg: Optional[Dict[str, Any]] = None
+        if return_debug:
+            dbg = dict(
+                logZ=logZ.detach().float().cpu(),
+                audio_len=audio_len_i.detach().cpu(),
+                text_len=text_len_i.detach().cpu(),
+                last_t=last_t.detach().cpu(),
+                last_p=last_p.detach().cpu(),
+                impossible=(audio_len_i < text_len_i).detach().cpu(),
+            )
+        return gamma, pooled, context, durations, align_loss, dbg
+
+
+# -----------------------------------------------------------------------------
+# High-level Aligner module (adds text pos enc + final projection)
+# -----------------------------------------------------------------------------
 class Aligner(nn.Module):
     def __init__(
         self,
         attn_dim: int,
         text_dim: int,
         audio_dim: int,
-        embedding_dim: int,
         num_embeddings: int,
-        sigma: float = 0.5,
-        delta: float = 0.1,
         vocab_path: str = "data/vocab.json",
         parsing_mode: str = "phoneme",
     ):
         super().__init__()
-        self.attention = EfficientAlphaAttention(audio_dim, text_dim, attn_dim)
-        self.imv = IMV(sigma, delta)
         self.audio_dim = audio_dim
-        self.embedding_dim = embedding_dim
-        self.phonemes_embeddings = PhonemesEmbeddings(num_embeddings, embedding_dim)
+        self.text_dim = text_dim
+
+        self.phonemes_embeddings = PhonemesEmbeddings(num_embeddings, text_dim)
         self.phoneme_vocab = PhonemeVocab(vocab_path, parsing_mode=parsing_mode)
+
+        self.dp_aligner = MonotonicDPAligner(
+            audio_dim=audio_dim, text_dim=text_dim, attn_dim=attn_dim
+        )
+
         self.layernorm_mel = nn.LayerNorm(audio_dim)
+        self.final_layer = nn.Linear(text_dim + audio_dim, audio_dim)
 
     def generate_pos_encoding(
         self, max_len: int, d_model: int, device: torch.device, dtype: torch.dtype
     ) -> torch.Tensor:
-        """Generate sinusoidal positional encoding."""
-        position = torch.arange(max_len).unsqueeze(1).to(device)
+        position = torch.arange(max_len, device=device).unsqueeze(1)
         div_term = torch.exp(
-            torch.arange(0, d_model, 2) * (-torch.log(torch.tensor(10000.0)) / d_model)
-        ).to(device)
+            torch.arange(0, d_model, 2, device=device, dtype=torch.float32)
+            * (-math.log(10000.0) / d_model)
+        ).to(device=device, dtype=torch.float32)
 
-        pos_encoding = torch.zeros(max_len, d_model)
-        pos_encoding[:, 0::2] = torch.sin(position * div_term)
-        pos_encoding[:, 1::2] = torch.cos(position * div_term)
-        return pos_encoding.to(device=device, dtype=dtype)
-
-    def compute_guided_attention_loss(
-        self, alpha, text_lengths, mel_lengths, sigma=0.2
-    ):
-        """
-        Args:
-            alpha: [B, T_phonemes, T_frames] - Matrice di attenzione grezza
-            text_lengths: [B] - Lunghezze reali dei fonemi
-            mel_lengths: [B] - Lunghezze reali dei frame (mels)
-            sigma: Forza della "morbidezza" della diagonale. Più è piccolo, più è rigida.
-        """
-        B, T_p, T_f = alpha.shape
-        device = alpha.device
-
-        # Creiamo le griglie di indici normalizzate [0, 1]
-        # grid_p: [T_p] -> [1, T_p, 1]
-        grid_p = torch.arange(T_p, device=device).view(
-            1, T_p, 1
-        ).float() / text_lengths.view(-1, 1, 1)
-        # grid_f: [T_f] -> [1, 1, T_f]
-        grid_f = torch.arange(T_f, device=device).view(
-            1, 1, T_f
-        ).float() / mel_lengths.view(-1, 1, 1)
-
-        # Matrice di costo W: 0 sulla diagonale, sale verso 1 lontano da essa
-        # W_ij = 1 - exp(-(n/N - m/M)^2 / (2 * sigma^2))
-        distance_sq = (grid_p - grid_f) ** 2
-        W = 1.0 - torch.exp(-distance_sq / (2 * sigma**2))
-
-        # Applichiamo la maschera per sicurezza (opzionale se alpha è già mascherata)
-        # La loss è la media del prodotto elemento per elemento
-        guided_loss = (alpha * W).sum() / B
-        return guided_loss
+        pe = torch.zeros(max_len, d_model, device=device, dtype=torch.float32)
+        pe[:, 0::2] = torch.sin(position.float() * div_term)
+        pe[:, 1::2] = torch.cos(position.float() * div_term)
+        return pe.to(device=device, dtype=dtype)
 
     def forward(
         self,
-        mels: torch.FloatTensor,
+        mels: torch.FloatTensor,  # [B,T2,D]
         phonemes: List[str],
-        mels_mask: torch.BoolTensor,
+        mels_mask: torch.BoolTensor,  # MUST be True=valid frames for DP
+        debug: bool = True,
+        fail_fast: bool = True,
+        return_debug: bool = False,
     ):
-        # get phonemes
-        phonemes_ids, phonemes_mask = self.phoneme_vocab(phonemes, device=mels.device)
-        phonemes_embeddings = self.phonemes_embeddings(phonemes_ids)
-        # add position encoding
-        phonemes_embeddings += self.generate_pos_encoding(
-            max_len=phonemes_ids.size(1),
-            d_model=self.embedding_dim,
-            device=mels.device,
-            dtype=mels.dtype,
-        )
+        # Normalize audio tokens (optional but often helps)
         mels = self.layernorm_mel(mels)
-        mels += self.generate_pos_encoding(
-            max_len=mels.size(1),
-            d_model=self.audio_dim,
+
+        # Text ids + mask
+        phonemes_ids, phonemes_mask = self.phoneme_vocab(
+            phonemes, device=mels.device
+        )  # mask True=valid
+        phonemes_emb = self.phonemes_embeddings(phonemes_ids)
+
+        # Add text positional encoding
+        phonemes_emb = phonemes_emb + self.generate_pos_encoding(
+            max_len=phonemes_ids.size(1),
+            d_model=self.text_dim,
             device=mels.device,
             dtype=mels.dtype,
         )
-        # get scores
-        alpha = self.attention(
+
+        # DP align
+        gamma, pooled, context, durations, align_loss, dbg = self.dp_aligner(
             frames=mels,
-            phonemes_embeddings=phonemes_embeddings,
+            text_emb=phonemes_emb,
             audio_mask=mels_mask,
             text_mask=phonemes_mask,
-        )
-        # get aligned mels and durations
-        aligned_mels, durations = self.imv(
-            alpha=alpha, mels=mels, mel_mask=mels_mask, text_mask=phonemes_mask
+            debug=debug,
+            fail_fast=fail_fast,
+            return_debug=return_debug,
         )
         print(durations[0, :20])
 
-        # compute guided attention loss
-        align_loss = None
-        align_loss = self.compute_guided_attention_loss(
-            alpha=alpha, text_lengths=phonemes_mask.sum(1), mel_lengths=mels_mask.sum(1)
-        )
-        return aligned_mels, durations, ~phonemes_mask, align_loss * 0.05
+        # Produce token-level output (phoneme-length) if you want compressed sequence
+        final = torch.cat([phonemes_emb, pooled], dim=-1)
+        final = self.final_layer(final)
+
+        # Return also ~phonemes_mask if you expect padding_mask True=padding elsewhere
+        return final, durations, gamma, align_loss, ~phonemes_mask
+
+
+"""
+HOW TO USE DEBUG (examples)
+
+1) During training/inference, call:
+   final, durations, gamma, align_loss, pad_mask_tok, context, dbg = aligner(
+       mels=z, phonemes=phonemes, mels_mask=audio_valid_mask, debug=True, fail_fast=True, return_debug=True
+   )
+
+2) If it crashes, you will see:
+   - whether audio_mask/text_mask are inverted
+   - which samples have logZ=-inf
+   - whether audio_len < text_len (impossible for stay/advance DP)
+
+COMMON ROOT CAUSES:
+- mels_mask is True for padding (invert it!)
+- T2_valid < T1_valid (too many phonemes for too few audio tokens at that resolution)
+- some sample has audio_len==0 or text_len==0 due to preprocessing/padding bugs
+"""

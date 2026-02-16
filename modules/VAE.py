@@ -22,6 +22,65 @@ def count_parameters_by_module(model):
         print(f"{name:15s} total={total:12,}  trainable={trainable:12,}")
 
 
+def durations_to_imv(durations, T_audio, text_mask):
+    """
+    Args:
+        durations: [B, T_text]
+        T_audio: int (lunghezza massima del batch audio)
+        text_mask: [B, T_text] (1 per fonemi reali, 0 per padding)
+    """
+    # 1. Calcoliamo i confini
+    boundaries = torch.cumsum(durations, dim=-1)  # [B, T_text]
+
+    # 2. Griglia temporale
+    q = torch.arange(T_audio, device=durations.device).view(1, -1)  # [1, T_audio]
+
+    # 3. IMV grezzo
+    # Confrontiamo ogni frame con ogni boundary: [B, T_audio, T_text]
+    imv = (q.unsqueeze(-1) >= boundaries.unsqueeze(1)).sum(dim=-1).float()
+
+    # 4. FIX PADDING: Ogni sequenza deve fermarsi al suo text_length - 1
+    text_lengths = text_mask.sum(dim=-1).long()
+    max_indices = (text_lengths - 1).view(-1, 1).expand(-1, T_audio)
+
+    return torch.min(imv, max_indices.float())
+
+
+def soft_upsampling_with_durations(
+    z_phonemes, durations, mel_mask, text_mask, delta_base=10.0
+):
+    """
+    Args:
+        z_phonemes: [B, T_text, D]
+        durations: [B, T_text]
+        mel_mask: [B, T_audio] (maschera dei frame audio reali)
+        text_mask: [B, T_text] (maschera dei fonemi reali)
+    """
+    B, T_text, D = z_phonemes.shape
+    T_audio = mel_mask.size(1)
+    device = z_phonemes.device
+
+    # 1. IMV coerente con le lunghezze reali
+    imv = durations_to_imv(durations, T_audio, text_mask)  # [B, T_audio]
+
+    # 2. Matrice Gamma
+    p = torch.arange(T_text, device=device).view(1, 1, T_text)
+    dist_sq = (imv.unsqueeze(-1) - p) ** 2
+    energies = -delta_base * dist_sq
+
+    # 3. MASCHERA TESTO: Impediamo l'accesso ai fonemi di padding
+    # Fondamentale per non avere pesi distribuiti sul nulla alla fine della sequenza
+    energies = energies.masked_fill(text_mask.unsqueeze(1) == 0, -1e9)
+
+    gamma = torch.softmax(energies, dim=-1)  # [B, T_audio, T_text]
+
+    # 4. Ricostruzione
+    upsampled = torch.bmm(gamma.to(z_phonemes.dtype), z_phonemes)
+
+    # 5. MASCHERA AUDIO: Azzeriamo i frame di padding ricostruiti
+    return upsampled * mel_mask.unsqueeze(-1).to(upsampled.dtype)
+
+
 @dataclass
 class VAEOutput:
     audio_loss: torch.Tensor
@@ -85,6 +144,10 @@ class VAE(torch.nn.Module):
         self.dtype = dtype
         self.set_dtype(dtype)
 
+        if config.encoder_config.freeze_encoder:
+            print("Freezing encoder")
+            for param in self.encoder.parameters():
+                param.requires_grad = False
         count_parameters_by_module(self.encoder)
         # breakpoint()
 
@@ -171,24 +234,10 @@ class VAE(torch.nn.Module):
             step=kwargs.get("training_step", None),
             phonemes=kwargs.get("phonemes", None),
         )
-        hardcoded = True
-        if self.config.encoder_config.use_aligner and not hardcoded:
-            upsampled_z = self.soft_upsampling(
-                convformer_output.z,
-                convformer_output.durations,
-                self.config.encoder_config.compress_factor_C,
-            )
-        else:
-            # repeat interleave for compress factor
-            upsampled_z = torch.repeat_interleave(
-                convformer_output.z,
-                self.config.encoder_config.compress_factor_C,
-                dim=1,
-            )
         audio_loss = self.decoder(
             target=x,
-            target_padding_mask=encoded_audios.padding_mask,
-            context_vector=upsampled_z,
+            target_padding_mask=convformer_output.upsampled_padding_mask,
+            context_vector=convformer_output.z_upsampled,
         ).loss
 
         mu_mean = convformer_output.z[~convformer_output.padding_mask].mean()
@@ -234,26 +283,10 @@ class VAE(torch.nn.Module):
             padding_mask=encoded_audios.padding_mask,
             step=None,
             phonemes=phonemes,
+            inference=True,
         )
         durations = None
-        hardcoded = True
-        if self.config.encoder_config.use_aligner and not hardcoded:
-            upsampled_z = self.soft_upsampling(
-                convformer_output.z,
-                convformer_output.durations,
-                self.config.encoder_config.compress_factor_C,
-            )
-            durations = (
-                convformer_output.durations
-                * self.config.encoder_config.compress_factor_C
-            )
-        else:
-            # repeat interleave for compress factor
-            upsampled_z = torch.repeat_interleave(
-                convformer_output.z,
-                self.config.encoder_config.compress_factor_C,
-                dim=1,
-            )
+        if self.config.encoder_config.use_aligner:
             durations = (
                 convformer_output.durations
                 * self.config.encoder_config.compress_factor_C
@@ -261,11 +294,11 @@ class VAE(torch.nn.Module):
         # Generate mel spectrogram from latent
         reconstructed_mel = self.decoder.generate(
             num_steps=num_steps,
-            context_vector=upsampled_z,
+            context_vector=convformer_output.z_upsampled,
             temperature=temperature,
             guidance_scale=guidance_scale,
             generator=generator,
-            padding_mask=encoded_audios.padding_mask,
+            padding_mask=convformer_output.upsampled_padding_mask,
         )
         if self.config.mel_spec_config.normalize:
             original_mel = self.denormalize_mel(original_mel)

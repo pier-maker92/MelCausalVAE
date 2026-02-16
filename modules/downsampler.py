@@ -156,5 +156,5 @@ class DownSampler(nn.Module):
         if mask is not None:
             x = x * mask
             # questo per ritornare la modalità padding mask
-            mask = ~mask
+            mask = ~(mask.bool())
         return x.transpose(1, 2), mask.squeeze(1).bool() if mask is not None else None

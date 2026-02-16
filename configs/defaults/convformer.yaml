@@ -11,5 +11,7 @@ convformer:
   use_sofplus: null
   kl_loss_warmup_steps: 1000
   use_aligner: false
+  freeze_encoder: false
+  threshold: null
 
 

@@ -1,12 +1,12 @@
 training:
   dataset_name: librispeech100h
-  output_dir: checkpoints/MelCausalVAE/aligner-no-dynamic-compression-ft # variable rate training
+  output_dir: checkpoints/MelCausalVAE/aligner-ft-0.75[freeze] # variable rate training
   num_train_epochs: 10
   learning_rate: 1e-4
   per_device_train_batch_size: 24
   report_to: wandb
   wandb_project: flexi-vae
-  wandb_run_name: aligner-no-dynamic-compression-ft
+  wandb_run_name: aligner-ft-0.75[freeze]
   fp16: false
   bf16: true
   save_steps: 1000
@@ -16,30 +16,32 @@ training:
   gradient_accumulation_steps: 1
   dataloader_num_workers: 4
   min_learning_rate: 5e-5
-  from_pretrained: /workspace/MelCausalVAE/checkpoints/MelCausalVAE/no-aligner/checkpoint-6000/model.safetensors
-  #resume_from_checkpoint: /workspace/MelCausalVAE/checkpoints/MelCausalVAE/exp-efficient/checkpoint-3000
+  from_pretrained: /workspace/MelCausalVAE/checkpoints/MelCausalVAE/no-aligner/checkpoint-10000/model.safetensors
+  #resume_from_checkpoint: /workspace/MelCausalVAE/checkpoints/MelCausalVAE/aligner-ft/checkpoint-1000
   phonemes: true
 
 convformer:
   compress_factor_C: 4
   tf_heads: 8
   tf_layers: 4
-  latent_dim: 32
+  latent_dim: 64
   n_residual_blocks: 3
   logvar_layer: false
   use_sofplus: false
   target_std: 1.0
-  kl_loss_warmup_steps: 10
+  kl_loss_warmup_steps: 500
   kl_loss_weight: 1e-3
   use_aligner: true
+  freeze_encoder: true
+  threshold: 0.75
 
 cfm:
   unet_dim: 1024
   unet_depth: 4
-  unet_heads: 16
+  unet_heads: 8
   unet_dropout_rate: 0.1
   use_conv_layer: true
-  audio_latent_dim: 32
+  audio_latent_dim: 64
   uncond_prob: 0.15
   learned_prior: false
   is_causal: true
