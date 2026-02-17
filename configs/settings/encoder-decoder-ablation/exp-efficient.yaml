@@ -11,19 +11,19 @@ training:
   bf16: true
   save_steps: 1000
   eval_strategy: "steps"
-  eval_steps: 1000
+  eval_steps: 10
   save_total_limit: 1
   gradient_accumulation_steps: 1
   dataloader_num_workers: 4
   min_learning_rate: 1e-5
-  #from_pretrained: checkpoints/MelCausalVAE/sigma-vae/checkpoint-6000/model.safetensors
-  resume_from_checkpoint: /workspace/MelCausalVAE/checkpoints/MelCausalVAE/exp-efficient/checkpoint-3000
+  from_pretrained: /mnt/ssd2/hazem/Projects/CST/MelCausalVAE/checkpoints/MelCausalVAE/exp-efficient/checkpoint-8910/model.safetensors
+  #resume_from_checkpoint: /workspace/MelCausalVAE/checkpoints/MelCausalVAE/exp-efficient/checkpoint-3000
   phonemes: true
 
 convformer:
-  compress_factor_C: 4
-  tf_heads: 8
-  tf_layers: 4
+  compress_factor_C: 2
+  tf_heads: 16
+  tf_layers: 8
   latent_dim: 64
   n_residual_blocks: 3
   logvar_layer: false
@@ -34,8 +34,8 @@ convformer:
 
 cfm:
   unet_dim: 512
-  unet_depth: 4
-  unet_heads: 8
+  unet_depth: 8
+  unet_heads: 16
   unet_dropout_rate: 0.1
   use_conv_layer: true
   audio_latent_dim: 64

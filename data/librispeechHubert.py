@@ -22,7 +22,12 @@ sep = Separator(phone=" ", word=" <sil> ", syllable=None)
 def simple_collate_fn(batch):
     return batch
 
+from phonemizer.backend.espeak.wrapper import EspeakWrapper
+from phonemizer import phonemize
+import espeakng_loader
 
+EspeakWrapper.set_library(espeakng_loader.get_library_path())
+EspeakWrapper.set_data_path(espeakng_loader.get_data_path())
 class Vocab:
     def __init__(self, output_path, mode="phoneme"):
         self.output_path = output_path
@@ -71,6 +76,7 @@ class LibriSpeech100h(SimpleAudioDataset):
                     os.cpu_count(),
                     16,
                 ),
+                cache_dir="./clean_cache_dir",
             )
             datasets.append(ds)
 
