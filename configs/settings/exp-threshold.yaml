@@ -1,12 +1,12 @@
 training:
   dataset_name: librispeech100h
-  output_dir: checkpoints/MelCausalVAE/aligner-ft-0.85[freeze] # variable rate training
-  num_train_epochs: 10
+  output_dir: checkpoints/MelCausalVAE/aligner-ft-0.90[freeze] # variable rate training
+  num_train_epochs: 5
   learning_rate: 1e-4
   per_device_train_batch_size: 24
   report_to: wandb
   wandb_project: flexi-vae
-  wandb_run_name: aligner-ft-0.85[freeze]
+  wandb_run_name: aligner-ft-0.90[freeze]
   fp16: false
   bf16: true
   save_steps: 1000
@@ -25,7 +25,6 @@ convformer:
   tf_heads: 8
   tf_layers: 4
   latent_dim: 64
-  n_residual_blocks: 3
   logvar_layer: false
   use_sofplus: false
   target_std: 1.0
@@ -33,7 +32,7 @@ convformer:
   kl_loss_weight: 1e-3
   use_aligner: true
   freeze_encoder: true
-  threshold: 0.85
+  threshold: 0.90
 
 cfm:
   unet_dim: 1024
