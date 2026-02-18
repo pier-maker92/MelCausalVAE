@@ -11,7 +11,7 @@ from typing import Dict, List
 import matplotlib.pyplot as plt
 from modules.cfm import DiTConfig
 from modules.VAE import VAE, VAEConfig
-from modules.aligner import plot_durations_on_mel
+from modules.similarity import plot_durations_on_mel
 from modules.Encoder import ConvformerEncoderConfig
 from modules.decoder_standard_vae import DecoderConfig
 from modules.melspecEncoder import MelSpectrogramConfig

@@ -8,8 +8,6 @@ from typing import Optional
 from einops import rearrange
 from .cfm import DiT, DiTConfig
 from dataclasses import dataclass, asdict
-from .semantic_module import SeamlessM4Tv2Encoder
-from .semantic_mapper import SemanticMapperConfig, Z2YMapper
 from .Encoder import ConvformerEncoderConfig, ConvformerEncoder
 from .melspecEncoder import MelSpectrogramEncoder, MelSpectrogramConfig
 from .decoder_standard_vae import DecoderVAE, DecoderConfig
@@ -97,9 +95,6 @@ class VAEConfig:
     encoder_config: ConvformerEncoderConfig
     decoder_config: DiTConfig
     mel_spec_config: MelSpectrogramConfig
-    semantic_mapper_config: Optional[SemanticMapperConfig] = None
-    add_semantic_distillation: bool = False
-    add_semantic_mapper: bool = False
     use_aligner: bool = False
 
     @property
@@ -114,8 +109,6 @@ class VAEConfig:
             "encoder_config": asdict(self.encoder_config),
             "decoder_config": asdict(self.decoder_config),
             "mel_spec_config": asdict(self.mel_spec_config),
-            "add_semantic_distillation": self.add_semantic_distillation,
-            "add_semantic_mapper": self.add_semantic_mapper,
             "use_aligner": self.use_aligner,
         }
 
@@ -130,16 +123,8 @@ class VAE(torch.nn.Module):
             self.decoder = DecoderVAE(config.decoder_config)
         else:
             raise ValueError("Decoder type not supported")
-        # if config.encoder_config.compress_factor_C < 4:
-        #     print(f"WARNING: compress_factor_C is less than 4, but the minimum downsampling factor is 4")
-        #     print(f"Setting compress_factor_C to 4")
-        #     config.encoder_config.compress_factor_C = 4
         self.encoder = ConvformerEncoder(config.encoder_config)
         self.wav2mel = MelSpectrogramEncoder(config.mel_spec_config)
-        if config.add_semantic_distillation:
-            self.semantic_module = SeamlessM4Tv2Encoder(dtype=dtype)
-        if config.add_semantic_mapper:
-            self.semantic_mapper = Z2YMapper(config.semantic_mapper_config)
         self.decoder.expansion_factor = config.encoder_config.compress_factor_C
         self.dtype = dtype
         self.set_dtype(dtype)
@@ -150,19 +135,11 @@ class VAE(torch.nn.Module):
         self.decoder.to(dtype=dtype)
         self.encoder.to(dtype=dtype)
         self.wav2mel.to(dtype=dtype)
-        if self.config.add_semantic_distillation:
-            self.semantic_module.set_dtype(dtype=dtype)
-        if self.config.add_semantic_mapper:
-            self.semantic_mapper.to(dtype=dtype)
 
     def set_device(self, device: torch.device):
         self.decoder.to(device=device)
         self.encoder.to(device=device)
         self.wav2mel.to(device=device)
-        if self.config.add_semantic_distillation:
-            self.semantic_module.set_device(device=device)
-        if self.config.add_semantic_mapper:
-            self.semantic_mapper.to(device=device)
 
     def from_pretrained(self, checkpoint_path: str):
         state_dict = safetensors.torch.load_file(checkpoint_path)

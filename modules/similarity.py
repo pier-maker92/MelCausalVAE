@@ -1,6 +1,55 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import matplotlib.pyplot as plt
+
+
+def plot_durations_on_mel(
+    mels,
+    durations,
+    mel_mask,
+    text_length,
+    batch_idx=0,
+    step=0,
+    labels=None,
+    device_id=0,
+):
+    # mel_mask is True for padding. We want valid length.
+    valid_len = (~mel_mask[batch_idx]).long().sum().item()
+
+    mel = mels[batch_idx, :valid_len].detach().float().cpu().numpy().T
+    dur = durations[batch_idx, : text_length[batch_idx]].detach().float().cpu().numpy()
+
+    positions = dur.cumsum()
+    fig, (ax_mel, ax_dur) = plt.subplots(2, 1, figsize=(16, 6))
+
+    ax_mel.imshow(mel, origin="lower", aspect="auto")
+    ax_mel.set_xlim(0, mel.shape[1])
+    for pos in positions:
+        ax_mel.axvline(pos, color="white", linestyle="--", linewidth=0.8, alpha=0.7)
+
+    ax_mel.set_ylabel("Mel bin")
+    ax_mel.set_title(f"Sample {batch_idx} - Step {step} - Device {device_id}")
+    ax_mel.set_xticks([])
+
+    norm_dur = (dur - dur.min()) / (dur.max() - dur.min() + 1e-8) * 0.7 + 0.3
+    ax_dur.bar(
+        range(len(dur)),
+        dur,
+        color=plt.cm.Blues(norm_dur),
+        edgecolor="black",
+        linewidth=0.5,
+    )
+    ax_dur.set_xlabel("z position")
+    ax_dur.set_ylabel("Duration (frames)")
+    ax_dur.set_xlim(-0.5, len(dur) - 0.5)
+    ax_dur.set_xticks(range(len(dur)))
+    ax_dur.set_xticklabels(
+        labels[: len(dur)] if labels else range(len(dur)), rotation=0, ha="right"
+    )
+
+    plt.tight_layout()
+    return fig
 
 
 class SimilarityUpsamplerBatch(nn.Module):
