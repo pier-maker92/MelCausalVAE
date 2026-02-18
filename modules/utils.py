@@ -8,7 +8,7 @@ from beartype import beartype
 from einops import rearrange
 from packaging import version
 from torch import einsum, nn
-from torch.cuda.amp import autocast
+from torch.amp import autocast
 from torch.nn import Module
 from torch.nn import functional as F
 
@@ -54,27 +54,35 @@ def once(fn):
 
 print_once = once(print)
 
-# FlashAttention v2 APIs (only)
+# FlashAttention v2 APIs (optional)
 # Requires CUDA; dtype must be fp16/bf16; head_dim <= 256 and divisible by 8.
-from flash_attn import (
-    flash_attn_qkvpacked_func,
-    flash_attn_func,
-    flash_attn_varlen_qkvpacked_func,
-)
+try:
+    from flash_attn import (
+        flash_attn_qkvpacked_func,
+        flash_attn_func,
+        flash_attn_varlen_qkvpacked_func,
+    )
+    _HAS_FLASH_ATTN = True
+except ImportError:
+    _HAS_FLASH_ATTN = False
+    flash_attn_qkvpacked_func = None
+    flash_attn_func = None
+    flash_attn_varlen_qkvpacked_func = None
 
-_HAS_FLASH_ATTN = True
+
+def _use_flash(q: torch.Tensor) -> bool:
+    """Use FlashAttention only when CUDA and fp16/bf16."""
+    return (
+        q.is_cuda
+        and q.dtype in (torch.float16, torch.bfloat16)
+        and _HAS_FLASH_ATTN
+    )
 
 
 class Attend(nn.Module):
     """
-    FlashAttention-only attend core operating on [B, H, N, D].
-
-    Rules:
-      - CUDA tensors only; dtype must be float16/bfloat16; D % 8 == 0 and D <= 256.
-      - Self-attention with no mask: packed kernel.
-      - Self-attention with padding mask [B,S] or [B,1,1,S]: varlen packed kernel.
-      - Cross-attention without mask: non-packed kernel.
-      - Cross-attention with mask: not implemented here.
+    Attend core operating on [B, H, N, D].
+    Uses FlashAttention on CUDA with fp16/bf16; falls back to SDPA for fp32 or CPU.
     """
 
     def __init__(self, dropout: float = 0.0, flash: bool = False, scale: Optional[float] = None):
@@ -112,6 +120,36 @@ class Attend(nn.Module):
         max_len = int(lengths.max().item()) if B > 0 else 0
         return cu, max_len
 
+    def _forward_fp32(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+        causal: bool = False,
+    ) -> torch.Tensor:
+        """FP32 / non-CUDA fallback using F.scaled_dot_product_attention."""
+        B, H, Nq, D = q.shape
+        _, _, Nk, _ = k.shape
+        scale = self.scale if self.scale is not None else (D**-0.5)
+        p = self.dropout if self.training else 0.0
+
+        # SDPA: attn_mask True = attend; our mask is True = valid
+        attn_mask = None
+        if mask is not None:
+            mask_bs = self._normalize_mask(mask, S=Nk)  # [B, Nk]
+            # [B, 1, Nq, Nk], True where we can attend
+            attn_mask = mask_bs.unsqueeze(1).unsqueeze(2).expand(B, 1, Nq, Nk)
+
+        out = F.scaled_dot_product_attention(
+            q, k, v,
+            attn_mask=attn_mask,
+            dropout_p=p,
+            scale=scale,
+            is_causal=causal,
+        )  # [B, H, Nq, D]
+        return out
+
     def forward(
         self,
         q: torch.Tensor,
@@ -129,10 +167,12 @@ class Attend(nn.Module):
         B, H, Nq, D = q.shape
         _, Hk, Nk, Dk = k.shape
         assert H == Hk and D == Dk, "Mismatched heads or head_dim between q and k/v"
-        assert q.is_cuda and k.is_cuda and v.is_cuda, "FlashAttention requires CUDA"
-        assert q.dtype in (torch.float16, torch.bfloat16), "Use fp16 or bf16 for FlashAttention"
-        assert D % 8 == 0 and D <= 256, "head_dim must be divisible by 8 and <= 256"
 
+        # FP32 or non-CUDA: use SDPA fallback
+        if not _use_flash(q):
+            return self._forward_fp32(q, k, v, mask=mask, causal=causal)
+
+        assert D % 8 == 0 and D <= 256, "head_dim must be divisible by 8 and <= 256"
         p = self.dropout if self.training else 0.0
         softmax_scale = self.scale if self.scale is not None else (D**-0.5)
 
@@ -204,7 +244,7 @@ class RotaryEmbedding(Module):
     def device(self):
         return self.inv_freq.device
 
-    @autocast(enabled=False)
+    @autocast(device_type="cuda", enabled=False)
     @beartype
     def forward(self, t: Union[int, torch.Tensor]):
         if not torch.is_tensor(t):
@@ -220,7 +260,7 @@ def rotate_half(x):
     return torch.cat((-x2, x1), dim=-1)
 
 
-@autocast(enabled=False)
+@autocast(device_type="cuda", enabled=False)
 def apply_rotary_pos_emb(pos, t):
     return t * pos.cos() + rotate_half(t) * pos.sin()
 

@@ -6,12 +6,15 @@ import logging
 import argparse
 from vocos import Vocos
 from pathlib import Path
+from einops import rearrange
 from typing import Dict, List
 import matplotlib.pyplot as plt
-from .modules.cfm import DiTConfig
-from .modules.VAE import VAE, VAEConfig
-from .modules.Encoder import ConvformerEncoderConfig
-from .modules.melspecEncoder import MelSpectrogramConfig
+from modules.cfm import DiTConfig
+from modules.VAE import VAE, VAEConfig
+from modules.similarity import plot_durations_on_mel
+from modules.Encoder import ConvformerEncoderConfig
+from modules.decoder_standard_vae import DecoderConfig
+from modules.melspecEncoder import MelSpectrogramConfig
 from transformers import (
     Trainer,
     TrainingArguments,
@@ -19,14 +22,16 @@ from transformers import (
     TrainerControl,
     TrainerState,
     set_seed,
-    is_torch_tpu_available,
 )
+from transformers.optimization import get_cosine_schedule_with_warmup
+from torch.optim.lr_scheduler import LambdaLR
 
 # data
-from .data.mls import MLSDataset
-from .data.libri_tts import LibriTTS
-from .data.audio_dataset import DataCollator
-from .data.audio_dataset import TrainDatasetWrapper
+from data.mls import MLSDataset
+from data.libri_tts import LibriTTS
+from data.librispeechHubert import LibriSpeech100h
+from data.audio_dataset import TrainDatasetWrapper
+from data.audio_dataset import DataCollator, HubertDatasetWrapper
 
 
 # Set up logging
@@ -37,8 +42,74 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-if is_torch_tpu_available(check_device=False):
-    import torch_xla.core.xla_model as xm
+
+def get_phonemes(phonemes: List[str], parsing_mode: str = "phoneme"):
+    """
+    Convert transcripts to phoneme tokens.
+    Returns: List[B] of List[phoneme]
+    """
+    phonemes_batch = []
+    for phoneme_str in phonemes:
+        phoneme_str = f"<sil> {phoneme_str} <sil>"
+
+        if parsing_mode == "phoneme":
+            tokens = phoneme_str.split()
+        elif parsing_mode == "char":
+            tokens = []
+            for p in phoneme_str.split():
+                if p == "<sil>":
+                    tokens.append(p)
+                else:
+                    tokens.extend(list(p))
+        else:
+            raise ValueError(f"Unknown parsing mode: {parsing_mode}")
+
+        phonemes_batch.append(tokens)
+    return phonemes_batch
+
+
+def get_cosine_schedule_with_warmup_and_min_lr(
+    optimizer,
+    num_warmup_steps: int,
+    num_training_steps: int,
+    num_cycles: float = 0.5,
+    last_epoch: int = -1,
+    lr_min: float = 0.0,
+):
+    """
+    Create a schedule with a learning rate that decreases following the values of the cosine function
+    between the initial lr set in the optimizer to `lr_min`, after a warmup period during which it
+    increases linearly between 0 and the initial lr set in the optimizer.
+
+    Args:
+        optimizer: The optimizer for which to schedule the learning rate.
+        num_warmup_steps: The number of steps for the warmup phase.
+        num_training_steps: The total number of training steps.
+        num_cycles: The number of waves in the cosine schedule (default: 0.5).
+        last_epoch: The index of the last epoch when resuming training (default: -1).
+        lr_min: The minimum learning rate (default: 0.0).
+
+    Returns:
+        A LambdaLR scheduler.
+    """
+    # Get the initial learning rate from the optimizer at creation time
+    initial_lr = optimizer.param_groups[0]["lr"]
+
+    def lr_lambda(current_step):
+        if current_step < num_warmup_steps:
+            return float(current_step) / float(max(1, num_warmup_steps))
+        progress = float(current_step - num_warmup_steps) / float(
+            max(1, num_training_steps - num_warmup_steps)
+        )
+        # Cosine annealing with minimum learning rate
+        cosine_value = 0.5 * (
+            1.0
+            + torch.cos(torch.tensor(num_cycles * 2.0 * 3.141592653589793 * progress))
+        )
+        # Scale cosine from [lr_min, initial_lr] instead of [0, initial_lr]
+        return (lr_min / initial_lr) + (1.0 - lr_min / initial_lr) * cosine_value
+
+    return LambdaLR(optimizer, lr_lambda, last_epoch)
 
 
 class AddGranularLossesToTrainerState(TrainerCallback):
@@ -54,66 +125,101 @@ class AddGranularLossesToTrainerState(TrainerCallback):
         control: TrainerControl,
         **kwargs,
     ):
-        control.granular_losses = {k: torch.tensor(0.0).to(args.device) for k in self.granular_losses}
+        control.granular_losses = {
+            k: torch.tensor(0.0).to(args.device) for k in self.granular_losses
+        }
         return control
 
 
 class VAEtrainer(Trainer):
     """Custom trainer for VAE"""
 
-    def __init__(self, **kwargs):
+    def __init__(self, phonemes=False, **kwargs):
         super().__init__(**kwargs)
+        self.phonemes = phonemes
         # Register granular losses
-        granular_losses = ["audio_loss", "kl_loss", "mu_mean", "mu_var"]
+        granular_losses = ["audio_loss", "kl_loss", "mu_mean", "mu_var", "align_loss"]
         try:
             if getattr(self.model.encoder.config, "semantic_regulation", False):
                 granular_losses.append("semantic_loss")
         except Exception:
             pass
+        # Add CTC loss if phonemes are enabled
+        if phonemes:
+            granular_losses.append("ctc_loss")
         self.add_callback(AddGranularLossesToTrainerState(granular_losses))
 
-    def compute_loss(self, model, inputs, return_outputs=False):
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         """Compute the loss for the VAE"""
         if hasattr(self.control, "granular_losses") and model.training:
             audios_srs = inputs["output_audios_srs"]
+            hubert_guidance = inputs.get("hubert_guidance", None)
+            phonemes = inputs.get("phonemes", None)
+
             # Forward pass
             outputs = model(
                 audios_srs=audios_srs,
                 training_step=self.state.global_step,
+                hubert_guidance=hubert_guidance,
+                phonemes=phonemes,
             )
             audio_loss = outputs.audio_loss
             kl_loss = outputs.kl_loss
             semantic_loss = getattr(outputs, "semantic_loss", None)
+            ctc_loss = getattr(outputs, "ctc_loss", None)
+            align_loss = getattr(outputs, "align_loss", None)
             mu_mean = getattr(outputs, "mu_mean")
             mu_var = getattr(outputs, "mu_var")
-            loss = audio_loss + kl_loss + (semantic_loss if semantic_loss is not None else 0.0)
+            loss = (
+                audio_loss
+                + kl_loss
+                + (semantic_loss if semantic_loss is not None else 0.0)
+                + (ctc_loss if ctc_loss is not None else 0.0)
+                + (align_loss if align_loss is not None else 0.0)
+            )
 
             # Accumulate granular losses
             if self.args.n_gpu > 1:
                 audio_loss = audio_loss.mean()
                 kl_loss = kl_loss.mean()
-
-            self.control.granular_losses["audio_loss"] += audio_loss.detach() / self.args.gradient_accumulation_steps
-            self.control.granular_losses["kl_loss"] += kl_loss.detach() / self.args.gradient_accumulation_steps
+                align_loss = align_loss.mean()
+            self.control.granular_losses["audio_loss"] += (
+                audio_loss.detach() / self.args.gradient_accumulation_steps
+            )
+            self.control.granular_losses["kl_loss"] += (
+                kl_loss.detach() / self.args.gradient_accumulation_steps
+            )
+            if align_loss is not None:
+                self.control.granular_losses["align_loss"] += (
+                    align_loss.detach() / self.args.gradient_accumulation_steps
+                )
             if semantic_loss is not None:
                 if self.args.n_gpu > 1:
                     semantic_loss = semantic_loss.mean()
                 self.control.granular_losses["semantic_loss"] += (
                     semantic_loss.detach() / self.args.gradient_accumulation_steps
                 )
+            if ctc_loss is not None:
+                if self.args.n_gpu > 1:
+                    ctc_loss = ctc_loss.mean()
+                self.control.granular_losses["ctc_loss"] += (
+                    ctc_loss.detach() / self.args.gradient_accumulation_steps
+                )
             if mu_mean is not None:
                 val = mu_mean.detach().float()
                 if val.dim() > 0:
                     val = val.mean()
                 self.control.granular_losses["mu_mean"] += (
-                    val.to(self.control.granular_losses["mu_mean"].dtype) / self.args.gradient_accumulation_steps
+                    val.to(self.control.granular_losses["mu_mean"].dtype)
+                    / self.args.gradient_accumulation_steps
                 )
             if mu_var is not None:
                 val = mu_var.detach().float()
                 if val.dim() > 0:
                     val = val.mean()
                 self.control.granular_losses["mu_var"] += (
-                    val.to(self.control.granular_losses["mu_var"].dtype) / self.args.gradient_accumulation_steps
+                    val.to(self.control.granular_losses["mu_var"].dtype)
+                    / self.args.gradient_accumulation_steps
                 )
 
             return (loss, outputs) if return_outputs else loss
@@ -127,13 +233,59 @@ class VAEtrainer(Trainer):
             audio_loss = outputs.audio_loss
             kl_loss = outputs.kl_loss
             semantic_loss = getattr(outputs, "semantic_loss", None)
-            loss = audio_loss + kl_loss + (semantic_loss if semantic_loss is not None else 0.0)
+            align_loss = getattr(outputs, "align_loss", None)
+            loss = (
+                audio_loss
+                + kl_loss
+                + (semantic_loss if semantic_loss is not None else 0.0)
+                + (ctc_loss if ctc_loss is not None else 0.0)
+                + (align_loss if align_loss is not None else 0.0)
+            )
             return (loss, outputs) if return_outputs else loss
 
-    def _maybe_log_save_evaluate(self, tr_loss, grad_norm, model, trial, epoch, ignore_keys_for_eval):
-        if self.control.should_log and self.state.global_step > self._globalstep_last_logged:
-            if is_torch_tpu_available():
-                xm.mark_step()
+    def create_scheduler(self, num_training_steps: int, optimizer=None):
+        """
+        Override scheduler creation to use custom cosine scheduler with min_lr support.
+        """
+        # Check if lr_min is specified in lr_scheduler_kwargs
+        lr_scheduler_kwargs = getattr(self.args, "lr_scheduler_kwargs", {}) or {}
+        lr_min = lr_scheduler_kwargs.get("lr_min", None)
+
+        # If lr_min is specified and scheduler type is cosine, use custom scheduler
+        if lr_min is not None and self.args.lr_scheduler_type == "cosine":
+            if optimizer is None:
+                optimizer = self.optimizer
+
+            num_warmup_steps = self.args.get_warmup_steps(num_training_steps)
+            num_cycles = lr_scheduler_kwargs.get("num_cycles", 0.5)
+
+            self.lr_scheduler = get_cosine_schedule_with_warmup_and_min_lr(
+                optimizer=optimizer,
+                num_warmup_steps=num_warmup_steps,
+                num_training_steps=num_training_steps,
+                num_cycles=num_cycles,
+                lr_min=float(lr_min),
+            )
+            logger.info(f"Using custom cosine scheduler with min_lr={lr_min}")
+        else:
+            # Use default scheduler creation
+            super().create_scheduler(num_training_steps, optimizer)
+
+    def _maybe_log_save_evaluate(
+        self,
+        tr_loss,
+        grad_norm,
+        model,
+        trial,
+        epoch,
+        ignore_keys_for_eval,
+        start_time,
+        learning_rate=None,
+    ):
+        if (
+            self.control.should_log
+            and self.state.global_step > self._globalstep_last_logged
+        ):
 
             logs: Dict[str, float] = {}
 
@@ -144,7 +296,8 @@ class VAEtrainer(Trainer):
             tr_loss -= tr_loss
 
             logs["loss"] = round(
-                tr_loss_scalar / (self.state.global_step - self._globalstep_last_logged),
+                tr_loss_scalar
+                / (self.state.global_step - self._globalstep_last_logged),
                 4,
             )
 
@@ -155,7 +308,9 @@ class VAEtrainer(Trainer):
                     # reset the loss
                     self.control.granular_losses[k] -= self.control.granular_losses[k]
 
-                    avg_val = logs[k] / (self.state.global_step - self._globalstep_last_logged)
+                    avg_val = logs[k] / (
+                        self.state.global_step - self._globalstep_last_logged
+                    )
                     if k in ("mu_mean", "mu_var"):
                         logs[k] = round(avg_val, 8)
                     else:
@@ -164,13 +319,15 @@ class VAEtrainer(Trainer):
             logs["learning_rate"] = self._get_learning_rate()
 
             if grad_norm is not None:
-                logs["grad_norm"] = grad_norm if isinstance(grad_norm, float) else grad_norm.item()
+                logs["grad_norm"] = (
+                    grad_norm if isinstance(grad_norm, float) else grad_norm.item()
+                )
 
             self._total_loss_scalar += tr_loss_scalar
             self._globalstep_last_logged = self.state.global_step
             self.store_flos()
 
-            self.log(logs)
+            self.log(logs, start_time=start_time)
 
         metrics = None
         if self.control.should_evaluate:
@@ -178,8 +335,13 @@ class VAEtrainer(Trainer):
             self._report_to_hp_search(trial, self.state.global_step, metrics)
 
         if self.control.should_save:
-            self._save_checkpoint(model, trial, metrics=metrics)
-            self.control = self.callback_handler.on_save(self.args, self.state, self.control)
+            self._save_checkpoint(
+                model,
+                trial,
+            )  # metrics=metrics
+            self.control = self.callback_handler.on_save(
+                self.args, self.state, self.control
+            )
 
     def evaluate(
         self,
@@ -198,88 +360,108 @@ class VAEtrainer(Trainer):
         return metrics
 
     def _generate_and_log_samples(self):
-        """
-        Generate mel spectrogram reconstructions and log to wandb.
-        """
-        logger.info(f"Generating reconstruction samples...")
+        logger.info("Generating reconstruction samples...")
 
-        vocos = Vocos.from_pretrained("charactr/vocos-mel-24khz")
-        vocos.to(self.args.device)
-
-        # Get some samples from the eval dataset using its dataloader
+        vocos = Vocos.from_pretrained("charactr/vocos-mel-24khz").to(self.args.device)
         eval_dataloader = self.get_eval_dataloader(self.eval_dataset)
-
-        for i, batch in enumerate(eval_dataloader):
+        for batch in eval_dataloader:
             if "output_audios_srs" in batch:
-                audios_srs = batch["output_audios_srs"]
-                audios_srs = [(audio.to(self.args.device).to(torch.bfloat16), sr) for audio, sr in audios_srs]
+                audios_srs = [
+                    (a.to(self.args.device, torch.float32), sr)
+                    for a, sr in batch["output_audios_srs"]
+                ]
                 break
-        # Generate reconstructions
-        try:
-            with torch.no_grad():
-                results = self.model.encode_and_sample(
-                    audios_srs=audios_srs,
-                    num_steps=8,
-                    temperature=1.0,
-                    guidance_scale=1.5,
-                )
-            # Create visualizations
-            images = []
-            # Resolve device id safely for distributed/non-distributed
-            device_id = torch.distributed.get_rank()
 
-            audios = []
-            audio_paths = []
-            for idx in range(len(audios_srs)):
-                fig = self._create_mel_comparison_plot(
-                    original=results["original_mel"][idx],
-                    reconstructed=results["reconstructed_mel"][idx],
-                    padding_mask=results["padding_mask"][idx],
-                    sample_idx=idx,
+        hubert_guidance = batch.get("hubert_guidance", None)
+        phonemes = batch.get("phonemes", None) if self.phonemes else None
+
+        with torch.no_grad():
+            results = self.model.encode_and_sample(
+                audios_srs=audios_srs,
+                num_steps=16,
+                temperature=1.0,
+                guidance_scale=1.5,
+                hubert_guidance=hubert_guidance,
+                phonemes=phonemes,
+            )
+
+        if phonemes is not None:
+            phonemes = get_phonemes(phonemes)
+
+        device_id = (
+            torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+        )
+        boundaries_images, images, audios = [], [], []
+
+        for idx in range(len(audios_srs)):
+            pad_mask = results["padding_mask"][idx]
+            valid_len = (~pad_mask).sum()
+
+            fig = self._create_mel_comparison_plot(
+                original=results["original_mel"][idx],
+                reconstructed=results["reconstructed_mel"][idx],
+                padding_mask=pad_mask,
+                sample_idx=idx,
+                device_id=device_id,
+            )
+            images.append(
+                wandb.Image(
+                    fig,
+                    caption=f"Sample {idx} - Step {self.state.global_step} - Device {device_id}",
+                )
+            )
+            plt.close(fig)
+
+            if results["durations"] is not None:
+                fig = plot_durations_on_mel(
+                    batch_idx=idx,
+                    step=self.state.global_step,
+                    mels=results["original_mel"],
+                    durations=results["durations"],
+                    text_length=[len(p) for p in phonemes],
+                    labels=phonemes[idx],
                     device_id=device_id,
+                    mel_mask=results["padding_mask"],
                 )
-
-                # Convert matplotlib figure to wandb Image
-                images.append(
-                    wandb.Image(fig, caption=f"Sample {idx} - Step {self.state.global_step} - Device {device_id}")
-                )
-                plt.close(fig)
-
-                # Decode reconstructed mel to audio with Vocos
-                mel = results["reconstructed_mel"][idx]  # [T, F]
-                pad_mask = results["padding_mask"][idx]  # [T]
-                valid_mel = mel[: (~pad_mask).sum()]
-
-                # Shape for Vocos: [B, F, T]
-                features = valid_mel.unsqueeze(0).permute(0, 2, 1).to(torch.bfloat16).to(self.args.device)
-                waveform = vocos.decode(features)  # [1, samples]
-                waveform = waveform.float().squeeze(0).detach().cpu()
-                # normalize waveform to -1 to 1
-                waveform = waveform / (waveform.abs().max() + 1e-8)
-                sr = audios_srs[idx][1]
-                # Log as wandb audio as well
-                audios.append(
-                    wandb.Audio(
-                        waveform.numpy(),
-                        sample_rate=sr,
+                boundaries_images.append(
+                    wandb.Image(
+                        fig,
                         caption=f"Sample {idx} - Step {self.state.global_step} - Device {device_id}",
                     )
                 )
+                plt.close(fig)
 
-            # Log to wandb as a gallery
-            if wandb.run is not None:
-                wandb.log(
-                    {
-                        "reconstructions": images,
-                        "reconstructions_audio": audios,
-                        "reconstructions_audio_paths": audio_paths,
-                        "step": self.state.global_step,
-                    }
+            for mel_data, label in [
+                (results["reconstructed_mel"][idx], "Reconstructed"),
+                (results["original_mel"][idx], "Original"),
+            ]:
+                features = (
+                    mel_data[:valid_len]
+                    .unsqueeze(0)
+                    .permute(0, 2, 1)
+                    .to(torch.bfloat16)
+                    .to(self.args.device)
                 )
-                logger.info(f"Successfully logged {len(images)} reconstruction samples to wandb")
+                wav = vocos.decode(features).float().squeeze(0).detach().cpu()
+                wav = wav / (wav.abs().max() + 1e-8)
+                audios.append(
+                    wandb.Audio(
+                        wav.numpy(),
+                        sample_rate=audios_srs[idx][1],
+                        caption=f"{label} - Sample {idx} - Step {self.state.global_step} - Device {device_id}",
+                    )
+                )
 
-        except Exception as e:
-            logger.error(f"Failed to generate samples: {e}", exc_info=True)
+        if wandb.run is not None:
+            to_log = {
+                "reconstructions": images,
+                "reconstructions_audio": audios,
+                "step": self.state.global_step,
+            }
+            if boundaries_images:
+                to_log["boundaries"] = boundaries_images
+            wandb.log(to_log)
+            logger.info(f"Logged {len(images)} reconstruction samples to wandb")
 
     def _create_mel_comparison_plot(
         self,
@@ -288,49 +470,66 @@ class VAEtrainer(Trainer):
         padding_mask: torch.Tensor,
         sample_idx: int,
         device_id: int,
+        boundaries_mel=None,
     ):
-        """
-        Create a side-by-side comparison plot of original and reconstructed mel spectrograms.
-
-        Args:
-            original: Original mel spectrogram [T, F]
-            reconstructed: Reconstructed mel spectrogram [T, F]
-            padding_mask: Padding mask [T]
-            sample_idx: Index of the sample
-
-        Returns:
-            matplotlib figure
-        """
-        # Move to CPU and convert to numpy
         original = original.float().detach().cpu().numpy()
         reconstructed = reconstructed.float().detach().cpu().numpy()
         padding_mask = padding_mask.detach().cpu().numpy()
 
-        min_length = min(original.shape[0], reconstructed.shape[0])
-        original = original[:min_length]
-        reconstructed = reconstructed[:min_length]
-        padding_mask = padding_mask[:min_length]
+        min_len = min(original.shape[0], reconstructed.shape[0])
+        mask = ~padding_mask[:min_len]
+        original = original[:min_len][mask]
+        reconstructed = reconstructed[:min_len][mask]
+        n_frames = original.shape[0]
 
-        # Mask padded regions
-        original = original.copy()[~padding_mask]
-        reconstructed = reconstructed.copy()[~padding_mask]
+        has_phonemes = boundaries_mel is not None and len(boundaries_mel) > 0
+        fig, (ax_orig, ax_recon) = plt.subplots(
+            2, 1, figsize=(14, 10 if has_phonemes else 8)
+        )
 
-        # Create figure with 2 subplots
-        fig, axes = plt.subplots(2, 1, figsize=(12, 8))
+        # Original mel
+        ax_orig.imshow(
+            original.T,
+            aspect="auto",
+            origin="lower",
+            interpolation="nearest",
+            cmap="viridis",
+        )
+        ax_orig.set_title(f"Original - Sample {sample_idx} - Device {device_id}")
+        ax_orig.set_ylabel("Mel Bin")
 
-        # Plot original
-        im1 = axes[0].imshow(original.T, aspect="auto", origin="lower", interpolation="nearest", cmap="viridis")
-        axes[0].set_title(f"Original Mel Spectrogram - Sample {sample_idx} - Device {device_id}")
-        axes[0].set_xlabel("Time")
-        axes[0].set_ylabel("Mel Frequency")
-        plt.colorbar(im1, ax=axes[0])
+        if has_phonemes:
+            trans = ax_orig.get_xaxis_transform()
+            for start, end, ph in boundaries_mel:
+                start, end = int(start), min(int(end), n_frames)
+                if start >= n_frames:
+                    continue
+                ax_orig.axvline(x=start, color="red", linewidth=1.0, alpha=0.6)
+                mid = (start + end) / 2.0
+                label = ph if len(ph) <= 6 else ph[:5] + "…"
+                ax_orig.text(
+                    mid,
+                    -0.05,
+                    label,
+                    transform=trans,
+                    ha="center",
+                    va="top",
+                    fontsize=5,
+                    clip_on=False,
+                )
+            ax_orig.set_xlim(0, n_frames)
 
-        # Plot reconstructed
-        im2 = axes[1].imshow(reconstructed.T, aspect="auto", origin="lower", interpolation="nearest", cmap="viridis")
-        axes[1].set_title(f"Reconstructed Mel Spectrogram - Sample {sample_idx} - Device {device_id}")
-        axes[1].set_xlabel("Time")
-        axes[1].set_ylabel("Mel Frequency")
-        plt.colorbar(im2, ax=axes[1])
+        # Reconstructed mel
+        ax_recon.imshow(
+            reconstructed.T,
+            aspect="auto",
+            origin="lower",
+            interpolation="nearest",
+            cmap="viridis",
+        )
+        ax_recon.set_title(f"Reconstructed - Sample {sample_idx} - Device {device_id}")
+        ax_recon.set_xlabel("Time (frames)")
+        ax_recon.set_ylabel("Mel Bin")
 
         plt.tight_layout()
         return fig
@@ -381,7 +580,9 @@ def main():
     cfg_root = Path(__file__).resolve().parent / "configs"
     defaults = {
         "training": load_yaml(cfg_root / "defaults" / "train.yaml").get("training", {}),
-        "convformer": load_yaml(cfg_root / "defaults" / "convformer.yaml").get("convformer", {}),
+        "convformer": load_yaml(cfg_root / "defaults" / "convformer.yaml").get(
+            "convformer", {}
+        ),
         "cfm": load_yaml(cfg_root / "defaults" / "cfm.yaml").get("cfm", {}),
     }
     custom = load_yaml(args.exp_config_path)
@@ -414,16 +615,35 @@ def main():
         dataset = MLSDataset()
     elif dataset_name == "libritts":
         dataset = LibriTTS()
+    elif dataset_name == "librispeech100h":
+        phoneme_parsing_mode = training_cfg.pop("phoneme_parsing_mode", "phoneme")
+        vocab_path = training_cfg.pop("vocab_path", "data/vocab.json")
+        dataset = LibriSpeech100h(
+            phoneme_parsing_mode=phoneme_parsing_mode, vocab_path=vocab_path
+        )
     else:
         raise ValueError(f"Dataset {dataset_name} not supported")
-    train_dataset = TrainDatasetWrapper(dataset, "train")
-    test_dataset = TrainDatasetWrapper(dataset, "test")
+    hubert_guidance = training_cfg.pop("hubert_guidance", False)
+    phonemes = training_cfg.pop("phonemes", False)
+
+    # Inject into convformer config for the model
+    convformer_cfg["phoneme_parsing_mode"] = phoneme_parsing_mode
+    convformer_cfg["vocab_path"] = vocab_path
+
+    train_dataset = TrainDatasetWrapper(
+        dataset, "train", hubert_guidance=hubert_guidance, phonemes=phonemes
+    )
+    test_dataset = TrainDatasetWrapper(
+        dataset, "train", hubert_guidance=hubert_guidance, phonemes=phonemes
+    )
 
     # handle wandb - only initialize on main process (rank 0)
     wandb_project = training_cfg.pop("wandb_project", None)
     wandb_run_name = training_cfg.pop("wandb_run_name", None)
     local_rank = int(os.environ.get("LOCAL_RANK", -1))
-    if training_cfg.get("report_to", "none") == "wandb" and (local_rank == -1 or local_rank == 0):
+    if training_cfg.get("report_to", "none") == "wandb" and (
+        local_rank == -1 or local_rank == 0
+    ):
         wandb.init(
             project=wandb_project,
             name=wandb_run_name,
@@ -432,7 +652,12 @@ def main():
 
     # Create model config
     # Build model configs from merged YAML
-    decoder_config = DiTConfig(**cfm_cfg)
+    if cfm_cfg.get("decoder_type") == "dit":
+        decoder_config = DiTConfig(**cfm_cfg)
+    elif cfm_cfg.get("decoder_type") == "Convformer":
+        decoder_config = DecoderConfig(**cfm_cfg)
+    else:
+        raise ValueError(f"Decoder type {cfm_cfg.get('decoder_type')} not supported")
     encoder_config = ConvformerEncoderConfig(**convformer_cfg)
     # Create model
     logger.info("Creating VAE model...")
@@ -447,6 +672,18 @@ def main():
 
     training_cfg["learning_rate"] = float(training_cfg.get("learning_rate"))
 
+    # Extract min_learning_rate and set it in lr_scheduler_kwargs
+    min_learning_rate = training_cfg.pop("min_learning_rate", None)
+    if min_learning_rate is not None:
+        # Initialize lr_scheduler_kwargs if it doesn't exist
+        if "lr_scheduler_kwargs" not in training_cfg:
+            training_cfg["lr_scheduler_kwargs"] = {}
+        # Set lr_min for cosine scheduler
+        training_cfg["lr_scheduler_kwargs"]["lr_min"] = float(min_learning_rate)
+        logger.info(
+            f"Setting minimum learning rate to {min_learning_rate} in scheduler kwargs"
+        )
+
     # Add DeepSpeed config if provided
     if args.deepspeed:
         training_cfg["deepspeed"] = args.deepspeed
@@ -456,6 +693,17 @@ def main():
     if from_pretrained:
         model.from_pretrained(from_pretrained)
         logger.info(f"Loaded pretrained model from {from_pretrained}")
+
+    # Warm-up phonemizer in the main process so espeak is loaded once (evita "failed to find
+    # espeak library" in evaluation o in step successivi per differenze di ambiente/fork).
+    if phonemes and hasattr(model.encoder, "ctc"):
+        try:
+            model.encoder.ctc.get_phonemes(["test"])
+        except RuntimeError as e:
+            if "espeak" in str(e).lower():
+                logger.error(str(e))
+                raise
+        logger.info("Phonemizer (espeak) warm-up OK")
 
     # Setup training arguments
     training_args = TrainingArguments(
@@ -471,6 +719,7 @@ def main():
         train_dataset=train_dataset,
         eval_dataset=test_dataset,
         data_collator=data_collator,
+        phonemes=phonemes,
     )
 
     # Start training

@@ -8,7 +8,7 @@ training:
   warmup_ratio: 0.01
   save_steps: null
   eval_steps: null
-  evaluation_strategy: "steps"
+  eval_strategy: "steps"
   logging_steps: 1
   seed: 42
   fp16: false
@@ -20,7 +20,6 @@ training:
   wandb_project: convformer-mel-vae-warmup
   wandb_run_name: null
   lr_scheduler_type: "cosine"
-  max_grad_norm: 0.2
   bf16: true
   fp16: false
   resume_from_checkpoint: null
@@ -28,3 +27,8 @@ training:
   gradient_accumulation_steps: 1
   from_pretrained: null
   dataset_name: null
+  min_learning_rate: 1e-6
+  hubert_guidance: false
+  phonemes: false
+  phoneme_parsing_mode: "phoneme"
+  vocab_path: "data/vocab.json"

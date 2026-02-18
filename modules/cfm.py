@@ -12,7 +12,7 @@ from einops import rearrange
 from torchdiffeq import odeint
 from dataclasses import dataclass
 from torch.nn import functional as F
-from modules.Decoder import Transformer
+from modules.DIT import Transformer
 
 
 @dataclass
@@ -36,40 +36,7 @@ class DiTConfig:
     learned_prior: bool = False
     use_vp_schedule: bool = False
     is_causal: bool = True
-    # def __init__(
-    #     self,
-    #     audio_latent_dim: int,
-    #     unet_dim: int = 512,
-    #     unet_depth: int = 6,
-    #     unet_heads: int = 8,
-    #     unet_dropout_rate: float = 0.0,
-    #     use_conv_layer: bool = False,
-    #     use_sos_token: bool = False,
-    #     sigma: float = 1e-5,
-    #     expansion_factor: int = 1,
-    #     mel_channels: int = 100,
-    #     uncond_prob: float = 0.0,
-    # ):
-    #     """
-    #     depformer_dim: int - Hidden dimension of the Depth Transformer
-    #     depformer_dim_feedforward: int - Feedforward dimension of the Depth Transformer
-    #     depformer_num_heads: int - Number of heads in the Depth Transformer
-    #     depformer_num_layers: int - Number of layers in the Depth Transformer
-    #     depformer_casual: bool - Whether the Depth Transformer is causal
-    #     """
-
-    #     # unet specific
-    #     self.sigma = sigma
-    #     self.unet_dim = unet_dim
-    #     self.unet_heads = unet_heads
-    #     self.unet_depth = unet_depth
-    #     self.use_sos_token = use_sos_token
-    #     self.use_conv_layer = use_conv_layer
-    #     self.audio_latent_dim = audio_latent_dim
-    #     self.unet_dropout_rate = unet_dropout_rate
-    #     self.expansion_factor = expansion_factor
-    #     self.mel_channels = mel_channels
-    #     self.uncond_prob = uncond_prob
+    decoder_type: str = "dit"
 
 
 class DiT(torch.nn.Module):
@@ -93,20 +60,33 @@ class DiT(torch.nn.Module):
         self.learned_prior = config.learned_prior
         self.is_causal = config.is_causal
         print(f"VAE is_causal: {self.is_causal}")
-        # context vector projection
         self.context_vector_proj = nn.Sequential(
             nn.Linear(self.audio_latent_dim, self.unet_dim), nn.LayerNorm(self.unet_dim)
         )
+        # hubert norm
+        self.hubert_norm = nn.LayerNorm(self.audio_latent_dim)
+        # hubert + context projection
+        self.hubert_and_context_proj = nn.Sequential(
+            nn.Linear(
+                self.audio_latent_dim + self.audio_latent_dim, self.audio_latent_dim
+            ),
+            nn.LayerNorm(self.audio_latent_dim),
+        )
         # noise projection
         if self.learned_prior:
-            self.noise_proj = nn.Sequential(nn.Linear(self.unet_dim, self.unet_dim), nn.LayerNorm(self.unet_dim))
+            self.noise_proj = nn.Sequential(
+                nn.Linear(self.mel_channels, self.unet_dim),
+                nn.LayerNorm(self.unet_dim),
+            )
             self.prior_proj = nn.Sequential(
-                nn.Linear(self.audio_latent_dim, self.mel_channels), nn.LayerNorm(self.mel_channels)
+                nn.Linear(self.audio_latent_dim, self.mel_channels),
+                nn.LayerNorm(self.mel_channels),
             )
 
         else:
             self.noise_proj = nn.Sequential(
-                nn.Linear(self.unet_dim + self.mel_channels, self.unet_dim), nn.LayerNorm(self.unet_dim)
+                nn.Linear(self.unet_dim + self.mel_channels, self.unet_dim),
+                nn.LayerNorm(self.unet_dim),
             )
 
         # transformer
@@ -121,7 +101,9 @@ class DiT(torch.nn.Module):
         )
         self.transformer.to(dtype=torch.bfloat16)
 
-    def reparameterize(self, mu: torch.FloatTensor, std: Optional[float] = None) -> torch.FloatTensor:
+    def reparameterize(
+        self, mu: torch.FloatTensor, std: Optional[float] = None
+    ) -> torch.FloatTensor:
         eps = torch.randn_like(mu)
         if std is None:
             std = self.sample_scalar_std(mu)
@@ -138,46 +120,24 @@ class DiT(torch.nn.Module):
         self,
         context_vector: torch.FloatTensor,
         target: Optional[torch.FloatTensor] = None,
-        temperature: Optional[float] = None,
-        generator: Optional[torch.Generator] = None,
-        std: Optional[float] = None,
+        padding_mask: Optional[torch.BoolTensor] = None,
     ):
-        context_vector = self.reparameterize(context_vector, std=std)
-        context_vector = context_vector.repeat_interleave(self.expansion_factor, dim=1)
         if target is not None:
             min_length = min(context_vector.shape[1], target.shape[1])
             context_vector = context_vector[:, :min_length, :]
             target = target[:, :min_length, :]
-
-        if self.learned_prior:
-            raise ValueError("Learned prior is not supported")
-        else:
-            temperature = temperature or 1.0
-            prior = (
-                torch.randn(
-                    context_vector.shape[0],
-                    context_vector.shape[1],
-                    self.mel_channels,
-                    dtype=context_vector.dtype,
-                    device=context_vector.device,
-                    generator=generator,
-                )
-                * temperature
-            )
-        return self.context_vector_proj(context_vector), prior
+            padding_mask = padding_mask[:, :min_length]
+        context_vector = self.context_vector_proj(context_vector)
+        return context_vector, target, padding_mask
 
     def prepare_flow(
         self,
         target: torch.FloatTensor,
         context_vector: torch.FloatTensor,
-        x0: torch.FloatTensor,
     ):
         if random.random() < self.uncond_prob:
-            if self.learned_prior:
-                context_vector = torch.randn_like(context_vector)
-            else:
-                context_vector = torch.zeros_like(context_vector)
-        # We need times
+            context_vector = torch.zeros_like(context_vector)
+
         # We need times
         times = torch.rand(
             (target.shape[0],),
@@ -214,7 +174,6 @@ class DiT(torch.nn.Module):
             target_to_loss = target[mask_to_loss].view(-1, self.mel_channels)
             # Compute loss in fp32 for numerical stability with fp16
             loss = F.mse_loss(v_to_loss.float(), target_to_loss.float()).to(v.dtype)
-
         return loss
 
     def forward(
@@ -224,17 +183,23 @@ class DiT(torch.nn.Module):
         context_vector: torch.FloatTensor,
         **kwargs,
     ):
-        context_vector, prior = self.handle_context_vector(context_vector, target)
+        assert not torch.isnan(context_vector).any(), "context vector contains nan"
+        context_vector, target, target_padding_mask = self.handle_context_vector(
+            context_vector=context_vector,
+            target=target,
+            padding_mask=target_padding_mask,
+        )
 
         # ---- flow ----
         state, times, v_target = self.prepare_flow(
             target=target,
             context_vector=context_vector,
-            x0=prior,
         )
 
         # ---- get the flow ----
-        loss = self.let_it_flow(times=times, state=state, target=v_target, flow_mask=target_padding_mask)
+        loss = self.let_it_flow(
+            times=times, state=state, target=v_target, flow_mask=target_padding_mask
+        )
 
         return DiTOutput(
             loss=loss,
@@ -252,9 +217,22 @@ class DiT(torch.nn.Module):
     ):
         cfg_scale = guidance_scale
         # ---- context vector z ----
-        context_vector, y0 = self.handle_context_vector(
-            context_vector, temperature=temperature, generator=generator, std=std
+        context_vector, _, padding_mask = self.handle_context_vector(
+            context_vector=context_vector,
+            padding_mask=padding_mask,
         )
+        y0 = (
+            torch.randn(
+                context_vector.shape[0],
+                context_vector.shape[1],
+                self.mel_channels,
+                dtype=context_vector.dtype,
+                device=context_vector.device,
+                generator=generator,
+            )
+            * temperature
+        )
+
         B, T = context_vector.shape[:2]
         if padding_mask is None:
             if B == 1:
@@ -266,13 +244,17 @@ class DiT(torch.nn.Module):
             else:
                 raise ValueError("Padding mask is required for batch size > 1")
         else:
-            padding_mask = padding_mask.repeat_interleave(self.expansion_factor, dim=1)
+            min_len = min(y0.shape[1], padding_mask.shape[1])
+            y0 = y0[:, :min_len, :]
+            padding_mask = padding_mask[:, :min_len]
+            context_vector = context_vector[:, :min_len, :]
         self.transformer.to(device=context_vector.device, dtype=context_vector.dtype)
-
         # ---- time span ----
-        t_span = torch.linspace(0, 1, num_steps, device=context_vector.device, dtype=context_vector.dtype)
-        # t_span = t_lin**gamma
+        t_span = torch.linspace(
+            0, 1, num_steps, device=context_vector.device, dtype=context_vector.dtype
+        )
 
+        # t_span = t_lin**gamma
         # ---- ODE ----
         def fn(t, state):
             features = self.cfg_forward(
@@ -300,11 +282,8 @@ class DiT(torch.nn.Module):
         attention_mask: Optional[torch.BoolTensor] = None,
     ):
         times = times.repeat(state.shape[0])
-        cond_state = (
-            self.noise_proj(context_vector)
-            if self.learned_prior
-            else self.noise_proj(torch.cat([context_vector, state], dim=-1))
-        )
+        cond_state = self.noise_proj(torch.cat([context_vector, state], dim=-1))
+
         cond_out = self.transformer(
             x=cond_state,
             times=times,
@@ -312,17 +291,18 @@ class DiT(torch.nn.Module):
         )
         if cfg_scale == 1.0:
             return cond_out
-        uncond_state = (
-            self.noise_proj(torch.cat([torch.zeros_like(context_vector), state], dim=-1))
-            if not self.learned_prior
-            else self.noise_proj(torch.zeros_like(context_vector))
+        uncond_state = self.noise_proj(
+            torch.cat([torch.zeros_like(context_vector), state], dim=-1)
         )
+
         uncond_out = self.transformer(
             x=uncond_state,
             times=times,
             attention_mask=attention_mask,
         )
 
-        final = (cfg_scale * cond_out + (1 - cfg_scale) * uncond_out).to(context_vector.dtype)
+        final = (cfg_scale * cond_out + (1 - cfg_scale) * uncond_out).to(
+            context_vector.dtype
+        )
 
         return final

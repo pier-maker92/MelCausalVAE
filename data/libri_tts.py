@@ -13,7 +13,7 @@ from modules.melspecEncoder import MelSpectrogramEncoder, MelSpectrogramConfig
 from data.audio_dataset import SimpleAudioDataset, DataCollator, TrainDatasetWrapper
 
 # set the HF_HOME environment variable
-#os.environ["HF_HOME"] = "/Volumes/Crucial X6/HF_HOME"
+# os.environ["HF_HOME"] = "/Volumes/Crucial X6/HF_HOME"
 cache_dir = "/Users/pierfrancescomelucci/Research/Playground/data_cache"
 
 
@@ -60,15 +60,15 @@ class LibriTTS(SimpleAudioDataset):
             return "test"
 
 
-parser = argparse.ArgumentParser()
-parser.add_argument("-b", "--batch_size", type=int, default=1)
-parser.add_argument("-s", "--stats", action="store_true", default=False)
-parser.add_argument("-n", "--num_samples", type=int, default=10000)
-args = parser.parse_args()
-if __name__ == "__main__":
-    # data collator
-    data_collator = DataCollator()
-    dataset = TrainDatasetWrapper(LibriTTS(), "train")
+# parser = argparse.ArgumentParser()
+# parser.add_argument("-b", "--batch_size", type=int, default=1)
+# parser.add_argument("-s", "--stats", action="store_true", default=False)
+# parser.add_argument("-n", "--num_samples", type=int, default=10000)
+# args = parser.parse_args()
+# if __name__ == "__main__":
+#     # data collator
+#     data_collator = DataCollator()
+#     dataset = TrainDatasetWrapper(LibriTTS(), "train")
 #     dataloader = DataLoader(
 #         dataset,
 #         batch_size=args.batch_size,
