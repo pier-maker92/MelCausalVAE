@@ -22,11 +22,8 @@ class ConvformerOutput:
     kl_loss: Optional[torch.FloatTensor] = None
     padding_mask: Optional[torch.BoolTensor] = None
     mu: Optional[torch.FloatTensor] = None
-    align_list: Optional[List[torch.FloatTensor]] = None
     align_loss: Optional[torch.FloatTensor] = None
     durations: Optional[torch.LongTensor] = None
-    z_lengths: Optional[torch.LongTensor] = None
-    imv: Optional[torch.FloatTensor] = None
     z_upsampled: Optional[torch.FloatTensor] = None
     upsampled_padding_mask: Optional[torch.BoolTensor] = None
 
@@ -162,7 +159,7 @@ class ConvformerEncoder(SigmaVAEEncoder):
         tf_layers = config.tf_layers
         drop_p = config.drop_p
         latent_dim = config.latent_dim
-        # n_residual_blocks = config.n_residual_blocks FIXME handle
+        # n_residual_blocks = config.n_residual_blocks FIXME handle this
         self.proj_in = nn.Linear(100, 512)
 
         self.downsampler = DownSampler(
@@ -185,15 +182,14 @@ class ConvformerEncoder(SigmaVAEEncoder):
         if config.use_aligner:
             self.aligner = Aligner(
                 threshold=config.threshold,
-                # attn_dim=512,
-                # text_dim=512,
-                # audio_dim=512,
-                # num_embeddings=config.num_embeddings,
-                # parsing_mode=config.phoneme_parsing_mode,
-                # vocab_path=config.vocab_path,
             )
-            self.updater = SimilarityUpsamplerBatch()
-        # print number of parameters
+            self.upsampler = SimilarityUpsamplerBatch()
+
+        if config.freeze_encoder:
+            for name, param in self.named_parameters():
+                if "mu" in name or "logvar" in name:
+                    continue
+                param.requires_grad = False
 
     def forward(
         self,
@@ -209,12 +205,22 @@ class ConvformerEncoder(SigmaVAEEncoder):
         x, padding_mask = self.downsampler(x, padding_mask.bool())
         z = self.transformer(x)  # [B, T/C, 512]
 
+        # get alignement
+        durations = None
+        if self.config.use_aligner:
+            z_aligned, durations, padding_mask = self.aligner(
+                mels=z,
+                padding_mask=padding_mask,  # NOTE: padding_mask logic 0 = valid, 1 = padding
+            )
+            print(durations[0, :10])
+            z = z_aligned.to(x.dtype)
+            assert not torch.isnan(z).any(), "z contains nan after aligner"
+
         mu = self.mu(z)
         logvar = None
         if hasattr(self, "logvar"):
             logvar = self.logvar(z)
-        # z = self.reparameterize(mu, logvar)
-        z = mu
+        z = self.reparameterize(mu, logvar)
         assert not torch.isnan(z).any(), "z contains nan after reparameterization"
 
         kl_loss = None
@@ -223,20 +229,8 @@ class ConvformerEncoder(SigmaVAEEncoder):
                 mu, logvar, padding_mask
             ) * self.get_kl_cosine_schedule(kwargs["step"])
 
-        # get alignement
-        align_loss, durations = None, None
         if self.config.use_aligner:
-            z_aligned, durations, padding_mask_aligned = self.aligner(
-                mels=z,
-                # phonemes=phonemes,
-                padding_mask=padding_mask,  # NOTE: padding_mask is False for padding tokens
-            )
-            print(durations[0, :10])
-            z = z_aligned.to(x.dtype)
-            padding_mask = padding_mask_aligned
-            assert not torch.isnan(z).any(), "z contains nan after aligner"
-
-            z_upsampled, upsampled_padding_mask = self.updater(
+            z_upsampled, upsampled_padding_mask = self.upsampler(
                 z, durations * self.config.compress_factor_C, target_T
             )
             upsampled_padding_mask = upsampled_padding_mask.bool()
@@ -245,8 +239,6 @@ class ConvformerEncoder(SigmaVAEEncoder):
                 torch.repeat_interleave(z, self.config.compress_factor_C, dim=1),
                 original_padding_mask,
             )
-        z = self.reparameterize(z, logvar)
-        # breakpoint()
 
         return ConvformerOutput(
             z=z,
@@ -254,7 +246,6 @@ class ConvformerEncoder(SigmaVAEEncoder):
             padding_mask=padding_mask,
             mu=mu,
             durations=durations,
-            align_loss=align_loss,
             z_upsampled=z_upsampled,
             upsampled_padding_mask=upsampled_padding_mask,
         )

@@ -1,12 +1,12 @@
 training:
   dataset_name: librispeech100h
-  output_dir: checkpoints/MelCausalVAE/aligner-ft-0.75[freeze] # variable rate training
+  output_dir: checkpoints/MelCausalVAE/aligner-ft-0.85[freeze] # variable rate training
   num_train_epochs: 10
   learning_rate: 1e-4
   per_device_train_batch_size: 24
   report_to: wandb
   wandb_project: flexi-vae
-  wandb_run_name: aligner-ft-0.75[freeze]
+  wandb_run_name: aligner-ft-0.85[freeze]
   fp16: false
   bf16: true
   save_steps: 1000
@@ -16,7 +16,7 @@ training:
   gradient_accumulation_steps: 1
   dataloader_num_workers: 4
   min_learning_rate: 5e-5
-  from_pretrained: /workspace/MelCausalVAE/checkpoints/MelCausalVAE/no-aligner/checkpoint-10000/model.safetensors
+  from_pretrained: /workspace/MelCausalVAE/checkpoints/no-aligner/checkpoint-10000/model.safetensors
   #resume_from_checkpoint: /workspace/MelCausalVAE/checkpoints/MelCausalVAE/aligner-ft/checkpoint-1000
   phonemes: true
 
@@ -33,7 +33,7 @@ convformer:
   kl_loss_weight: 1e-3
   use_aligner: true
   freeze_encoder: true
-  threshold: 0.75
+  threshold: 0.85
 
 cfm:
   unet_dim: 1024

@@ -143,13 +143,7 @@ class VAE(torch.nn.Module):
         self.decoder.expansion_factor = config.encoder_config.compress_factor_C
         self.dtype = dtype
         self.set_dtype(dtype)
-
-        if config.encoder_config.freeze_encoder:
-            print("Freezing encoder")
-            for param in self.encoder.parameters():
-                param.requires_grad = False
         count_parameters_by_module(self.encoder)
-        # breakpoint()
 
     def set_dtype(self, dtype: torch.dtype):
         self.dtype = dtype
