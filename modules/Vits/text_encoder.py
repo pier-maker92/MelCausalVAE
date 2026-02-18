@@ -3,7 +3,7 @@ import math
 import torch
 import torch.nn as nn
 from typing import List
-from utils import commons
+from .utils import commons
 
 
 class PhonemeVocab:

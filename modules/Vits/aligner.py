@@ -1,11 +1,11 @@
 import torch
 import numpy as np
 import torch.nn as nn
-import monotonic_align
+from . import monotonic_align
 from typing import List
 from dataclasses import dataclass
-from text_encoder import TextEncoder
-from flow_model import ResidualCouplingLayer
+from .text_encoder import TextEncoder
+from .flow_model import ResidualCouplingLayer
 
 
 def search_path(z_p, m_p, logs_p, x_mask, y_mask):
@@ -204,48 +204,54 @@ class Aligner(nn.Module):
         total_frames = torch.sum(y_mask)
         loss = kl_loss_raw / total_frames
 
-        return loss, mas_mask, z_flow
+        durations = mas_mask.sum(dim=-1)
+
+        z_pooled = torch.bmm(mas_mask, z_spec.permute(0, 2, 1)) / x_mask.sum(
+            -1
+        ).unsqueeze(-1)
+
+        return z_pooled, durations, loss, (~x_mask).squeeze(1)
 
 
-# Esempio di utilizzo fittizio
-if __name__ == "__main__":
-    # Config
-    vocab_size = 100
-    channels = 192
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+# # Esempio di utilizzo fittizio
+# if __name__ == "__main__":
+#     # Config
+#     vocab_size = 100
+#     channels = 192
+#     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    config = AlignerConfig()
-    config.z_dim = channels
-    aligner = Aligner(config)
-    aligner.to(device)
+#     config = AlignerConfig()
+#     config.z_dim = channels
+#     aligner = Aligner(config)
+#     aligner.to(device)
 
-    # Input Finti
-    B = 24
-    T_audio = 1300
-    T_text = 240
+#     # Input Finti
+#     B = 24
+#     T_audio = 1300
+#     T_text = 240
 
-    # z dal posterior encoder (già campionato)
-    z_from_posterior = torch.randn(B, channels, T_audio).to(device)
-    y_mask = torch.ones(B, 1, T_audio).to(device)
+#     # z dal posterior encoder (già campionato)
+#     z_from_posterior = torch.randn(B, channels, T_audio).to(device)
+#     y_mask = torch.ones(B, 1, T_audio).to(device)
 
-    # generate random chars for phonemes batched
-    phonemes = [
-        [
-            "a",
-            "b",
-        ]
-        * T_text
-        for _ in range(B)
-    ]
+#     # generate random chars for phonemes batched
+#     phonemes = [
+#         [
+#             "a",
+#             "b",
+#         ]
+#         * T_text
+#         for _ in range(B)
+#     ]
 
-    # Calcolo
-    loss, alignment, z_transformed = aligner(z_from_posterior, y_mask, phonemes)
+#     # Calcolo
+#     loss, alignment, z_transformed = aligner(z_from_posterior, y_mask, phonemes)
 
-    print(f"KL Loss: {loss.item()}")
-    print(f"Alignment Shape: {alignment.shape}")  # Dovrebbe essere [2, 10, 50]
+#     print(f"KL Loss: {loss.item()}")
+#     print(f"Alignment Shape: {alignment.shape}")  # Dovrebbe essere [2, 10, 50]
 
-    # save a figure with  the alignement
-    import matplotlib.pyplot as plt
+#     # save a figure with  the alignement
+#     import matplotlib.pyplot as plt
 
-    plt.imshow(alignment[0].cpu().detach().numpy(), aspect="auto")
-    plt.savefig("alignment.png")
+#     plt.imshow(alignment[0].cpu().detach().numpy(), aspect="auto")
+#     plt.savefig("alignment.png")

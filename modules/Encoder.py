@@ -15,6 +15,9 @@ from modules.flash_attn_encoder import FlashTransformerEncoder
 from modules.downsampler import DownSampler
 from modules.similarity import Aligner, SimilarityUpsamplerBatch
 
+from modules.Vits.aligner import Aligner as VitsAligner
+from modules.Vits.aligner import AlignerConfig
+
 
 @dataclass
 class ConvformerOutput:
@@ -180,14 +183,16 @@ class ConvformerEncoder(SigmaVAEEncoder):
             self.logvar = nn.Linear(512, latent_dim)
 
         if config.use_aligner:
-            self.aligner = Aligner(
-                threshold=config.threshold,
-            )
+            # self.aligner = Aligner(
+            #     threshold=config.threshold,
+            # )
+            aligner_config = AlignerConfig(z_dim=512)
+            self.aligner = VitsAligner(aligner_config)
             self.upsampler = SimilarityUpsamplerBatch()
 
         if config.freeze_encoder:
             for name, param in self.named_parameters():
-                if "mu" in name or "logvar" in name:
+                if name in ["mu", "logvar", "aligner", "upsampler"]:
                     continue
                 param.requires_grad = False
 
@@ -208,10 +213,15 @@ class ConvformerEncoder(SigmaVAEEncoder):
         # get alignement
         durations = None
         if self.config.use_aligner:
-            z_aligned, durations, padding_mask = self.aligner(
-                mels=z,
-                padding_mask=padding_mask,  # NOTE: padding_mask logic 0 = valid, 1 = padding
+            z_aligned, durations, align_loss, padding_mask = self.aligner(
+                z_spec=z.permute(0, 2, 1),
+                y_mask=(~padding_mask).unsqueeze(
+                    1
+                ),  # NOTE: padding_mask logic 0 = valid, 1 = padding
+                phonemes=phonemes,
             )
+            z_aligned = z_aligned.permute(0, 2, 1)
+            breakpoint()
             print(durations[0, :10])
             z = z_aligned.to(x.dtype)
             assert not torch.isnan(z).any(), "z contains nan after aligner"

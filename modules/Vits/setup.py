@@ -2,6 +2,9 @@ from distutils.core import setup
 from distutils.extension import Extension
 from Cython.Build import cythonize
 import numpy
+import os
+
+os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
 ext_modules = [
     Extension(
