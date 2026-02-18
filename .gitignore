@@ -90,3 +90,6 @@ Thumbs.db
 # Logs
 *.log
 
+# Cython
+*.c
+

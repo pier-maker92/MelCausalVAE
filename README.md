@@ -1,5 +1,7 @@
 # MelCausalVAE
 
+**Build requirement**: Run `cd modules/Vits && python setup.py build_ext --inplace` to compile the `monotonic_align` extension.
+
 A Variational Autoencoder (VAE) for audio mel spectrogram encoding and generation, featuring a causal Convformer encoder and Conditional Flow Matching (CFM) decoder.
 
 ## Overview
