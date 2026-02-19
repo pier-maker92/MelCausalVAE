@@ -192,7 +192,7 @@ class ConvformerEncoder(SigmaVAEEncoder):
 
         if config.freeze_encoder:
             for name, param in self.named_parameters():
-                if name in ["mu", "logvar", "aligner", "upsampler"]:
+                if name.split(".")[0] in ["mu", "logvar", "aligner", "upsampler"]:
                     continue
                 param.requires_grad = False
 
@@ -211,7 +211,7 @@ class ConvformerEncoder(SigmaVAEEncoder):
         z = self.transformer(x)  # [B, T/C, 512]
 
         # get alignement
-        durations = None
+        durations, align_loss = None, None
         if self.config.use_aligner:
             z_aligned, durations, align_loss, padding_mask = self.aligner(
                 z_spec=z.permute(0, 2, 1),
@@ -220,10 +220,9 @@ class ConvformerEncoder(SigmaVAEEncoder):
                 ),  # NOTE: padding_mask logic 0 = valid, 1 = padding
                 phonemes=phonemes,
             )
-            z_aligned = z_aligned.permute(0, 2, 1)
-            breakpoint()
+            z_aligned = z_aligned
             print(durations[0, :10])
-            z = z_aligned.to(x.dtype)
+            # z = z_aligned.to(x.dtype)
             assert not torch.isnan(z).any(), "z contains nan after aligner"
 
         mu = self.mu(z)
@@ -239,16 +238,16 @@ class ConvformerEncoder(SigmaVAEEncoder):
                 mu, logvar, padding_mask
             ) * self.get_kl_cosine_schedule(kwargs["step"])
 
-        if self.config.use_aligner:
-            z_upsampled, upsampled_padding_mask = self.upsampler(
-                z, durations * self.config.compress_factor_C, target_T
-            )
-            upsampled_padding_mask = upsampled_padding_mask.bool()
-        else:
-            z_upsampled, upsampled_padding_mask = (
-                torch.repeat_interleave(z, self.config.compress_factor_C, dim=1),
-                original_padding_mask,
-            )
+        # if self.config.use_aligner:
+        #     z_upsampled, upsampled_padding_mask = self.upsampler(
+        #         z, durations * self.config.compress_factor_C, target_T
+        #     )
+        #     upsampled_padding_mask = upsampled_padding_mask.bool()
+        # else:
+        z_upsampled, upsampled_padding_mask = (
+            torch.repeat_interleave(z, self.config.compress_factor_C, dim=1),
+            original_padding_mask,
+        )
 
         return ConvformerOutput(
             z=z,
@@ -257,6 +256,7 @@ class ConvformerEncoder(SigmaVAEEncoder):
             mu=mu,
             durations=durations,
             z_upsampled=z_upsampled,
+            align_loss=align_loss,
             upsampled_padding_mask=upsampled_padding_mask,
         )
 

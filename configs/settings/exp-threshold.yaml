@@ -16,7 +16,7 @@ training:
   gradient_accumulation_steps: 1
   dataloader_num_workers: 4
   min_learning_rate: 5e-5
-  from_pretrained: /workspace/MelCausalVAE/checkpoints/no-aligner/checkpoint-10000/model.safetensors
+  #from_pretrained: /workspace/MelCausalVAE/checkpoints/no-aligner/checkpoint-10000/model.safetensors
   #resume_from_checkpoint: /workspace/MelCausalVAE/checkpoints/MelCausalVAE/aligner-ft/checkpoint-1000
   phonemes: true
 

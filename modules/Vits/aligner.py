@@ -58,7 +58,7 @@ def search_path(z_p, m_p, logs_p, x_mask, y_mask):
         path = torch.zeros(b, t_y, t_x, dtype=torch.int32).to(device=z_p.device)
 
         # Ensure contiguous memory layout for Cython
-        log_p_cpu = log_p_transposed.data.cpu().numpy().astype(np.float32)
+        log_p_cpu = log_p_transposed.data.float().cpu().numpy().astype(np.float32)
         path_cpu = path.data.cpu().numpy().astype(np.int32)
         t_x_len = x_mask.sum([1, 2]).data.cpu().numpy().astype(np.int32)
         t_y_len = y_mask.sum([1, 2]).data.cpu().numpy().astype(np.int32)
@@ -184,8 +184,8 @@ class Aligner(nn.Module):
 
         # 4. Espansione delle statistiche del testo
         # Moltiplica Prior per Allineamento: [B, C, T_text] x [B, T_text, T_audio] = [B, C, T_audio]
-        m_p_expanded = torch.matmul(m_p, mas_mask)
-        logs_p_expanded = torch.matmul(logs_p, mas_mask)
+        m_p_expanded = torch.matmul(m_p.to(dtype=mas_mask.dtype), mas_mask)
+        logs_p_expanded = torch.matmul(logs_p.to(dtype=mas_mask.dtype), mas_mask)
 
         # 5. Calcolo KL Loss
         # La formula è: -LogLikelihood(z_flow | N(m_p_exp, logs_p_exp)) - log_det_jacobian
@@ -206,11 +206,11 @@ class Aligner(nn.Module):
 
         durations = mas_mask.sum(dim=-1)
 
-        z_pooled = torch.bmm(mas_mask, z_spec.permute(0, 2, 1)) / x_mask.sum(
-            -1
-        ).unsqueeze(-1)
+        z_pooled = torch.bmm(
+            mas_mask.to(dtype=z_spec.dtype), z_spec.permute(0, 2, 1)
+        ) / x_mask.sum(-1).unsqueeze(-1)
 
-        return z_pooled, durations, loss, (~x_mask).squeeze(1)
+        return z_pooled, durations.long(), loss, (~x_mask).squeeze(1)
 
 
 # # Esempio di utilizzo fittizio
