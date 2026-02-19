@@ -138,6 +138,20 @@ class SigmaVAEEncoder(nn.Module):
         cosine = 0.5 * (1 - math.cos(math.pi * step / self.config.kl_loss_warmup_steps))
         return self.kl_loss_weight * cosine
 
+    def get_aligner_cosine_schedule(self, step, weight=0.0001):
+        """
+        Returns the scaled KL loss weight following a cosine schedule
+        ranging from 0 to self.kl_loss_weight over total_steps.
+        Once step surpasses total_steps, stays at self.kl_loss_weight.
+        """
+        if self.config.kl_loss_warmup_steps == 0:
+            return weight
+        if step >= self.config.kl_loss_warmup_steps:
+            return weight
+        # Cosine schedule: start at 0, increase to kl_loss_weight in total_steps
+        cosine = 0.5 * (1 - math.cos(math.pi * step / self.config.kl_loss_warmup_steps))
+        return weight * cosine
+
 
 class CausalTransformerTail(nn.Module):
     def __init__(self, d_model=512, nheads=8, nlayers=4, drop_p=0.1):
@@ -186,7 +200,10 @@ class ConvformerEncoder(SigmaVAEEncoder):
             # self.aligner = Aligner(
             #     threshold=config.threshold,
             # )
-            aligner_config = AlignerConfig(z_dim=512)
+            aligner_config = AlignerConfig(
+                z_dim=64,
+                hidden_dim=256,
+            )
             self.aligner = VitsAligner(aligner_config)
             self.upsampler = SimilarityUpsamplerBatch()
 
@@ -210,27 +227,30 @@ class ConvformerEncoder(SigmaVAEEncoder):
         x, padding_mask = self.downsampler(x, padding_mask.bool())
         z = self.transformer(x)  # [B, T/C, 512]
 
-        # get alignement
-        durations, align_loss = None, None
-        if self.config.use_aligner:
-            z_aligned, durations, align_loss, padding_mask = self.aligner(
-                z_spec=z.permute(0, 2, 1),
-                y_mask=(~padding_mask).unsqueeze(
-                    1
-                ),  # NOTE: padding_mask logic 0 = valid, 1 = padding
-                phonemes=phonemes,
-            )
-            z_aligned = z_aligned
-            print(durations[0, :10])
-            # z = z_aligned.to(x.dtype)
-            assert not torch.isnan(z).any(), "z contains nan after aligner"
-
         mu = self.mu(z)
         logvar = None
         if hasattr(self, "logvar"):
             logvar = self.logvar(z)
         z = self.reparameterize(mu, logvar)
         assert not torch.isnan(z).any(), "z contains nan after reparameterization"
+
+        # get alignement
+        durations, align_loss = None, None
+        if self.config.use_aligner:
+            z_pooled, durations, align_loss, pooled_mask = self.aligner(
+                z_spec=z.permute(0, 2, 1),
+                y_mask=(~padding_mask).unsqueeze(
+                    1
+                ),  # NOTE: padding_mask logic 0 = valid, 1 = padding
+                phonemes=phonemes,
+            )
+            if kwargs.get("step", None) is not None:
+                align_loss = align_loss * self.get_aligner_cosine_schedule(
+                    kwargs["step"]
+                )
+
+            # z = z_pooled.to(x.dtype)
+            assert not torch.isnan(z).any(), "z contains nan after aligner"
 
         kl_loss = None
         if kwargs.get("step", None) is not None:

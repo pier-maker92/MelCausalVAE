@@ -1,9 +1,11 @@
 import torch
 import numpy as np
 import torch.nn as nn
-from . import monotonic_align
 from typing import List
 from dataclasses import dataclass
+
+# Assumiamo che questi moduli siano disponibili nel tuo environment
+from . import monotonic_align
 from .text_encoder import TextEncoder
 from .flow_model import ResidualCouplingLayer
 
@@ -26,32 +28,26 @@ def search_path(z_p, m_p, logs_p, x_mask, y_mask):
         # Espandendo il quadrato: (z^2)/sigma^2 - (2zm)/sigma^2 + (m^2)/sigma^2
 
         # Termine A: sum(z^2 * (1/sigma^2))
-        # Usiamo Matmul: [B, T_x, C] * [B, C, T_y] -> [B, T_x, T_y]
         term_a = torch.matmul(o_p.transpose(1, 2), z_p_sq)
 
         # Termine B: -2 * sum(z * m * (1/sigma^2))
-        # Weighted mean: m_p * o_p
         term_b = -2 * torch.matmul((m_p * o_p).transpose(1, 2), z_p)
 
         # Termine C: sum(m^2 * (1/sigma^2))
-        # Questo è costante per ogni frame audio, dipende solo dal testo
         term_c = torch.sum(m_p**2 * o_p, dim=1, keepdim=True).transpose(
             1, 2
         )  # [B, T_x, 1]
 
         # Termine D: Log Determinante (Parte della normalizzazione della Gaussiana)
-        # sum(log(2*pi) + log(sigma^2)) -> ignoriamo costanti, teniamo 2 * logs_p
         term_d = torch.sum(2 * logs_p, dim=1, keepdim=True).transpose(
             1, 2
         )  # [B, T_x, 1]
 
         # Somma totale per la Log Likelihood Negativa (pesata)
-        # log_p = -0.5 * ( (z-m)^2/var + log_var )
         log_p = -0.5 * (term_a + term_b + term_c + term_d)  # [B, T_x, T_y]
 
         # 2. Preparazione per Cython
         # Cython implementation expects [T_y, T_x] but we have [T_x, T_y]
-        # We need to transpose inputs and outputs [B, T_y, T_x]
         log_p_transposed = log_p.transpose(1, 2).contiguous()
 
         # Path buffer [B, T_y, T_x]
@@ -67,63 +63,9 @@ def search_path(z_p, m_p, logs_p, x_mask, y_mask):
         monotonic_align.maximum_path_c(path_cpu, log_p_cpu, t_y_len, t_x_len)
 
         # Ritorna il path come tensore float (0.0 o 1.0)
-        # Converti e transponi back a [B, T_x, T_y]
         path = torch.from_numpy(path_cpu).to(device=z_p.device, dtype=torch.float32)
         path = path.transpose(1, 2)
         return path
-
-
-class VitsKLProcessor(nn.Module):
-    def __init__(self, text_encoder, flow_model):
-        super().__init__()
-        self.text_encoder = text_encoder
-        self.flow = flow_model
-
-    def forward(self, z_spec, y_mask, phonemes, phoneme_lengths):
-        """
-        z_spec: [B, C, T_audio] (Output del Posterior Encoder - campionato con reparam trick)
-        y_mask: [B, 1, T_audio] (Mask dell'audio)
-        phonemes: [B, T_text]
-        phoneme_lengths: [B]
-        """
-
-        # 1. Text Encoding (Prior)
-        # m_p, logs_p: statistiche previste dal testo [B, C, T_text]
-        m_p, logs_p, x_mask = self.text_encoder(phonemes, phoneme_lengths)
-
-        # 2. Flow Model (Trasformazione)
-        # Trasforma z_spec (complesso) verso z_flow (semplice)
-        z_flow, logdet_flow = self.flow(z_spec, y_mask, reverse=False)
-
-        # 3. Monotonic Alignment Search (MAS)
-        # Trova la mappa ottimale tra z_flow (audio trasformato) e m_p (testo)
-        # Nota: MAS usa z_flow, non z_spec, perché z_flow è comparabile al testo
-        mas_mask = search_path(z_flow, m_p, logs_p, x_mask, y_mask)
-        # mas_mask shape: [B, T_text, T_audio]
-
-        # 4. Espansione delle statistiche del testo
-        # Moltiplica Prior per Allineamento: [B, C, T_text] x [B, T_text, T_audio] = [B, C, T_audio]
-        m_p_expanded = torch.matmul(m_p, mas_mask)
-        logs_p_expanded = torch.matmul(logs_p, mas_mask)
-
-        # 5. Calcolo KL Loss
-        # La formula è: -LogLikelihood(z_flow | N(m_p_exp, logs_p_exp)) - log_det_jacobian
-
-        # Log Normal PDF
-        # Costante -0.5 * log(2pi) omessa perché costante durante l'ottimizzazione
-        kl_loss_elements = logs_p_expanded + 0.5 * torch.exp(-2 * logs_p_expanded) * (
-            (z_flow - m_p_expanded) ** 2
-        )
-
-        # Somma su canali e tempo, media sul batch
-        kl_loss_raw = torch.sum(kl_loss_elements * y_mask) - torch.sum(logdet_flow)
-
-        # Normalizzazione per batch e time (o per numero di elementi totali mascherati)
-        # In VITS solitamente si normalizza per numero totale di frame nel batch
-        total_frames = torch.sum(y_mask)
-        loss = kl_loss_raw / total_frames
-
-        return loss, mas_mask, z_flow
 
 
 @dataclass
@@ -136,8 +78,14 @@ class AlignerConfig:
     flow_model_kernel_size: int = 5
 
 
+import math
+import torch
+import torch.nn as nn
+from typing import List
+
+
 class Aligner(nn.Module):
-    def __init__(self, config: AlignerConfig):
+    def __init__(self, config):
         super().__init__()
         self.text_encoder = TextEncoder(
             hidden_channels=config.hidden_dim,
@@ -158,65 +106,85 @@ class Aligner(nn.Module):
 
     def forward(
         self,
-        z_spec: torch.FloatTensor,
-        y_mask: torch.BoolTensor,
+        z_spec: torch.FloatTensor,  # [B, C, T_audio] sample dal posterior encoder (o output che vuoi allineare)
+        y_mask: torch.BoolTensor,  # [B, 1, T_audio]
         phonemes: List[str],
     ):
         """
-        z_spec: [B, C, T_audio] (Output del Posterior Encoder - campionato con reparam trick)
-        y_mask: [B, 1, T_audio] (Mask dell'audio)
-        phonemes: List[str]
+        Loss usata per MAS / prior: massimizza log p(z | text, A)
+        (eventualmente con change-of-variables del flow).
         """
 
-        # 1. Text Encoding (Prior)
-        # m_p, logs_p: statistiche previste dal testo [B, C, T_text]
-        m_p, logs_p, x_mask = self.text_encoder(phonemes)
+        # 1) Prior da testo
+        m_p, logs_p, x_mask = self.text_encoder(
+            phonemes
+        )  # [B,C,T_text], [B,C,T_text], [B,1,T_text]
 
-        # 2. Flow Model (Trasformazione)
-        # Trasforma z_spec (complesso) verso z_flow (semplice)
-        z_flow, logdet_flow = self.flow(z_spec, y_mask, reverse=False)
+        # 2) Flow: porta z_spec nello spazio del prior
+        y_mask_f = y_mask.to(dtype=z_spec.dtype)
+        z_flow, logdet_flow = self.flow(
+            z_spec, y_mask_f, reverse=False
+        )  # z_flow: [B,C,T_audio]
 
-        # 3. Monotonic Alignment Search (MAS)
-        # Trova la mappa ottimale tra z_flow (audio trasformato) e m_p (testo)
-        # Nota: MAS usa z_flow, non z_spec, perché z_flow è comparabile al testo
-        mas_mask = search_path(z_flow, m_p, logs_p, x_mask, y_mask)
-        # mas_mask shape: [B, T_text, T_audio]
+        # 3) MAS in spazio prior
+        mas_mask = search_path(
+            z_flow, m_p, logs_p, x_mask, y_mask
+        )  # [B,T_text,T_audio]
 
-        # 4. Espansione delle statistiche del testo
-        # Moltiplica Prior per Allineamento: [B, C, T_text] x [B, T_text, T_audio] = [B, C, T_audio]
-        m_p_expanded = torch.matmul(m_p.to(dtype=mas_mask.dtype), mas_mask)
-        logs_p_expanded = torch.matmul(logs_p.to(dtype=mas_mask.dtype), mas_mask)
+        # 4) Espandi statistiche del prior su frame audio
+        m_p_exp = torch.matmul(m_p.to(dtype=mas_mask.dtype), mas_mask)  # [B,C,T_audio]
+        logs_p_exp = torch.matmul(
+            logs_p.to(dtype=mas_mask.dtype), mas_mask
+        )  # [B,C,T_audio]
 
-        # 5. Calcolo KL Loss
-        # La formula è: -LogLikelihood(z_flow | N(m_p_exp, logs_p_exp)) - log_det_jacobian
-
-        # Log Normal PDF
-        # Costante -0.5 * log(2pi) omessa perché costante durante l'ottimizzazione
-        kl_loss_elements = logs_p_expanded + 0.5 * torch.exp(-2 * logs_p_expanded) * (
-            (z_flow - m_p_expanded) ** 2
+        # 5) Negative log-likelihood del prior su z_flow
+        # log p(z_flow | text,A) = sum_{c,t} -0.5[(z-m)^2/sigma^2 + 2log sigma + log 2pi]
+        # NLL = -log p = 0.5[(z-m)^2/sigma^2 + 2log sigma + log 2pi]
+        inv_var = torch.exp(-2.0 * logs_p_exp)
+        nll = 0.5 * (
+            (z_flow - m_p_exp) ** 2 * inv_var
+            + 2.0 * logs_p_exp
+            + math.log(2.0 * math.pi)
         )
+        nll = nll * y_mask_f  # maschera audio
 
-        # Somma su canali e tempo, media sul batch
-        kl_loss_raw = torch.sum(kl_loss_elements * y_mask) - torch.sum(logdet_flow)
+        nll_prior = torch.sum(nll)
 
-        # Normalizzazione per batch e time (o per numero di elementi totali mascherati)
-        # In VITS solitamente si normalizza per numero totale di frame nel batch
-        total_frames = torch.sum(y_mask)
-        loss = kl_loss_raw / total_frames
+        # 6) Change-of-variables del flow:
+        # log p(z_spec) = log p(z_flow) + log|det J|
+        # quindi NLL(z_spec) = NLL(z_flow) - log|det J|
+        # Se il tuo logdet_flow è già +log|det J|, allora:
+        loss_raw = nll_prior - torch.sum(logdet_flow)
 
-        durations = mas_mask.sum(dim=-1)
+        # Se invece la tua implementazione ritorna logdet con segno opposto, usa:
+        # loss_raw = nll_prior + torch.sum(logdet_flow)
+
+        # normalizzazione (consiglio: per frame*canali, così è stabile)
+        B, C, T = z_spec.shape
+        denom = (torch.sum(y_mask_f) * C).clamp_min(1.0)
+        loss = loss_raw / denom
+
+        # durate e pooling token-level
+        durations = mas_mask.sum(dim=-1)  # [B,T_text]
 
         z_pooled = torch.bmm(
             mas_mask.to(dtype=z_spec.dtype), z_spec.permute(0, 2, 1)
-        ) / x_mask.sum(-1).unsqueeze(-1)
+        )  # [B,T_text,C]
+        dur = durations.to(dtype=z_spec.dtype).clamp_min(1.0).unsqueeze(-1)
+        z_pooled = z_pooled / dur
 
-        return z_pooled, durations.long(), loss, (~x_mask).squeeze(1)
+        text_mask = (~x_mask.bool()).squeeze(1)  # [B,T_text]
+
+        return z_pooled, durations.long(), loss, text_mask
 
 
+# # ==========================================
 # # Esempio di utilizzo fittizio
+# # ==========================================
 # if __name__ == "__main__":
+#     import matplotlib.pyplot as plt
+
 #     # Config
-#     vocab_size = 100
 #     channels = 192
 #     device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -230,11 +198,16 @@ class Aligner(nn.Module):
 #     T_audio = 1300
 #     T_text = 240
 
-#     # z dal posterior encoder (già campionato)
+#     # z e logs_q dal posterior encoder
 #     z_from_posterior = torch.randn(B, channels, T_audio).to(device)
+
+#     # Simuliamo la log-varianza in uscita dal posterior encoder.
+#     # Spesso viene inizializzata vicino a 0 (che significa varianza = 1)
+#     logs_q_from_posterior = torch.zeros(B, channels, T_audio).to(device)
+
 #     y_mask = torch.ones(B, 1, T_audio).to(device)
 
-#     # generate random chars for phonemes batched
+#     # Generiamo caratteri random per simulare i fonemi
 #     phonemes = [
 #         [
 #             "a",
@@ -244,14 +217,27 @@ class Aligner(nn.Module):
 #         for _ in range(B)
 #     ]
 
-#     # Calcolo
-#     loss, alignment, z_transformed = aligner(z_from_posterior, y_mask, phonemes)
+#     # Esecuzione
+#     z_pooled, durations, loss, text_mask = aligner(
+#         z_from_posterior,
+#         logs_q_from_posterior,  # Passiamo il nuovo parametro
+#         y_mask,
+#         phonemes,
+#     )
 
-#     print(f"KL Loss: {loss.item()}")
-#     print(f"Alignment Shape: {alignment.shape}")  # Dovrebbe essere [2, 10, 50]
+#     print(f"KL Loss corretta: {loss.item()}")
+#     print(f"Z Pooled Shape: {z_pooled.shape}")
 
-#     # save a figure with  the alignement
-#     import matplotlib.pyplot as plt
+#     # Salva una figura con l'allineamento (per il batch 0)
+#     # Ricalcoliamo mas_mask per il plot visto che non è più restituita dal forward
+#     with torch.no_grad():
+#         m_p, logs_p, x_mask = aligner.text_encoder(phonemes)
+#         z_flow, _ = aligner.flow(z_from_posterior, y_mask, reverse=False)
+#         alignment = search_path(z_flow, m_p, logs_p, x_mask, y_mask)
 
-#     plt.imshow(alignment[0].cpu().detach().numpy(), aspect="auto")
+#     plt.imshow(alignment[0].cpu().detach().numpy(), aspect="auto", origin="lower")
+#     plt.title("MAS Alignment")
+#     plt.xlabel("Audio Frames")
+#     plt.ylabel("Text Phonemes")
 #     plt.savefig("alignment.png")
+#     print("Allineamento salvato in 'alignment.png'")
