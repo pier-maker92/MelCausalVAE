@@ -58,6 +58,20 @@ class SimilarityPoolingBatch(nn.Module):
     def __init__(self, threshold=0.9, **kwargs):
         super().__init__()
         self.threshold = threshold
+        self.conv1d = nn.Conv1d(
+            kwargs.get("input_dim", 64),
+            kwargs.get("hidden_dim", 512),
+            kernel_size=3,
+            padding=1,
+        )
+
+
+        #let the conv1d be initialized using a gaussian distribution with mean 0 and std 0.02 (like hubert)
+        nn.init.normal_(self.conv1d.weight, mean=0.0, std=1.0)
+        nn.init.constant_(self.conv1d.bias, 0.0)
+
+
+        self.out_proj = nn.Linear(kwargs.get("hidden_dim", 512), kwargs.get("input_dim", 64))
 
     def forward(self, x, mask):
         """
@@ -73,6 +87,10 @@ class SimilarityPoolingBatch(nn.Module):
         device = x.device
         dtype = x.dtype
 
+        # 0. apply convolution
+        x = self.conv1d(x.transpose(1, 2)).transpose(1, 2)
+        x = self.out_proj(x)
+        
         # 1. Calcolo similarità (solo sui frame validi)
         x_norm = F.normalize(x, p=2, dim=-1)
         # sim[B, T-1]: similarità tra t e t+1
