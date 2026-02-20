@@ -201,8 +201,8 @@ class ConvformerEncoder(SigmaVAEEncoder):
             #     threshold=config.threshold,
             # )
             aligner_config = AlignerConfig(
-                z_dim=64,
-                proj_dim=256,
+                z_dim=512,
+                proj_dim=1024,
             )
             self.aligner = VitsAligner(aligner_config)
             self.upsampler = SimilarityUpsamplerBatch()
@@ -225,12 +225,12 @@ class ConvformerEncoder(SigmaVAEEncoder):
         target_T = (~padding_mask).sum(dim=1)
         original_padding_mask = padding_mask.clone()
         x, padding_mask = self.downsampler(x, padding_mask.bool())
-        z = self.transformer(x)  # [B, T/C, 512]
+        hidden = self.transformer(x)  # [B, T/C, 512]
 
-        mu = self.mu(z)
+        mu = self.mu(hidden)
         logvar = None
         if hasattr(self, "logvar"):
-            logvar = self.logvar(z)
+            logvar = self.logvar(hidden)
         z = self.reparameterize(mu, logvar)
         assert not torch.isnan(z).any(), "z contains nan after reparameterization"
 
@@ -238,7 +238,7 @@ class ConvformerEncoder(SigmaVAEEncoder):
         durations, align_loss = None, None
         if self.config.use_aligner:
             z_pooled, durations, align_loss, pooled_mask = self.aligner(
-                z_spec=z.permute(0, 2, 1),
+                z_spec=hidden.detach().permute(0, 2, 1),
                 y_mask=(~padding_mask).unsqueeze(
                     1
                 ),  # NOTE: padding_mask logic 0 = valid, 1 = padding
