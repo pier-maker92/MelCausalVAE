@@ -202,7 +202,7 @@ class ConvformerEncoder(SigmaVAEEncoder):
             # )
             aligner_config = AlignerConfig(
                 z_dim=64,
-                hidden_dim=256,
+                proj_dim=256,
             )
             self.aligner = VitsAligner(aligner_config)
             self.upsampler = SimilarityUpsamplerBatch()
@@ -244,10 +244,10 @@ class ConvformerEncoder(SigmaVAEEncoder):
                 ),  # NOTE: padding_mask logic 0 = valid, 1 = padding
                 phonemes=phonemes,
             )
-            if kwargs.get("step", None) is not None:
-                align_loss = align_loss * self.get_aligner_cosine_schedule(
-                    kwargs["step"]
-                )
+            # if kwargs.get("step", None) is not None:
+            #     align_loss = align_loss * self.get_aligner_cosine_schedule(
+            #         kwargs["step"]
+            #     )
 
             # z = z_pooled.to(x.dtype)
             assert not torch.isnan(z).any(), "z contains nan after aligner"

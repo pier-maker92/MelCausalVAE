@@ -3,7 +3,6 @@ import math
 import torch
 import torch.nn as nn
 from typing import List
-from .utils import commons
 
 
 class PhonemeVocab:
@@ -89,14 +88,13 @@ class PositionalEncoding(nn.Module):
         return self.dropout(x)
 
 
-# Riutilizziamo le tue classi base
 class TextEncoder(nn.Module):
     def __init__(
         self,
         hidden_channels,
         n_heads,
         n_layers,
-        kernel_size,  # FIXME why this is not used?
+        kernel_size,  # Può essere ignorato/rimosso se si usa il Transformer di PyTorch
         p_dropout,
         output_dim: int,
         vocab_path: str,
@@ -107,12 +105,11 @@ class TextEncoder(nn.Module):
         self.hidden_channels = hidden_channels
         self.vocab = PhonemeVocab(vocab_path, parsing_mode)
 
-        # 1. Embedding (dal tuo codice)
+        # 1. Embedding
         self.emb = nn.Embedding(len(self.vocab.vocab), hidden_channels)
         nn.init.normal_(self.emb.weight, 0.0, hidden_channels**-0.5)
 
-        # 2. Encoder Transformer (Semplificato con implementazione PyTorch standard)
-        # In VITS reale si usa Relative Positional Encoding, qui uso Absolute per brevità
+        # 2. Encoder Transformer
         self.pos_encoder = PositionalEncoding(hidden_channels, p_dropout)
         encoder_layers = nn.TransformerEncoderLayer(
             d_model=hidden_channels,
@@ -125,33 +122,30 @@ class TextEncoder(nn.Module):
         self.encoder = nn.TransformerEncoder(encoder_layers, num_layers=n_layers)
 
         # 3. Proiezione Finale (Projection Layer)
-        # Proietta l'hidden state in Media e Log-Varianza
-        self.proj = nn.Conv1d(hidden_channels, self.out_channels * 2, 1)
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # ---> MODIFICA: Proietta direttamente in out_channels (niente più * 2 per logs_p)
+        self.proj = nn.Conv1d(hidden_channels, self.out_channels, 1)
 
     def forward(self, phonemes: List[str]):
-        """
-        x: [B, T_text] (Phoneme IDs)
-        """
-        x, x_mask = self.vocab(phonemes, self.device)
-        # # Creazione maschera per il padding
-        # # Nota: Transformer di PyTorch vuole maschera (True = ignora)
-        # # Qui costruiamo una maschera semplice per la convoluzione finale
-        # x_mask = torch.unsqueeze(commons.sequence_mask(x_lengths, x.size(1)), 1).to(
-        #     x.device
-        # )
+        # ---> MODIFICA: Prende la device dinamicamente dai pesi dell'embedding
+        device = self.emb.weight.device
+        
+        # x: [B, T_text], x_mask: [B, 1, T_text]
+        x, x_mask = self.vocab(phonemes, device)
 
         x = self.emb(x) * math.sqrt(self.hidden_channels)  # [B, T, H]
         x = self.pos_encoder(x)
+        
+        # TIP: Per far sì che l'attention ignori davvero il padding, dovresti 
+        # passare src_key_padding_mask all'encoder. Il formato atteso è True per il padding.
+        # padding_mask = (~x_mask.squeeze(1).bool())
+        # x = self.encoder(x, src_key_padding_mask=padding_mask)
+        
         x = self.encoder(x)
 
-        # Trasponi per convoluzione [B, T, H] -> [B, H, T]
+        # Trasponi per convoluzione: [B, T, H] -> [B, H, T]
         x = x.transpose(1, 2)
 
-        # Proiezione finale
-        stats = self.proj(x) * x_mask
+        # ---> MODIFICA: Proiezione finale per l'allineamento. È già l'output definitivo.
+        m = self.proj(x) * x_mask
 
-        # Split in Media e Log-Varianza
-        m, logs = torch.split(stats, self.out_channels, dim=1)
-
-        return m, logs, x_mask
+        return m, x_mask

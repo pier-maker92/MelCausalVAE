@@ -378,8 +378,8 @@ class VAEtrainer(Trainer):
         with torch.no_grad():
             results = self.model.encode_and_sample(
                 audios_srs=audios_srs,
-                num_steps=16,
-                temperature=1.0,
+                num_steps=8,
+                temperature=0.3,
                 guidance_scale=1.5,
                 hubert_guidance=hubert_guidance,
                 phonemes=phonemes,

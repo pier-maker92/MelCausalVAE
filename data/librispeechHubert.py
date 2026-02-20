@@ -16,7 +16,7 @@ from phonemizer import phonemize
 
 # import mel spec encoder
 mel_spec_encoder = MelSpectrogramEncoder(config=MelSpectrogramConfig())
-sep = Separator(phone=" ", word=" <sil> ", syllable=None)
+sep = Separator(phone=" ", word=" | ", syllable=None)
 
 
 def simple_collate_fn(batch):
