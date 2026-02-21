@@ -11,7 +11,7 @@ class ResidualCouplingLayer(nn.Module):
         kernel_size,
         n_layers,
         p_dropout=0.0,
-        dilation_rate: Optional[int] = None,  # FIXME why this is not used?
+        dilation_rate: Optional[int] = None,
     ):
         super().__init__()
         self.half_channels = channels // 2
@@ -58,19 +58,16 @@ class ResidualCouplingLayer(nn.Module):
         m, logs = torch.split(stats, [self.half_channels] * 2, 1)
 
         if not reverse:
-            # Forward: Training (Normalizing: Audio complesso -> Gaussiana semplice)
-            # x1 = (x1 - m) * exp(-logs)
-            x1 = (
-                (m - x1) * torch.exp(logs) * x_mask
-            )  # Implementazione VITS standard varia leggermente nel segno
+            # Forward (Normalizing): Audio complesso -> Gaussiana semplice
+            # Trasformazione affine: x1_new = (m - x1) * exp(logs)
+            # Jacobiano: df/dx1 = -exp(logs), log|det J| = sum(logs)
+            x1 = (m - x1) * torch.exp(logs) * x_mask
             x = torch.cat([x0, x1], 1)
-            logdet = torch.sum(logs, [1, 2])
+            logdet = torch.sum(logs * x_mask, [1, 2])
             return x, logdet
         else:
-            # Reverse: Inference (Generating: Gaussiana semplice -> Audio complesso)
-            # x1 = x1 * exp(-logs) + m (inversione della formula sopra)
-            # Nota: L'algebra esatta dipende dalla convenzione affine.
-            # Qui usiamo: x1_new = m - x1_old * exp(-logs)
-            x1 = m - x1 * torch.exp(-logs) * x_mask
+            # Reverse (Generative): Gaussiana semplice -> Audio complesso
+            # Inversione: x1 = m - x1_new * exp(-logs)
+            x1 = (m - x1 * torch.exp(-logs)) * x_mask
             x = torch.cat([x0, x1], 1)
             return x

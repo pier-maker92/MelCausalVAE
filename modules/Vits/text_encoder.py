@@ -96,7 +96,6 @@ class TextEncoder(nn.Module):
         hidden_channels,
         n_heads,
         n_layers,
-        kernel_size,  # FIXME why this is not used?
         p_dropout,
         output_dim: int,
         vocab_path: str,
@@ -127,13 +126,13 @@ class TextEncoder(nn.Module):
         # 3. Proiezione Finale (Projection Layer)
         # Proietta l'hidden state in Media e Log-Varianza
         self.proj = nn.Conv1d(hidden_channels, self.out_channels * 2, 1)
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     def forward(self, phonemes: List[str]):
         """
         x: [B, T_text] (Phoneme IDs)
         """
-        x, x_mask = self.vocab(phonemes, self.device)
+        device = next(self.parameters()).device
+        x, x_mask = self.vocab(phonemes, device)
         # # Creazione maschera per il padding
         # # Nota: Transformer di PyTorch vuole maschera (True = ignora)
         # # Qui costruiamo una maschera semplice per la convoluzione finale
