@@ -90,3 +90,12 @@ Thumbs.db
 # Logs
 *.log
 
+
+# Misc
+*.arrow
+
+
+#
+
+clean_cache_dir/*
+aws/*

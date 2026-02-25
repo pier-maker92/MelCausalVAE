@@ -121,6 +121,9 @@ class VAE(torch.nn.Module):
             self.decoder = DiT(config.decoder_config)
         elif config.decoder_config.decoder_type == "vae":
             self.decoder = DecoderVAE(config.decoder_config)
+        elif False:
+            pass
+        
         else:
             raise ValueError("Decoder type not supported")
         self.encoder = ConvformerEncoder(config.encoder_config)
