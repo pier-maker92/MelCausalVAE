@@ -13,6 +13,7 @@ from typing import Optional, List
 
 from modules.flash_attn_encoder import FlashTransformerEncoder
 from modules.downsampler import DownSampler
+from modules.resnet import LinearResNet as ResNet
 from modules.similarity import Aligner, SimilarityUpsamplerBatch
 
 from modules.Vits.aligner import Aligner as VitsAligner
@@ -40,6 +41,7 @@ class SigmaVAEencoderConfig:
     kl_loss_warmup_steps: int = 1000
     semantic_regulation: bool = True
     freeze_encoder: bool = False
+    semantic_kl_loss_weight: Optional[float] = None
 
 
 @dataclass
@@ -56,6 +58,9 @@ class ConvformerEncoderConfig(SigmaVAEencoderConfig):
     vocab_path: str = "data/vocab.json"
     use_aligner: bool = False
     threshold: float = 0.95
+    force_downsample: bool = False
+    split_route: bool = False
+    semantic_dim: Optional[int] = None
 
 
 class SigmaVAEEncoder(nn.Module):
@@ -66,6 +71,8 @@ class SigmaVAEEncoder(nn.Module):
             nn.Softplus() if self.config.use_sofplus else nn.Identity()
         )
         self.kl_loss_weight = float(config.kl_loss_weight)
+        if self.config.semantic_kl_loss_weight is not None:
+            self.semantic_kl_loss_weight = float(config.semantic_kl_loss_weight)
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         # self.semantic_regulator = InterpolateRegulator(
         #     depth=2, in_channels=1024, channels=256, out_channels=config.latent_dim
@@ -124,19 +131,19 @@ class SigmaVAEEncoder(nn.Module):
         )
         return padding_mask
 
-    def get_kl_cosine_schedule(self, step):
+    def get_kl_cosine_schedule(self, step, kl_loss_weight):
         """
         Returns the scaled KL loss weight following a cosine schedule
         ranging from 0 to self.kl_loss_weight over total_steps.
         Once step surpasses total_steps, stays at self.kl_loss_weight.
         """
         if self.config.kl_loss_warmup_steps == 0:
-            return self.kl_loss_weight
+            return kl_loss_weight
         if step >= self.config.kl_loss_warmup_steps:
-            return self.kl_loss_weight
+            return kl_loss_weight
         # Cosine schedule: start at 0, increase to kl_loss_weight in total_steps
         cosine = 0.5 * (1 - math.cos(math.pi * step / self.config.kl_loss_warmup_steps))
-        return self.kl_loss_weight * cosine
+        return kl_loss_weight * cosine
 
 
 class CausalTransformerTail(nn.Module):
@@ -162,30 +169,38 @@ class ConvformerEncoder(SigmaVAEEncoder):
         tf_layers = config.tf_layers
         drop_p = config.drop_p
         latent_dim = config.latent_dim
-        # n_residual_blocks = config.n_residual_blocks FIXME handle this
-        self.proj_in = nn.Linear(100, 512)
+        n_residual_blocks = config.n_residual_blocks
 
-        self.downsampler = DownSampler(
-            d_in=100,
-            d_hidden=512,
-            d_out=512,
-            compress_factor=compress_factor_C,
-            causal=True,
-        )
+        if config.force_downsample:
+            self.downsampler = DownSampler(
+                d_in=100,
+                d_hidden=512,
+                d_out=512,
+                compress_factor=compress_factor_C,
+                causal=True,
+            )
+        else:
+            self.downsampler = ResNet(
+                in_dim=100,
+                hidden_dim=512,
+                output_dim=512,
+                num_blocks=n_residual_blocks,
+            )
 
         # Causal Transformer tail operating on tokens of size 512
         self.transformer = CausalTransformerTail(
-            d_model=512, nheads=tf_heads, nlayers=tf_layers, drop_p=drop_p
+            d_model=64, nheads=tf_heads, nlayers=tf_layers, drop_p=drop_p
         )
 
         self.mu = nn.Linear(512, latent_dim)
         if config.logvar_layer:
             self.logvar = nn.Linear(512, latent_dim)
 
+        if config.split_route:
+            self.semantic_mu = nn.Linear(512, config.semantic_dim)
+            self.semantic_logvar = nn.Linear(512, config.semantic_dim)
+
         if config.use_aligner:
-            # self.aligner = Aligner(
-            #     threshold=config.threshold,
-            # )
             aligner_config = AlignerConfig(z_dim=64, hidden_dim=512)
             self.aligner = VitsAligner(aligner_config)
             self.upsampler = SimilarityUpsamplerBatch()
@@ -201,42 +216,68 @@ class ConvformerEncoder(SigmaVAEEncoder):
         x: torch.FloatTensor,
         phonemes: List[str],
         padding_mask: Optional[torch.BoolTensor] = None,
-        inference: bool = False,
         **kwargs,
     ):  # x: [B, T, 100]
 
         target_T = (~padding_mask).sum(dim=1)
         original_padding_mask = padding_mask.clone()
         x, padding_mask = self.downsampler(x, padding_mask.bool())
-        z = self.transformer(x)  # [B, T/C, 512]
+        x = self.transformer(x)  # [B, T/C, 512]
 
-        mu = self.mu(z)
+        mu = self.mu(x)
         logvar = None
         if hasattr(self, "logvar"):
-            logvar = self.logvar(z)
+            logvar = self.logvar(x)
         z = self.reparameterize(mu, logvar)
         assert not torch.isnan(z).any(), "z contains nan after reparameterization"
+
+        if self.config.split_route:
+            semantic_mu = self.semantic_mu(x)
+            semantic_logvar = None
+            if hasattr(self, "semantic_logvar"):
+                semantic_logvar = self.semantic_logvar(x)
+            semantic_z = self.reparameterize(semantic_mu, semantic_logvar)
+            assert not torch.isnan(
+                semantic_z
+            ).any(), "semantic_z contains nan after reparameterization"
 
         # get alignement
         durations, align_loss = None, None
         if self.config.use_aligner:
+            if self.config.split_route:
+                z_spec = semantic_mu.permute(0, 2, 1)
+            else:
+                z_spec = mu.detach().permute(0, 2, 1)
             z_aligned, durations, align_loss, aligned_padding_mask = self.aligner(
-                z_spec=mu.detach().permute(0, 2, 1),
+                z_spec=z_spec,
                 y_mask=(~padding_mask).unsqueeze(
                     1
                 ),  # NOTE: padding_mask logic 0 = valid, 1 = padding
                 phonemes=phonemes,
             )
-            z_aligned = z_aligned
             print(durations[0, :10])
             align_loss = align_loss * 0.01
-            assert not torch.isnan(z).any(), "z contains nan after aligner"
+            assert not torch.isnan(
+                z_aligned
+            ).any(), "z_aligned contains nan after aligner"
 
         kl_loss = None
         if kwargs.get("step", None) is not None:
             kl_loss = self.kl_divergence(
                 mu, logvar, padding_mask
-            ) * self.get_kl_cosine_schedule(kwargs["step"])
+            ) * self.get_kl_cosine_schedule(
+                kwargs["step"], kl_loss_weight=self.kl_loss_weight
+            )
+
+        if self.config.split_route:
+            semantic_kl_loss = self.kl_divergence(
+                semantic_mu, semantic_logvar, padding_mask
+            ) * self.get_kl_cosine_schedule(
+                kwargs["step"], kl_loss_weight=self.semantic_kl_loss_weight
+            )
+            kl_loss = kl_loss + semantic_kl_loss
+            z = z.mean(dim=1, keepdim=True).repeat(1, semantic_z.shape[1], 1)
+            z = torch.cat([z, semantic_z], dim=-1)
 
         # if self.config.use_aligner:
         #     z_upsampled, upsampled_padding_mask = self.upsampler(

@@ -13,5 +13,7 @@ convformer:
   use_aligner: false
   freeze_encoder: false
   threshold: null
+  force_downsample: false
+  split_route: false
 
 
