@@ -224,14 +224,14 @@ class ConvformerEncoder(SigmaVAEEncoder):
         x, padding_mask = self.downsampler(x, padding_mask.bool())
         x = self.transformer(x)  # [B, T/C, 512]
 
-        mu = self.mu(x)
-        logvar = None
-        if hasattr(self, "logvar"):
-            logvar = self.logvar(x)
-        z = self.reparameterize(mu, logvar)
-        assert not torch.isnan(z).any(), "z contains nan after reparameterization"
-
         if self.config.split_route:
+            mu = self.mu(x.mean(dim=1, keepdim=True))
+            logvar = None
+            if hasattr(self, "logvar"):
+                logvar = self.logvar(x.mean(dim=1, keepdim=True))
+            z = self.reparameterize(mu, logvar)
+            assert not torch.isnan(z).any(), "z contains nan after reparameterization"
+
             semantic_mu = self.semantic_mu(x)
             semantic_logvar = None
             if hasattr(self, "semantic_logvar"):
@@ -240,6 +240,13 @@ class ConvformerEncoder(SigmaVAEEncoder):
             assert not torch.isnan(
                 semantic_z
             ).any(), "semantic_z contains nan after reparameterization"
+        else:
+            mu = self.mu(x)
+            logvar = None
+            if hasattr(self, "logvar"):
+                logvar = self.logvar(x)
+            z = self.reparameterize(mu, logvar)
+            assert not torch.isnan(z).any(), "z contains nan after reparameterization"
 
         # get alignement
         durations, align_loss = None, None
@@ -268,8 +275,6 @@ class ConvformerEncoder(SigmaVAEEncoder):
             ) * self.get_kl_cosine_schedule(
                 kwargs["step"], kl_loss_weight=self.kl_loss_weight
             )
-
-        if self.config.split_route:
             semantic_kl_loss = self.kl_divergence(
                 semantic_mu, semantic_logvar, padding_mask
             ) * self.get_kl_cosine_schedule(
@@ -279,12 +284,6 @@ class ConvformerEncoder(SigmaVAEEncoder):
             z = z.mean(dim=1, keepdim=True).repeat(1, semantic_z.shape[1], 1)
             z = torch.cat([z, semantic_z], dim=-1)
 
-        # if self.config.use_aligner:
-        #     z_upsampled, upsampled_padding_mask = self.upsampler(
-        #         z, durations * self.config.compress_factor_C, target_T
-        #     )
-        #     upsampled_padding_mask = upsampled_padding_mask.bool()
-        # else:
         z_upsampled, upsampled_padding_mask = (
             torch.repeat_interleave(z, self.config.compress_factor_C, dim=1),
             original_padding_mask,
