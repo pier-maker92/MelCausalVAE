@@ -21,32 +21,32 @@ def plot_durations_on_mel(
     dur = durations[batch_idx, : text_length[batch_idx]].detach().float().cpu().numpy()
 
     positions = dur.cumsum()
-    fig, (ax_mel, ax_dur) = plt.subplots(2, 1, figsize=(16, 6))
+    fig, ax = plt.subplots(1, 1, figsize=(16, 4))
 
-    ax_mel.imshow(mel, origin="lower", aspect="auto")
-    ax_mel.set_xlim(0, mel.shape[1])
+    ax.imshow(mel, origin="lower", aspect="auto")
+    ax.set_xlim(0, mel.shape[1])
     for pos in positions:
-        ax_mel.axvline(pos, color="white", linestyle="--", linewidth=0.8, alpha=0.7)
+        ax.axvline(pos, color="white", linestyle="--", linewidth=0.8, alpha=0.7)
 
-    ax_mel.set_ylabel("Mel bin")
-    ax_mel.set_title(f"Sample {batch_idx} - Step {step} - Device {device_id}")
-    ax_mel.set_xticks([])
+    # Place phoneme labels at the midpoint of each duration segment
+    seg_labels = labels[: len(dur)] if labels else [str(i) for i in range(len(dur))]
+    starts = [0] + list(positions[:-1])
+    for start, end, lbl in zip(starts, positions, seg_labels):
+        mid = (start + end) / 2.0
+        ax.text(
+            mid,
+            mel.shape[0] * 0.05,
+            str(lbl),
+            color="white",
+            fontsize=7,
+            ha="center",
+            va="bottom",
+            bbox=dict(facecolor="black", alpha=0.5, pad=1, edgecolor="none"),
+        )
 
-    norm_dur = (dur - dur.min()) / (dur.max() - dur.min() + 1e-8) * 0.7 + 0.3
-    ax_dur.bar(
-        range(len(dur)),
-        dur,
-        color=plt.cm.Blues(norm_dur),
-        edgecolor="black",
-        linewidth=0.5,
-    )
-    ax_dur.set_xlabel("z position")
-    ax_dur.set_ylabel("Duration (frames)")
-    ax_dur.set_xlim(-0.5, len(dur) - 0.5)
-    ax_dur.set_xticks(range(len(dur)))
-    ax_dur.set_xticklabels(
-        labels[: len(dur)] if labels else range(len(dur)), rotation=0, ha="right"
-    )
+    ax.set_ylabel("Mel bin")
+    ax.set_title(f"Sample {batch_idx} - Step {step} - Device {device_id}")
+    ax.set_xticks([])
 
     plt.tight_layout()
     return fig

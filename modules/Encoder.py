@@ -189,7 +189,7 @@ class ConvformerEncoder(SigmaVAEEncoder):
 
         # Causal Transformer tail operating on tokens of size 512
         self.transformer = CausalTransformerTail(
-            d_model=64, nheads=tf_heads, nlayers=tf_layers, drop_p=drop_p
+            d_model=512, nheads=tf_heads, nlayers=tf_layers, drop_p=drop_p
         )
 
         self.mu = nn.Linear(512, latent_dim)
@@ -199,9 +199,10 @@ class ConvformerEncoder(SigmaVAEEncoder):
         if config.split_route:
             self.semantic_mu = nn.Linear(512, config.semantic_dim)
             self.semantic_logvar = nn.Linear(512, config.semantic_dim)
+            self.final_projection = nn.Linear(latent_dim + config.semantic_dim, latent_dim)
 
         if config.use_aligner:
-            aligner_config = AlignerConfig(z_dim=64, hidden_dim=512)
+            aligner_config = AlignerConfig(z_dim=config.latent_dim, hidden_dim=512)
             self.aligner = VitsAligner(aligner_config)
             self.upsampler = SimilarityUpsamplerBatch()
 
@@ -252,9 +253,10 @@ class ConvformerEncoder(SigmaVAEEncoder):
         durations, align_loss = None, None
         if self.config.use_aligner:
             if self.config.split_route:
-                z_spec = semantic_mu.permute(0, 2, 1)
+                z_spec = semantic_mu.detach().permute(0, 2, 1)
             else:
                 z_spec = mu.detach().permute(0, 2, 1)
+
             z_aligned, durations, align_loss, aligned_padding_mask = self.aligner(
                 z_spec=z_spec,
                 y_mask=(~padding_mask).unsqueeze(
@@ -270,24 +272,32 @@ class ConvformerEncoder(SigmaVAEEncoder):
 
         kl_loss = None
         if kwargs.get("step", None) is not None:
+            kl_padding = padding_mask if not self.config.split_route else padding_mask[:,:1]
             kl_loss = self.kl_divergence(
-                mu, logvar, padding_mask
+                mu, logvar, kl_padding
             ) * self.get_kl_cosine_schedule(
                 kwargs["step"], kl_loss_weight=self.kl_loss_weight
             )
-            semantic_kl_loss = self.kl_divergence(
-                semantic_mu, semantic_logvar, padding_mask
-            ) * self.get_kl_cosine_schedule(
-                kwargs["step"], kl_loss_weight=self.semantic_kl_loss_weight
-            )
-            kl_loss = kl_loss + semantic_kl_loss
+            if self.config.split_route:
+                semantic_kl_loss = self.kl_divergence(
+                    semantic_mu, semantic_logvar, padding_mask
+                ) * self.get_kl_cosine_schedule(
+                    kwargs["step"], kl_loss_weight=self.semantic_kl_loss_weight
+                )
+                kl_loss = kl_loss + semantic_kl_loss
+
+        if self.config.split_route:
             z = z.mean(dim=1, keepdim=True).repeat(1, semantic_z.shape[1], 1)
             z = torch.cat([z, semantic_z], dim=-1)
 
-        z_upsampled, upsampled_padding_mask = (
-            torch.repeat_interleave(z, self.config.compress_factor_C, dim=1),
-            original_padding_mask,
-        )
+
+        if not self.config.split_route:
+            z_upsampled, upsampled_padding_mask = (
+                torch.repeat_interleave(z, self.config.compress_factor_C, dim=1),
+                original_padding_mask,
+            )
+        else:
+            z_upsampled, upsampled_padding_mask =z, original_padding_mask
 
         return ConvformerOutput(
             z=z,
