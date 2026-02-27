@@ -15,5 +15,7 @@ convformer:
   threshold: null
   force_downsample: false
   split_route: false
+  semantic_dim: null
+  semantic_kl_loss_weight: null
 
 
