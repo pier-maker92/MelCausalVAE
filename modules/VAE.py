@@ -146,53 +146,6 @@ class VAE(torch.nn.Module):
         self.load_state_dict(state_dict, strict=False)
         print(f"Loaded checkpoint from {checkpoint_path}")
 
-    def repeat_tokens(self, z, durations):
-        return torch.nn.utils.rnn.pad_sequence(
-            [
-                torch.repeat_interleave(z[i], d, dim=0)
-                for i, d in enumerate(durations.round().long())
-            ],
-            batch_first=True,
-        )
-
-    def soft_upsampling(self, z, durations, compress_factor_C):
-        """
-        z: [B, T_phonemes, D] - I tuoi vettori latenti
-        durations: [B, T_phonemes] - Durate float estratte sopra
-        """
-        B, T_p, D = z.shape
-        device = z.device
-
-        # 1. Scala le durate per il fattore di compressione (es. 25Hz -> 80Hz)
-        scaled_durations = durations * compress_factor_C
-
-        # 2. Trova i centri di ogni fonema nel tempo target (mel-scale)
-        # Calcoliamo i punti di fine e poi il centro
-        ends = torch.cumsum(scaled_durations, dim=-1)
-        starts = ends - scaled_durations
-        centers = (starts + ends) / 2.0  # [B, T_p]
-
-        # 3. Determina quanti frame totali generare
-        T_f = torch.round(ends[:, -1].max()).long()
-
-        # 4. Crea una griglia di frame: [T_f]
-        grid_f = torch.arange(T_f, device=device).float().view(1, 1, T_f)  # [1, 1, T_f]
-
-        # 5. Gaussian Upsampling: calcola la vicinanza di ogni frame a ogni centro di fonema
-        # Usiamo una sigma fissa (es. 0.5) per controllare la "morbidezza" del passaggio tra fonemi
-        sigma = 0.5
-        dist = (grid_f - centers.unsqueeze(-1)) ** 2  # [B, T_p, T_f]
-
-        # W è la nostra matrice di upsampling differenziabile
-        # Per ogni frame (dim=1), facciamo una softmax sui fonemi
-        W = torch.nn.functional.softmax(-dist / (2 * sigma**2), dim=1)
-        W = W.to(dtype=z.dtype)
-
-        # 6. Applica la matrice a z: [B, T_f, D]
-        upsampled_z = torch.bmm(W.transpose(1, 2), z)
-
-        return upsampled_z
-
     def forward(self, audios_srs, **kwargs):
         encoded_audios = self.wav2mel(audios_srs)
 
@@ -204,6 +157,8 @@ class VAE(torch.nn.Module):
             padding_mask=encoded_audios.padding_mask,
             step=kwargs.get("training_step", None),
             phonemes=kwargs.get("phonemes", None),
+            transcription=kwargs.get("transcription", None),
+            audios_srs=audios_srs,
         )
         audio_loss = self.decoder(
             target=x,
@@ -239,6 +194,7 @@ class VAE(torch.nn.Module):
         generator: Optional[torch.Generator] = None,
         hubert_guidance: Optional[torch.Tensor] = None,
         phonemes: Optional[list] = None,
+        **kwargs,
     ):
         """
         Encode audio to latent space and generate mel spectrogram.
@@ -255,13 +211,10 @@ class VAE(torch.nn.Module):
             step=None,
             phonemes=phonemes,
             inference=True,
+            audios_srs=audios_srs,
+            transcription=kwargs.get("transcription", None),
         )
-        durations = None
-        if self.config.encoder_config.use_aligner:
-            durations = (
-                convformer_output.durations
-                * self.config.encoder_config.compress_factor_C
-            )
+        durations = convformer_output.durations
         # Generate mel spectrogram from latent
         reconstructed_mel = self.decoder.generate(
             num_steps=num_steps,

@@ -5,19 +5,21 @@ import random
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import math
 import torch
+import torchaudio
 import torch.nn as nn
 from einops import rearrange
 from dataclasses import dataclass
 from typing import Optional, List
-
+from bournemouth_aligner import PhonemeTimestampAligner
 
 from modules.flash_attn_encoder import FlashTransformerEncoder
-from modules.downsampler import DownSampler
 from modules.resnet import LinearResNet as ResNet
-from modules.similarity import Aligner, SimilarityUpsamplerBatch
+from modules.downsampler import DownSampler
 
-from modules.Vits.aligner import Aligner as VitsAligner
-from modules.Vits.aligner import AlignerConfig
+# from modules.similarity import Aligner, SimilarityUpsamplerBatch
+
+# from modules.Vits.aligner import Aligner as VitsAligner
+# from modules.Vits.aligner import AlignerConfig
 
 
 @dataclass
@@ -199,7 +201,9 @@ class ConvformerEncoder(SigmaVAEEncoder):
         if config.split_route:
             self.semantic_mu = nn.Linear(512, config.semantic_dim)
             self.semantic_logvar = nn.Linear(512, config.semantic_dim)
-            self.final_projection = nn.Linear(latent_dim + config.semantic_dim, latent_dim)
+            self.final_projection = nn.Linear(
+                latent_dim + config.semantic_dim, latent_dim
+            )
 
         if config.use_aligner:
             aligner_config = AlignerConfig(z_dim=config.latent_dim, hidden_dim=512)
@@ -211,6 +215,104 @@ class ConvformerEncoder(SigmaVAEEncoder):
                 if name.split(".")[0] in ["mu", "logvar", "aligner", "upsampler"]:
                     continue
                 param.requires_grad = False
+        self.extractor = PhonemeTimestampAligner(
+            preset="en-us",
+            duration_max=30,
+            device="cuda",
+            enforce_all_targets=True,
+            silence_anchors=0,
+            boundary_softness=2,
+        )
+        self.resampler = torchaudio.transforms.Resample(
+            orig_freq=24000, new_freq=16000
+        ).to(self.mu.weight.device)
+
+    def build_alignment_matrix(self, all_frames_assorted):
+        """
+        Build binary monotonic alignment matrices for a batch of utterances.
+
+        Each matrix's columns are derived from the contiguous runs in the
+        corresponding *frames_assorted*, including runs of -1 (gaps).
+        Every row has exactly one 1.
+
+        Args:
+            all_frames_assorted: list of lists — each inner list contains
+                                phoneme IDs per frame (length T_i).
+                                -1 represents an unaligned gap / silence.
+
+        Returns:
+            results: list of (alignment_matrix, segment_ids) tuples.
+                    alignment_matrix: torch.Tensor (T_i, N_i), float32, binary.
+                    segment_ids:      list[int] of length N_i.
+        """
+        results = []
+        for frames_assorted in all_frames_assorted:
+            T = len(frames_assorted)
+            if T == 0:
+                results.append((torch.empty((0, 0), dtype=torch.float32), []))
+                continue
+
+            # Identify contiguous runs (same logic as compress_frames)
+            segments = []  # (phoneme_id, start_frame, end_frame)
+            current_id = frames_assorted[0]
+            start = 0
+            for i in range(1, T):
+                if frames_assorted[i] != current_id:
+                    segments.append((current_id, start, i))
+                    current_id = frames_assorted[i]
+                    start = i
+            segments.append((current_id, start, T))
+
+            N = len(segments)
+            alignment = torch.zeros((T, N), dtype=torch.float32)
+            segment_ids = []
+
+            for col, (ph_id, s, e) in enumerate(segments):
+                alignment[s:e, col] = 1.0
+                segment_ids.append(ph_id)
+
+            # results.append((alignment, segment_ids))
+            results.append(alignment)
+
+        return results
+
+    def get_ctc_alignement(self, transcriptions, audios, frames_durations):
+        batch_results = self.extractor.process_sentences_batch(transcriptions, audios)
+        all_frames_assorted = []
+        for result, total_frames in zip(batch_results, frames_durations):
+            seg = result["segments"][0]
+            # Mel spectrogram for this segment
+            s = int(seg["start"] * self.extractor.resampler_sample_rate)
+            e = int(seg["end"] * self.extractor.resampler_sample_rate)
+
+            # Framewise assortment
+            duration = seg["end"] - seg["start"]
+            fps = total_frames / duration
+            frames = self.extractor.framewise_assortment(
+                aligned_ts=seg["phoneme_ts"],
+                total_frames=total_frames,
+                frames_per_second=fps,
+                gap_contraction=75,
+                select_key="phoneme_id",
+            )
+            all_frames_assorted.append(frames)
+        alignements = self.build_alignment_matrix(all_frames_assorted)
+
+        # Pad to (max_T, max_N) and stack into a batched tensor [B, max_T, max_N]
+        max_T = max(a.shape[0] for a in alignements)
+        max_N = max(a.shape[1] for a in alignements)
+        padded = torch.zeros(len(alignements), max_T, max_N, dtype=torch.float32)
+        phonemes_lengths = torch.tensor(
+            [a.shape[1] for a in alignements], dtype=torch.long
+        )
+        for i, a in enumerate(alignements):
+            padded[i, : a.shape[0], : a.shape[1]] = a
+
+        phoneme_mask = torch.ones((len(alignements), max_N), dtype=torch.bool)
+        for i, length in enumerate(phonemes_lengths):
+            phoneme_mask[i, :length] = False
+
+        return padded, phoneme_mask, padded.sum(1)
 
     def forward(
         self,
@@ -225,79 +327,48 @@ class ConvformerEncoder(SigmaVAEEncoder):
         x, padding_mask = self.downsampler(x, padding_mask.bool())
         x = self.transformer(x)  # [B, T/C, 512]
 
-        if self.config.split_route:
-            mu = self.mu(x.mean(dim=1, keepdim=True))
-            logvar = None
-            if hasattr(self, "logvar"):
-                logvar = self.logvar(x.mean(dim=1, keepdim=True))
-            z = self.reparameterize(mu, logvar)
-            assert not torch.isnan(z).any(), "z contains nan after reparameterization"
+        # resample to 16KHz and run CTC alignment
+        # Wrap in autocast to handle dtype mismatch (model is bf16 but audio is fp32)
+        # During training autocast is already active (no-op); during eval this provides it
+        with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
+            audios = [
+                self.resampler(audio[0]).unsqueeze(0) for audio in kwargs["audios_srs"]
+            ]
+            alignements, padding_mask, durations = self.get_ctc_alignement(
+                kwargs["transcription"], audios, target_T
+            )
+        alignements = alignements.to(dtype=x.dtype, device=x.device)
+        durations = durations.to(dtype=x.dtype, device=x.device)
+        x = torch.bmm(alignements.permute(0, 2, 1), x)
+        x = x / (durations.unsqueeze(-1) + 1e-8)
+        phoneme_lengths = (~padding_mask).sum(dim=1)
+        # durations = [d[: phoneme_lengths[i]].long() for i, d in enumerate(durations)]
 
-            semantic_mu = self.semantic_mu(x)
-            semantic_logvar = None
-            if hasattr(self, "semantic_logvar"):
-                semantic_logvar = self.semantic_logvar(x)
-            semantic_z = self.reparameterize(semantic_mu, semantic_logvar)
-            assert not torch.isnan(
-                semantic_z
-            ).any(), "semantic_z contains nan after reparameterization"
-        else:
-            mu = self.mu(x)
-            logvar = None
-            if hasattr(self, "logvar"):
-                logvar = self.logvar(x)
-            z = self.reparameterize(mu, logvar)
-            assert not torch.isnan(z).any(), "z contains nan after reparameterization"
+        if self.config.split_route:
+            raise NotImplementedError("split route not implemented yet")
+
+        mu = self.mu(x)
+        logvar = None
+        if hasattr(self, "logvar"):
+            logvar = self.logvar(x)
+        z = self.reparameterize(mu, logvar)
+        assert not torch.isnan(z).any(), "z contains nan after reparameterization"
 
         # get alignement
-        durations, align_loss = None, None
-        if self.config.use_aligner:
-            if self.config.split_route:
-                z_spec = semantic_mu.detach().permute(0, 2, 1)
-            else:
-                z_spec = mu.detach().permute(0, 2, 1)
-
-            z_aligned, durations, align_loss, aligned_padding_mask = self.aligner(
-                z_spec=z_spec,
-                y_mask=(~padding_mask).unsqueeze(
-                    1
-                ),  # NOTE: padding_mask logic 0 = valid, 1 = padding
-                phonemes=phonemes,
-            )
-            print(durations[0, :10])
-            align_loss = align_loss * 0.01
-            assert not torch.isnan(
-                z_aligned
-            ).any(), "z_aligned contains nan after aligner"
+        align_loss = None
 
         kl_loss = None
         if kwargs.get("step", None) is not None:
-            kl_padding = padding_mask if not self.config.split_route else padding_mask[:,:1]
             kl_loss = self.kl_divergence(
-                mu, logvar, kl_padding
+                mu, logvar, padding_mask
             ) * self.get_kl_cosine_schedule(
                 kwargs["step"], kl_loss_weight=self.kl_loss_weight
             )
-            if self.config.split_route:
-                semantic_kl_loss = self.kl_divergence(
-                    semantic_mu, semantic_logvar, padding_mask
-                ) * self.get_kl_cosine_schedule(
-                    kwargs["step"], kl_loss_weight=self.semantic_kl_loss_weight
-                )
-                kl_loss = kl_loss + semantic_kl_loss
 
-        if self.config.split_route:
-            z = z.mean(dim=1, keepdim=True).repeat(1, semantic_z.shape[1], 1)
-            z = torch.cat([z, semantic_z], dim=-1)
-
-
-        if not self.config.split_route:
-            z_upsampled, upsampled_padding_mask = (
-                torch.repeat_interleave(z, self.config.compress_factor_C, dim=1),
-                original_padding_mask,
-            )
-        else:
-            z_upsampled, upsampled_padding_mask =z, original_padding_mask
+        z_upsampled, upsampled_padding_mask = (
+            torch.bmm(alignements, z),
+            original_padding_mask,
+        )
 
         return ConvformerOutput(
             z=z,
