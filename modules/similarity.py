@@ -28,15 +28,23 @@ def plot_durations_on_mel(
     for pos in positions:
         ax.axvline(pos, color="white", linestyle="--", linewidth=0.8, alpha=0.7)
 
+    # Normalise labels: accept both plain strings and dicts with a 'phoneme' key
+    if labels:
+        seg_labels = [
+            lbl["phoneme"] if isinstance(lbl, dict) else str(lbl)
+            for lbl in labels[: len(dur)]
+        ]
+    else:
+        seg_labels = [str(i) for i in range(len(dur))]
+
     # Place phoneme labels at the midpoint of each duration segment
-    seg_labels = labels[: len(dur)] if labels else [str(i) for i in range(len(dur))]
     starts = [0] + list(positions[:-1])
     for start, end, lbl in zip(starts, positions, seg_labels):
         mid = (start + end) / 2.0
         ax.text(
             mid,
             mel.shape[0] * 0.05,
-            str(lbl),
+            lbl,
             color="white",
             fontsize=7,
             ha="center",

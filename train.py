@@ -31,6 +31,7 @@ from data.mls import MLSDataset
 from data.libri_tts import LibriTTS
 from data.librispeechHubert import LibriSpeech100h
 from data.audio_dataset import TrainDatasetWrapper
+from data.librispeech_align import LibriSpeechAlignDataset
 from data.audio_dataset import DataCollator, HubertDatasetWrapper
 
 
@@ -41,31 +42,6 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
-
-
-def get_phonemes(phonemes: List[str], parsing_mode: str = "phoneme"):
-    """
-    Convert transcripts to phoneme tokens.
-    Returns: List[B] of List[phoneme]
-    """
-    phonemes_batch = []
-    for phoneme_str in phonemes:
-        phoneme_str = f"<sil> {phoneme_str} <sil>"
-
-        if parsing_mode == "phoneme":
-            tokens = phoneme_str.split()
-        elif parsing_mode == "char":
-            tokens = []
-            for p in phoneme_str.split():
-                if p == "<sil>":
-                    tokens.append(p)
-                else:
-                    tokens.extend(list(p))
-        else:
-            raise ValueError(f"Unknown parsing mode: {parsing_mode}")
-
-        phonemes_batch.append(tokens)
-    return phonemes_batch
 
 
 def get_cosine_schedule_with_warmup_and_min_lr(
@@ -388,10 +364,6 @@ class VAEtrainer(Trainer):
                 phonemes=phonemes,
                 transcription=transcription,
             )
-
-        if phonemes is not None:
-            phonemes = get_phonemes(phonemes)
-
         device_id = (
             torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
         )
@@ -614,17 +586,21 @@ def main():
     logger.info(f"Using device: {device}")
 
     # Create AudioDataset
+    phoneme_parsing_mode = training_cfg.pop(
+        "phoneme_parsing_mode", "phoneme"
+    )  # FIXME deprecated
+    vocab_path = training_cfg.pop("vocab_path", "data/vocab.json")  # FIXME deprecated
     dataset_name = training_cfg.pop("dataset_name", None)
     if dataset_name == "mls":
         dataset = MLSDataset()
     elif dataset_name == "libritts":
         dataset = LibriTTS()
     elif dataset_name == "librispeech100h":
-        phoneme_parsing_mode = training_cfg.pop("phoneme_parsing_mode", "phoneme")
-        vocab_path = training_cfg.pop("vocab_path", "data/vocab.json")
         dataset = LibriSpeech100h(
             phoneme_parsing_mode=phoneme_parsing_mode, vocab_path=vocab_path
         )
+    elif dataset_name == "librispeech-align":
+        dataset = LibriSpeechAlignDataset()
     else:
         raise ValueError(f"Dataset {dataset_name} not supported")
     hubert_guidance = training_cfg.pop("hubert_guidance", False)
