@@ -233,5 +233,6 @@ class VAE(torch.nn.Module):
             "reconstructed_mel": reconstructed_mel,
             "durations": durations,
             "padding_mask": encoded_audios.padding_mask,
+            "segment_labels": convformer_output.segment_labels,
         }
         return result

@@ -60,9 +60,7 @@ class DiT(torch.nn.Module):
         self.learned_prior = config.learned_prior
         self.is_causal = config.is_causal
         print(f"VAE is_causal: {self.is_causal}")
-        self.context_vector_proj = nn.Sequential(
-            nn.Linear(self.audio_latent_dim, self.unet_dim), nn.LayerNorm(self.unet_dim)
-        )
+        self.context_vector_proj = nn.Linear(self.audio_latent_dim, self.unet_dim)
         # hubert norm
         self.hubert_norm = nn.LayerNorm(self.audio_latent_dim)
         # hubert + context projection
@@ -74,20 +72,14 @@ class DiT(torch.nn.Module):
         )
         # noise projection
         if self.learned_prior:
-            self.noise_proj = nn.Sequential(
-                nn.Linear(self.mel_channels, self.unet_dim),
-                nn.LayerNorm(self.unet_dim),
-            )
+            self.noise_proj = nn.Linear(self.mel_channels, self.unet_dim)
             self.prior_proj = nn.Sequential(
                 nn.Linear(self.audio_latent_dim, self.mel_channels),
                 nn.LayerNorm(self.mel_channels),
             )
 
         else:
-            self.noise_proj = nn.Sequential(
-                nn.Linear(self.unet_dim + self.mel_channels, self.unet_dim),
-                nn.LayerNorm(self.unet_dim),
-            )
+            self.noise_proj = nn.Linear(self.mel_channels, self.unet_dim)
 
         # transformer
         self.transformer = Transformer(
@@ -152,7 +144,7 @@ class DiT(torch.nn.Module):
         # target is the original signal minus the noise
         target = target - (1 - self.sigma) * x0
 
-        state = self.noise_proj(torch.cat([context_vector, w], dim=-1))
+        state = self.noise_proj(w) + context_vector
         return state, times, target
 
     def let_it_flow(
@@ -282,7 +274,7 @@ class DiT(torch.nn.Module):
         attention_mask: Optional[torch.BoolTensor] = None,
     ):
         times = times.repeat(state.shape[0])
-        cond_state = self.noise_proj(torch.cat([context_vector, state], dim=-1))
+        cond_state = self.noise_proj(state) + context_vector
 
         cond_out = self.transformer(
             x=cond_state,
@@ -291,9 +283,7 @@ class DiT(torch.nn.Module):
         )
         if cfg_scale == 1.0:
             return cond_out
-        uncond_state = self.noise_proj(
-            torch.cat([torch.zeros_like(context_vector), state], dim=-1)
-        )
+        uncond_state = self.noise_proj(state) + torch.zeros_like(context_vector)
 
         uncond_out = self.transformer(
             x=uncond_state,

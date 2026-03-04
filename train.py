@@ -389,13 +389,14 @@ class VAEtrainer(Trainer):
             plt.close(fig)
 
             if results["durations"] is not None:
+                seg_labels = results.get("segment_labels")
                 fig = plot_durations_on_mel(
                     batch_idx=idx,
                     step=self.state.global_step,
                     mels=results["original_mel"],
                     durations=results["durations"],
-                    text_length=[len(p) for p in phonemes],
-                    labels=phonemes[idx],
+                    text_length=[len(sl) for sl in seg_labels] if seg_labels else [len(p) for p in phonemes],
+                    labels=seg_labels[idx] if seg_labels else phonemes[idx],
                     device_id=device_id,
                     mel_mask=results["padding_mask"],
                 )
@@ -614,7 +615,7 @@ def main():
         dataset, "train", hubert_guidance=hubert_guidance, phonemes=phonemes
     )
     test_dataset = TrainDatasetWrapper(
-        dataset, "train", hubert_guidance=hubert_guidance, phonemes=phonemes
+        dataset, "test", hubert_guidance=hubert_guidance, phonemes=phonemes
     )
 
     # handle wandb - only initialize on main process (rank 0)

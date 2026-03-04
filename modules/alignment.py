@@ -5,48 +5,150 @@ AlignmentMatrixBuilder — Converts phoneme-level timestamp alignments
 Uses MelSpectrogramConfig for the exact time-to-frame mapping:
     frames_per_second = sampling_rate / hop_length   (e.g. 24000/256 = 93.75 Hz)
 
-Gap-filling follows a contraction strategy (adapted from framewise_assortment):
+Alignment strategy:
   - Stage 1: map each phoneme interval to frames with ±1 frame tolerance.
-  - Stage 2: contract remaining gaps from both sides using neighbouring labels,
-             controlled by `gap_contraction` (in frames).
-  - Stage 3: any still-uncovered frames are flood-filled from the nearest
-             assigned neighbour so that every row of the matrix has exactly one 1.
+  - Stage 2: any remaining unassigned frames (discontinuity gaps) are labelled
+             with the special GAP_TOKEN so they appear as their own segment
+             in the alignment matrix.
+
+Includes a dynamic phoneme vocabulary and an nn.Embedding layer so that
+segment labels can be converted to dense vectors.
 """
 
 import math
-from typing import List, Optional, Tuple
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple
 
 import torch
+import torch.nn as nn
 
 from modules.melspecEncoder import MelSpectrogramConfig
 
+# Special token used for frames that fall in alignment gaps.
+GAP_TOKEN = "<GAP>"
+# Padding token for label-ID tensors.
+PAD_TOKEN = "<PAD>"
 
-class AlignmentMatrixBuilder:
+
+# ------------------------------------------------------------------
+# Output dataclass
+# ------------------------------------------------------------------
+
+@dataclass
+class AlignmentOutput:
+    """Structured output of :py:meth:`AlignmentMatrixBuilder.build`."""
+
+    alignments: torch.Tensor
+    """``(B, max_T, max_N)`` binary alignment matrices (float, 0/1)."""
+
+    phoneme_mask: torch.BoolTensor
+    """``(B, max_N)`` — ``False`` = valid, ``True`` = padding."""
+
+    durations: torch.Tensor
+    """``(B, max_N)`` per-segment frame counts (long)."""
+
+    segment_labels: List[List[str]]
+    """Per-utterance list of segment phoneme labels (including GAP_TOKEN)."""
+
+    label_ids: torch.Tensor
+    """``(B, max_N)`` integer IDs from the dynamic vocabulary (long).
+    Padding positions are filled with the PAD_TOKEN id."""
+
+    embeddings: torch.Tensor
+    """``(B, max_N, embedding_dim)`` dense phoneme embeddings."""
+
+
+# ------------------------------------------------------------------
+# Dynamic phoneme vocabulary
+# ------------------------------------------------------------------
+
+class PhonemeVocabulary:
     """
-    Build binary monotonic alignment matrices from phoneme timestamps.
+    Auto-growing label → integer mapping.
+
+    Pre-reserves slot 0 for ``PAD_TOKEN`` and slot 1 for ``GAP_TOKEN``.
+    New labels are assigned the next available id on first encounter.
+    """
+
+    def __init__(self, max_size: int = 120):
+        self.max_size = max_size
+        self._label2id: Dict[str, int] = {PAD_TOKEN: 0, GAP_TOKEN: 1}
+        self._id2label: Dict[int, str] = {0: PAD_TOKEN, 1: GAP_TOKEN}
+
+    # --- public ---
+
+    @property
+    def pad_id(self) -> int:
+        return 0
+
+    def __len__(self) -> int:
+        return len(self._label2id)
+
+    def encode(self, label: str) -> int:
+        """Return the id for *label*, registering it if unseen."""
+        if label in self._label2id:
+            return self._label2id[label]
+        new_id = len(self._label2id)
+        if new_id >= self.max_size:
+            raise RuntimeError(
+                f"PhonemeVocabulary is full ({self.max_size}). "
+                f"Cannot register new label '{label}'."
+            )
+        self._label2id[label] = new_id
+        self._id2label[new_id] = label
+        return new_id
+
+    def encode_batch(self, labels: List[str]) -> List[int]:
+        return [self.encode(l) for l in labels]
+
+    def decode(self, idx: int) -> str:
+        return self._id2label[idx]
+
+    def label2id(self) -> Dict[str, int]:
+        return dict(self._label2id)
+
+
+# ------------------------------------------------------------------
+# Main builder (nn.Module because it owns an Embedding)
+# ------------------------------------------------------------------
+
+class AlignmentMatrixBuilder(nn.Module):
+    """
+    Build binary monotonic alignment matrices from phoneme timestamps,
+    convert segment labels to integer IDs via a dynamic vocabulary,
+    and produce dense phoneme embeddings.
 
     Args:
         mel_config: MelSpectrogramConfig used to derive the exact frame rate.
-        gap_contraction: number of frames to absorb from each side of a gap
-                         during Stage-2 contraction (default 5).
+        num_embeddings: vocabulary capacity (default 120).
+        embedding_dim: size of each embedding vector (default 64).
     """
 
-    # Sentinel that must not collide with any valid phoneme label.
-    _GAP_SENTINEL = None
+    _GAP_SENTINEL = None  # internal sentinel, never leaks to outputs
 
     def __init__(
         self,
         mel_config: Optional[MelSpectrogramConfig] = None,
-        gap_contraction: int = 5,
+        num_embeddings: int = 120,
+        embedding_dim: int = 64,
+        **kwargs,
     ):
+        super().__init__()
         if mel_config is None:
             mel_config = MelSpectrogramConfig()
         self.mel_config = mel_config
-        self.gap_contraction = gap_contraction
 
         # Derived constants
         self.frames_per_second = mel_config.sampling_rate / mel_config.hop_length
         self.ms_per_frame = 1000.0 / self.frames_per_second
+
+        # Vocabulary & embedding
+        self.vocab = PhonemeVocabulary(max_size=num_embeddings)
+        self.embedding = nn.Embedding(
+            num_embeddings=num_embeddings,
+            embedding_dim=embedding_dim,
+            padding_idx=self.vocab.pad_id,
+        )
 
     # ------------------------------------------------------------------
     # Helpers
@@ -57,7 +159,42 @@ class AlignmentMatrixBuilder:
         return math.ceil(x)
 
     # ------------------------------------------------------------------
-    # Stage 1 + 2: frame-wise label assignment with gap contraction
+    # Label → IDs → Embeddings
+    # ------------------------------------------------------------------
+
+    def labels_to_ids(
+        self,
+        segment_labels: List[List[str]],
+        device: torch.device,
+    ) -> torch.Tensor:
+        """
+        Convert per-utterance segment labels to a padded ``(B, max_N)``
+        integer tensor using the dynamic vocabulary.
+        """
+        B = len(segment_labels)
+        max_N = max((len(sl) for sl in segment_labels), default=0)
+        pad_id = self.vocab.pad_id
+
+        ids = torch.full((B, max_N), pad_id, dtype=torch.long, device=device)
+        for i, sl in enumerate(segment_labels):
+            encoded = self.vocab.encode_batch(sl)
+            ids[i, : len(encoded)] = torch.tensor(encoded, dtype=torch.long)
+        return ids
+
+    def get_embeddings(
+        self,
+        label_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Look up dense embeddings for a ``(B, N)`` tensor of label IDs.
+
+        Returns:
+            ``(B, N, embedding_dim)``
+        """
+        return self.embedding(label_ids)
+
+    # ------------------------------------------------------------------
+    # Stage 1: frame-wise label assignment
     # ------------------------------------------------------------------
 
     def _fill_framewise(
@@ -68,20 +205,12 @@ class AlignmentMatrixBuilder:
         """
         Assign a phoneme label to each mel frame.
 
-        Args:
-            phoneme_alignment: list of dicts, each containing:
-                - 'start': float — onset time in **seconds**
-                - 'end':   float — offset time in **seconds**
-                - 'phoneme': str  — phoneme label
-            total_frames: number of mel frames for the utterance.
-
         Returns:
-            framewise_label: list[str | None] of length *total_frames*.
-                             None marks frames still unassigned after contraction.
+            framewise_label: list[str] of length *total_frames*.
+                             Unassigned frames are marked with ``GAP_TOKEN``.
         """
         gap = self._GAP_SENTINEL
         ms_per_frame = self.ms_per_frame
-        gap_contraction = self.gap_contraction
 
         # Convert seconds → ms and sort by onset
         ts_items = sorted(
@@ -112,79 +241,12 @@ class AlignmentMatrixBuilder:
                 if framewise_label[frame_i] is gap:
                     framewise_label[frame_i] = ts["phoneme"]
 
-        # ---- Stage 2: contract silent gaps ----
-        i = 0
-        gaps: list = []
-        while i < total_frames:
+        # ---- Stage 2: assign remaining gaps to GAP_TOKEN ----
+        for i in range(total_frames):
             if framewise_label[i] is gap:
-                gap_start = i
-                while i < total_frames and framewise_label[i] is gap:
-                    i += 1
-                gaps.append((gap_start, i))
-            else:
-                i += 1
-
-        for gap_start, gap_end in gaps:
-            left_value = framewise_label[gap_start - 1] if gap_start > 0 else gap
-            right_value = framewise_label[gap_end] if gap_end < total_frames else gap
-            gap_size = gap_end - gap_start
-
-            if left_value is gap and right_value is gap:
-                continue  # both sides unknown — cannot contract
-
-            # If only one side is known, treat the other as that side
-            if left_value is gap:
-                left_value = right_value
-            if right_value is gap:
-                right_value = left_value
-
-            if gap_size <= gap_contraction:
-                # Small gap: fill entirely with left neighbour
-                for j in range(gap_start, gap_end):
-                    framewise_label[j] = left_value
-            elif gap_size <= gap_contraction * 2:
-                # Medium gap: split at midpoint
-                midpoint = gap_start + gap_size // 2
-                for j in range(gap_start, gap_end):
-                    framewise_label[j] = left_value if j < midpoint else right_value
-            else:
-                # Large gap: absorb gap_contraction frames from each side
-                for j in range(gap_start, min(gap_start + gap_contraction, gap_end)):
-                    framewise_label[j] = left_value
-                for j in range(
-                    gap_end - 1,
-                    max(gap_end - gap_contraction - 1, gap_start - 1),
-                    -1,
-                ):
-                    framewise_label[j] = right_value
+                framewise_label[i] = GAP_TOKEN
 
         return framewise_label
-
-    # ------------------------------------------------------------------
-    # Stage 3: ensure full coverage (flood-fill remaining gaps)
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _flood_fill_gaps(framewise_label: list) -> list:
-        """
-        Fill any remaining gap sentinels by propagating the nearest
-        assigned label (forward then backward), guaranteeing every
-        frame is covered.
-        """
-        gap = AlignmentMatrixBuilder._GAP_SENTINEL
-        T = len(framewise_label)
-        labels = list(framewise_label)  # copy
-
-        # Forward fill
-        for i in range(1, T):
-            if labels[i] is gap and labels[i - 1] is not gap:
-                labels[i] = labels[i - 1]
-        # Backward fill (handles leading gaps)
-        for i in range(T - 2, -1, -1):
-            if labels[i] is gap and labels[i + 1] is not gap:
-                labels[i] = labels[i + 1]
-
-        return labels
 
     # ------------------------------------------------------------------
     # Public API
@@ -196,39 +258,26 @@ class AlignmentMatrixBuilder:
         total_frames_list: List[int],
         device: torch.device,
         dtype: torch.dtype,
-    ) -> Tuple[torch.Tensor, torch.BoolTensor, torch.Tensor]:
+    ) -> AlignmentOutput:
         """
         Build binary alignment matrices for a batch of utterances,
         padded to uniform size.
 
-        Args:
-            all_phoneme_alignments: batch of phoneme alignments.
-                Each element is a list of dicts:
-                    {'start': float (s), 'end': float (s), 'phoneme': str}
-            total_frames_list: number of mel frames per utterance.
-
-        Returns:
-            alignments: ``torch.Tensor``  ``(B, max_T, max_N)``, float32, binary.
-                        Zero-padded to the maximum T and N in the batch.
-            phoneme_mask: ``torch.BoolTensor`` ``(B, max_N)``.
-                          ``False`` = valid phoneme column,
-                          ``True``  = padding column.
-            durations: ``torch.Tensor`` ``(B, max_N)``, float32.
-                       Per-segment frame counts (sum of each alignment column).
+        Returns an :class:`AlignmentOutput` containing alignments,
+        phoneme_mask, durations, segment_labels, label_ids, and embeddings.
         """
         per_utt: List[torch.Tensor] = []
+        all_segment_labels: List[List[str]] = []
 
         for phoneme_alignment, T in zip(all_phoneme_alignments, total_frames_list):
             T = int(T)
             if T == 0 or len(phoneme_alignment) == 0:
                 per_utt.append(torch.empty((0, 0), dtype=torch.float32))
+                all_segment_labels.append([])
                 continue
 
-            # Stages 1+2: timestamp → framewise labels with gap contraction
+            # Stage 1 + gap assignment
             framewise_label = self._fill_framewise(phoneme_alignment, T)
-
-            # Stage 3: guarantee full coverage
-            framewise_label = self._flood_fill_gaps(framewise_label)
 
             # Build segments from contiguous runs of the same label
             segments: list = []  # (label, start_frame, end_frame)
@@ -248,6 +297,7 @@ class AlignmentMatrixBuilder:
                 alignment[s:e, col] = 1.0
 
             per_utt.append(alignment)
+            all_segment_labels.append([label for label, _s, _e in segments])
 
         # ---- Pad to (B, max_T, max_N) ----
         B = len(per_utt)
@@ -267,19 +317,28 @@ class AlignmentMatrixBuilder:
         for i, length in enumerate(phoneme_lengths):
             phoneme_mask[i, :length] = False
 
-        # Durations: per-segment frame counts  (B, max_N)
+        # Durations: per-segment frame counts
         durations = padded.sum(dim=1)
 
-        return (
-            padded.to(device=device, dtype=dtype),
-            phoneme_mask.to(device=device, dtype=torch.bool),
-            durations.to(device=device, dtype=torch.long),
+        # Label IDs & embeddings
+        label_ids = self.labels_to_ids(all_segment_labels, device=device)
+        embeddings = self.get_embeddings(label_ids)
+
+        return AlignmentOutput(
+            alignments=padded.to(device=device, dtype=dtype),
+            phoneme_mask=phoneme_mask.to(device=device, dtype=torch.bool),
+            durations=durations.to(device=device, dtype=torch.long),
+            segment_labels=all_segment_labels,
+            label_ids=label_ids,
+            embeddings=embeddings,
         )
 
     def build_single(
         self,
         phoneme_alignment: List[dict],
         total_frames: int,
-    ) -> Tuple[torch.Tensor, torch.BoolTensor, torch.Tensor]:
+        device: torch.device = torch.device("cpu"),
+        dtype: torch.dtype = torch.float32,
+    ) -> AlignmentOutput:
         """Convenience wrapper for a single utterance (unbatched)."""
-        return self.build([phoneme_alignment], [total_frames])
+        return self.build([phoneme_alignment], [total_frames], device=device, dtype=dtype)

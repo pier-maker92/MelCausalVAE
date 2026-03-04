@@ -7,6 +7,7 @@ import math
 import torch
 import torchaudio
 import torch.nn as nn
+import torch.nn.functional as F
 from einops import rearrange
 from dataclasses import dataclass
 from typing import Optional, List
@@ -32,6 +33,7 @@ class ConvformerOutput:
     durations: Optional[torch.LongTensor] = None
     z_upsampled: Optional[torch.FloatTensor] = None
     upsampled_padding_mask: Optional[torch.BoolTensor] = None
+    segment_labels: Optional[List[List[str]]] = None
 
 
 @dataclass
@@ -162,7 +164,26 @@ class CausalTransformerTail(nn.Module):
 # TransformerEncoder with causal masking via is_causal for left-only attention [web:84][web:92]
 
 
+class CausalConv1d(nn.Module):
+    """1-D convolution with left-only (causal) padding."""
+
+    def __init__(self, in_channels: int, out_channels: int, kernel_size: int):
+        super().__init__()
+        self.padding = kernel_size - 1
+        self.conv = nn.Conv1d(in_channels, out_channels, kernel_size)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: [B, C, T]
+        x = F.pad(x, (self.padding, 0))
+        return self.conv(x)
+
+
 class ConvformerEncoder(SigmaVAEEncoder):
+
+    # Alignment embedding dimension (must match AlignmentMatrixBuilder default)
+    _ALIGN_EMBED_DIM = 128
+    _D_MODEL = 512
+
     def __init__(self, config: ConvformerEncoderConfig):
         super().__init__(config)
 
@@ -172,40 +193,87 @@ class ConvformerEncoder(SigmaVAEEncoder):
         drop_p = config.drop_p
         latent_dim = config.latent_dim
         n_residual_blocks = config.n_residual_blocks
+        d_model = self._D_MODEL
+        embed_dim = self._ALIGN_EMBED_DIM
 
         if config.force_downsample:
             self.downsampler = DownSampler(
                 d_in=100,
-                d_hidden=512,
-                d_out=512,
+                d_hidden=d_model,
+                d_out=d_model,
                 compress_factor=compress_factor_C,
                 causal=True,
             )
         else:
             self.downsampler = ResNet(
                 in_dim=100,
-                hidden_dim=512,
-                output_dim=512,
+                hidden_dim=d_model,
+                output_dim=d_model,
                 num_blocks=n_residual_blocks,
             )
 
-        # Causal Transformer tail operating on tokens of size 512
+        # Causal Transformer tail operating on tokens of size d_model
         self.transformer = CausalTransformerTail(
-            d_model=512, nheads=tf_heads, nlayers=tf_layers, drop_p=drop_p
+            d_model=d_model, nheads=tf_heads, nlayers=tf_layers, drop_p=drop_p
         )
 
-        self.mu = nn.Linear(512, latent_dim)
+        # --- Alignment-masked attention pooling ---
+        self.alignment_matrix_builder = AlignmentMatrixBuilder(
+            embedding_dim=embed_dim,
+        )
+        self.q_proj = nn.Linear(embed_dim, d_model)   # phoneme emb → query
+        self.emb_proj = nn.Linear(embed_dim, latent_dim)  # phoneme emb → residual
+        self._attn_scale = d_model ** 0.5
+
+        # --- Latent projection ---
+        self.mu = nn.Linear(d_model, latent_dim)
         if config.logvar_layer:
-            self.logvar = nn.Linear(512, latent_dim)
+            self.logvar = nn.Linear(d_model, latent_dim)
+
+        # --- Causal refinement of z_upsampled ---
+        self.upsample_refine = nn.Sequential(
+            CausalConv1d(latent_dim + 1, latent_dim * 2, kernel_size=5),
+            nn.GELU(),
+            CausalConv1d(latent_dim * 2, latent_dim, kernel_size=5),
+        )
 
         if config.freeze_encoder:
             for name, param in self.named_parameters():
                 if name.split(".")[0] in ["mu", "logvar", "aligner", "upsampler"]:
                     continue
                 param.requires_grad = False
-        self.alignment_matrix_builder = AlignmentMatrixBuilder(
-            gap_contraction=125
-        )  # 125 ms gap contraction
+
+    # ----------------------------------------------------------------
+    # Phase signal: linear ramp 0 → 1 inside each alignment segment
+    # ----------------------------------------------------------------
+
+    @staticmethod
+    def _compute_phase(
+        alignments: torch.Tensor,
+        durations: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        For each mel frame, compute a phase value in [0, 1] that
+        indicates its relative position inside its segment.
+
+        Args:
+            alignments: ``(B, T, N)`` binary alignment matrix.
+            durations:  ``(B, N)`` per-segment frame counts.
+
+        Returns:
+            phase: ``(B, T, 1)``.
+        """
+        # cumsum along time within each segment column
+        cumpos = torch.cumsum(alignments, dim=1)          # [B, T, N]
+        # normalise by duration → 0..1 (shift by 1 so first frame = 0)
+        phase_per_seg = (cumpos - 1) / (durations.unsqueeze(1).clamp(min=1))  # [B, T, N]
+        # pick the active segment for each frame and collapse
+        phase = (phase_per_seg * alignments).sum(dim=2, keepdim=True)  # [B, T, 1]
+        return phase
+
+    # ----------------------------------------------------------------
+    # Forward
+    # ----------------------------------------------------------------
 
     def forward(
         self,
@@ -218,27 +286,48 @@ class ConvformerEncoder(SigmaVAEEncoder):
         target_T = (~padding_mask).sum(dim=1)
         original_padding_mask = padding_mask.clone()
         x, padding_mask = self.downsampler(x, padding_mask.bool())
-        x = self.transformer(x)  # [B, T/C, 512]
 
-        alignements, padding_mask, durations = self.alignment_matrix_builder.build(
+        # ---- Alignment ----
+        align_out = self.alignment_matrix_builder.build(
             phonemes, target_T, device=x.device, dtype=x.dtype
         )
-        x = torch.bmm(alignements.permute(0, 2, 1), x) / (
-            durations.unsqueeze(-1) + 1e-10
-        )
-        assert not torch.isnan(x).any(), "x contains nan"
+        alignments = align_out.alignments        # [B, T, N]
+        padding_mask = align_out.phoneme_mask     # [B, N]
+        durations = align_out.durations           # [B, N]
+        segment_labels = align_out.segment_labels
+        embeddings = align_out.embeddings         # [B, N, embed_dim]
+
+        # ---- Attention-based pooling (alignment-masked) ----
+        Q = self.q_proj(embeddings)               # [B, N, 512]
+        K = x                                     # [B, T, 512]
+
+        scores = torch.bmm(Q, K.transpose(1, 2)) / self._attn_scale  # [B, N, T]
+
+        # Mask: 1 = valid (frame belongs to segment), 0 = masked
+        attn_mask = alignments.permute(0, 2, 1).bool()  # [B, N, T]
+        scores = scores.masked_fill(~attn_mask, float("-inf"))
+
+        weights = torch.softmax(scores, dim=-1)   # [B, N, T]
+        weights = weights.nan_to_num(0.0)          # handle all-masked rows
+
+        pooled = torch.bmm(weights, x)            # [B, N, 512]
+
+        x = pooled
+        x = self.transformer(x)  # [B, n_phonemes + GAPs, 512]
+        assert not torch.isnan(x).any(), "x contains nan after attention pooling"
 
         if self.config.split_route:
             raise NotImplementedError("split route not implemented yet")
 
+        # ---- Latent projection ----
         mu = self.mu(x)
         logvar = None
         if hasattr(self, "logvar"):
             logvar = self.logvar(x)
         z = self.reparameterize(mu, logvar)
         assert not torch.isnan(z).any(), "z contains nan after reparameterization"
+        z = z + self.emb_proj(embeddings)
 
-        # get alignement
         align_loss = None
 
         kl_loss = None
@@ -249,10 +338,19 @@ class ConvformerEncoder(SigmaVAEEncoder):
                 kwargs["step"], kl_loss_weight=self.kl_loss_weight
             )
 
-        z_upsampled, upsampled_padding_mask = (
-            torch.bmm(alignements, z),
-            original_padding_mask,
-        )
+        # ---- Upsample + causal refinement ----
+        z_upsampled = torch.bmm(alignments, z)    # [B, T, latent_dim]
+
+        # Intra-segment phase signal  0 → 1
+        phase = self._compute_phase(alignments, durations)  # [B, T, 1]
+
+        # Concat phase, refine with causal conv
+        z_cat = torch.cat([z_upsampled, phase], dim=-1)     # [B, T, latent_dim+1]
+        z_upsampled = self.upsample_refine(
+            z_cat.transpose(1, 2)
+        ).transpose(1, 2)                                   # [B, T, latent_dim]
+
+        upsampled_padding_mask = original_padding_mask
         assert not torch.isnan(z_upsampled).any(), "z_upsampled contains nan"
 
         return ConvformerOutput(
@@ -264,6 +362,7 @@ class ConvformerEncoder(SigmaVAEEncoder):
             z_upsampled=z_upsampled,
             align_loss=align_loss,
             upsampled_padding_mask=upsampled_padding_mask,
+            segment_labels=segment_labels,
         )
 
 
