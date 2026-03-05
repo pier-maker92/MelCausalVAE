@@ -105,7 +105,7 @@ class ResNetBlock(nn.Module):
 
 class DownSampler(nn.Module):
     def __init__(
-        self, d_in=100, d_hidden=256, d_out=64, compress_factor=4, causal=True
+        self, d_in=100, d_hidden=256, d_out=64, compress_factor=1, n_residual_blocks=1, causal=True
     ):
         super().__init__()
 
@@ -125,6 +125,10 @@ class DownSampler(nn.Module):
             # Downsampling (stride 2)
             self.layers.append(ResNetBlock(d_hidden, d_hidden, stride=2, causal=causal))
             # Raffinamento (stride 1)
+            self.layers.append(ResNetBlock(d_hidden, d_hidden, stride=1, causal=causal))
+            breakpoint()
+
+        for _ in range(n_residual_blocks):
             self.layers.append(ResNetBlock(d_hidden, d_hidden, stride=1, causal=causal))
 
         # 3. Output Projection

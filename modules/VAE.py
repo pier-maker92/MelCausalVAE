@@ -164,6 +164,7 @@ class VAE(torch.nn.Module):
             target=x,
             target_padding_mask=convformer_output.upsampled_padding_mask,
             context_vector=convformer_output.z_upsampled,
+            durations=convformer_output.durations,
         ).loss
 
         mu_mean = convformer_output.z[~convformer_output.padding_mask].mean()
@@ -223,6 +224,7 @@ class VAE(torch.nn.Module):
             guidance_scale=guidance_scale,
             generator=generator,
             padding_mask=convformer_output.upsampled_padding_mask,
+            durations=convformer_output.durations,
         )
         if self.config.mel_spec_config.normalize:
             original_mel = self.denormalize_mel(original_mel)

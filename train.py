@@ -153,7 +153,7 @@ class VAEtrainer(Trainer):
                 + kl_loss
                 + (semantic_loss if semantic_loss is not None else 0.0)
                 + (ctc_loss if ctc_loss is not None else 0.0)
-                + (align_loss if align_loss is not None else 0.0)
+                + (align_loss * 0.1 if align_loss is not None else 0.0)
             )
 
             # Accumulate granular losses
@@ -217,7 +217,7 @@ class VAEtrainer(Trainer):
                 + kl_loss
                 + (semantic_loss if semantic_loss is not None else 0.0)
                 + (ctc_loss if ctc_loss is not None else 0.0)
-                + (align_loss if align_loss is not None else 0.0)
+                + (align_loss * 0.1 if align_loss is not None else 0.0)
             )
             return (loss, outputs) if return_outputs else loss
 
@@ -358,8 +358,8 @@ class VAEtrainer(Trainer):
             results = self.model.encode_and_sample(
                 audios_srs=audios_srs,
                 num_steps=16,
-                temperature=1.0,
-                guidance_scale=1.5,
+                temperature=.8,
+                guidance_scale=1.3,
                 hubert_guidance=hubert_guidance,
                 phonemes=phonemes,
                 transcription=transcription,
@@ -615,7 +615,7 @@ def main():
         dataset, "train", hubert_guidance=hubert_guidance, phonemes=phonemes
     )
     test_dataset = TrainDatasetWrapper(
-        dataset, "test", hubert_guidance=hubert_guidance, phonemes=phonemes
+        dataset, "train", hubert_guidance=hubert_guidance, phonemes=phonemes
     )
 
     # handle wandb - only initialize on main process (rank 0)

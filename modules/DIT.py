@@ -7,6 +7,51 @@ from einops import pack, rearrange, reduce, repeat, unpack
 from .utils import *
 
 
+def build_block_causal_mask(
+    durations: torch.LongTensor,
+    T: int,
+    padding_mask: Optional[torch.BoolTensor] = None,
+) -> torch.BoolTensor:
+    """
+    Build a block-causal attention mask from phoneme durations.
+
+    Each frame is assigned to a phoneme block. A frame at position i can attend
+    to a frame at position j iff:
+      - block[j] <= block[i]  (same block or earlier)
+      - j is not a padding position
+
+    Args:
+        durations: [B, N] — number of frames per phoneme
+        T: target sequence length (number of frames)
+        padding_mask: [B, T] — True where the frame is padding
+
+    Returns:
+        mask: [B, 1, T, T] — True where attention is allowed
+    """
+    B, N = durations.shape
+    device = durations.device
+
+    # Build per-frame block assignment [B, T]
+    # e.g. durations=[3,2] -> block_ids=[0,0,0,1,1]
+    block_ids = torch.zeros(B, T, device=device, dtype=torch.long)
+    cum_dur = torch.cumsum(durations, dim=1)  # [B, N]
+    for n in range(N):
+        start = cum_dur[:, n].unsqueeze(1)  # [B, 1]
+        positions = torch.arange(T, device=device).unsqueeze(0)  # [1, T]
+        block_ids += (positions >= start).long()
+
+    # mask[b, :, i, j] = True iff block_ids[b, j] <= block_ids[b, i]
+    query_blocks = block_ids.unsqueeze(2)  # [B, T, 1]
+    key_blocks = block_ids.unsqueeze(1)    # [B, 1, T]
+    mask = key_blocks <= query_blocks       # [B, T, T]
+
+    if padding_mask is not None:
+        valid_keys = (~padding_mask).unsqueeze(1)  # [B, 1, T]
+        mask = mask & valid_keys
+
+    return mask.unsqueeze(1)  # [B, 1, T, T]
+
+
 class Transformer(Module):
     def __init__(
         self,
@@ -27,6 +72,7 @@ class Transformer(Module):
         attn_qk_norm: bool = False,
         use_conv_layer: bool = False,
         is_causal: bool = True,
+        block_causal_mask: bool = False,
     ):
         super().__init__()
         assert divisible_by(depth, 2)
@@ -92,6 +138,7 @@ class Transformer(Module):
         self.final_norm = RMSNorm(dim)
         self.out_linear = nn.Linear(dim, audio_latent_dim, bias=False)
         self.is_causal = is_causal  # honor ctor arg
+        self.block_causal_mask = block_causal_mask
 
     @property
     def device(self):
@@ -130,6 +177,7 @@ class Transformer(Module):
         x: torch.FloatTensor,
         times: torch.FloatTensor,
         attention_mask: Optional[torch.BoolTensor] = None,
+        durations: Optional[torch.LongTensor] = None,
     ):
         batch, seq_len, *_ = x.shape
         t = times
@@ -187,7 +235,21 @@ class Transformer(Module):
                 x = skip_combiner(x)
 
             attn_input = attn_prenorm(x, **rmsnorm_kwargs)
-            x = attn(attn_input, mask=attention_mask, rotary_emb=rotary_emb, causal=self.is_causal) + x
+
+            # Build block-causal mask if enabled and durations are provided
+            if self.block_causal_mask and durations is not None:
+                # Build 4D block-causal mask [B, 1, T, T]
+                # attention_mask here is True=valid; build_block_causal_mask
+                # expects padding_mask True=padded
+                padding_for_mask = ~attention_mask  # [B, T]
+                block_mask = build_block_causal_mask(
+                    durations=durations,
+                    T=attention_mask.shape[1],
+                    padding_mask=padding_for_mask,
+                )
+                x = attn(attn_input, mask=block_mask, rotary_emb=rotary_emb, causal=False) + x
+            else:
+                x = attn(attn_input, mask=attention_mask, rotary_emb=rotary_emb, causal=self.is_causal) + x
 
             ff_input = ff_prenorm(x, **rmsnorm_kwargs)
             x = ff(ff_input) + x

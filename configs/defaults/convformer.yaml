@@ -1,4 +1,5 @@
 convformer:
+  d_model: 512
   compress_factor_C: 8
   tf_heads: 8
   tf_layers: 4
@@ -17,5 +18,7 @@ convformer:
   split_route: false
   semantic_dim: null
   semantic_kl_loss_weight: null
+  segment_embedding_scale: null
+  use_segment_embedding_residual: false
 
 

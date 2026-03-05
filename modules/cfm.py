@@ -7,7 +7,7 @@ import torch
 import random
 import torch.nn as nn
 from abc import ABCMeta
-from typing import Optional
+from typing import Optional, List
 from einops import rearrange
 from torchdiffeq import odeint
 from dataclasses import dataclass
@@ -36,6 +36,7 @@ class DiTConfig:
     learned_prior: bool = False
     use_vp_schedule: bool = False
     is_causal: bool = True
+    block_causal_mask: bool = False
     decoder_type: str = "dit"
 
 
@@ -58,8 +59,10 @@ class DiT(torch.nn.Module):
         self.mel_channels = config.mel_channels
         self.uncond_prob = config.uncond_prob
         self.learned_prior = config.learned_prior
-        self.is_causal = config.is_causal
-        print(f"VAE is_causal: {self.is_causal}")
+        self.block_causal_mask = config.block_causal_mask
+        # When block_causal_mask is on, standard causal is disabled
+        self.is_causal = config.is_causal if not self.block_causal_mask else False
+        print(f"VAE is_causal: {self.is_causal}, block_causal_mask: {self.block_causal_mask}")
         self.context_vector_proj = nn.Linear(self.audio_latent_dim, self.unet_dim)
         # hubert norm
         self.hubert_norm = nn.LayerNorm(self.audio_latent_dim)
@@ -89,6 +92,7 @@ class DiT(torch.nn.Module):
             use_conv_layer=self.use_conv_layer,
             audio_latent_dim=self.mel_channels,  # projection to mel
             is_causal=self.is_causal,
+            block_causal_mask=self.block_causal_mask,
             attn_flash=True,
         )
         self.transformer.to(dtype=torch.bfloat16)
@@ -153,12 +157,14 @@ class DiT(torch.nn.Module):
         state: torch.FloatTensor,
         target: Optional[torch.FloatTensor] = None,
         flow_mask: Optional[torch.BoolTensor] = None,
+        durations: Optional[torch.LongTensor] = None,
     ):
         mask_to_loss = ~flow_mask
         v = self.transformer(
             x=state,
             times=times,
             attention_mask=mask_to_loss,
+            durations=durations,
         )
         loss = None
         if target is not None:
@@ -173,6 +179,7 @@ class DiT(torch.nn.Module):
         target: torch.FloatTensor,
         target_padding_mask: torch.BoolTensor,
         context_vector: torch.FloatTensor,
+        durations: Optional[torch.LongTensor] = None,
         **kwargs,
     ):
         assert not torch.isnan(context_vector).any(), "context vector contains nan"
@@ -190,7 +197,8 @@ class DiT(torch.nn.Module):
 
         # ---- get the flow ----
         loss = self.let_it_flow(
-            times=times, state=state, target=v_target, flow_mask=target_padding_mask
+            times=times, state=state, target=v_target,
+            flow_mask=target_padding_mask, durations=durations,
         )
 
         return DiTOutput(
@@ -206,6 +214,7 @@ class DiT(torch.nn.Module):
         guidance_scale: float = 1.0,
         generator: Optional[torch.Generator] = None,
         std: float = 1.0,
+        durations: Optional[torch.LongTensor] = None,
     ):
         cfg_scale = guidance_scale
         # ---- context vector z ----
@@ -255,6 +264,7 @@ class DiT(torch.nn.Module):
                 cfg_scale=cfg_scale,
                 context_vector=context_vector,
                 attention_mask=~padding_mask,
+                durations=durations,
             )
             return features
 
@@ -272,6 +282,7 @@ class DiT(torch.nn.Module):
         cfg_scale: float,
         context_vector: torch.FloatTensor,
         attention_mask: Optional[torch.BoolTensor] = None,
+        durations: Optional[torch.LongTensor] = None,
     ):
         times = times.repeat(state.shape[0])
         cond_state = self.noise_proj(state) + context_vector
@@ -280,6 +291,7 @@ class DiT(torch.nn.Module):
             x=cond_state,
             times=times,
             attention_mask=attention_mask,
+            durations=durations,
         )
         if cfg_scale == 1.0:
             return cond_out
@@ -289,6 +301,7 @@ class DiT(torch.nn.Module):
             x=uncond_state,
             times=times,
             attention_mask=attention_mask,
+            durations=durations,
         )
 
         final = (cfg_scale * cond_out + (1 - cfg_scale) * uncond_out).to(
