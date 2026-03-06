@@ -16,8 +16,6 @@ from modules.downsampler import DownSampler
 from modules.resnet import LinearResNet as ResNet
 from modules.similarity import Aligner, SimilarityUpsamplerBatch
 
-from modules.Vits.aligner import Aligner as VitsAligner
-from modules.Vits.aligner import AlignerConfig
 
 
 @dataclass
@@ -195,15 +193,6 @@ class ConvformerEncoder(SigmaVAEEncoder):
         self.mu = nn.Linear(512, latent_dim)
         if config.logvar_layer:
             self.logvar = nn.Linear(512, latent_dim)
-
-        if config.split_route:
-            self.semantic_mu = nn.Linear(512, config.semantic_dim)
-            self.semantic_logvar = nn.Linear(512, config.semantic_dim)
-
-        if config.use_aligner:
-            aligner_config = AlignerConfig(z_dim=64, hidden_dim=512)
-            self.aligner = VitsAligner(aligner_config)
-            self.upsampler = SimilarityUpsamplerBatch()
 
         if config.freeze_encoder:
             for name, param in self.named_parameters():

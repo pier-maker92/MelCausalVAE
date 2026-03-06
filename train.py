@@ -31,6 +31,7 @@ from data.mls import MLSDataset
 from data.libri_tts import LibriTTS
 from data.librispeechHubert import LibriSpeech100h
 from data.audio_dataset import TrainDatasetWrapper
+from data.librispeech_align import LibriSpeechAlignDataset
 from data.audio_dataset import DataCollator, HubertDatasetWrapper
 
 
@@ -609,6 +610,9 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Using device: {device}")
 
+    phoneme_parsing_mode = training_cfg.pop("phoneme_parsing_mode", "phoneme")
+    vocab_path = training_cfg.pop("vocab_path", "data/vocab.json")
+
     # Create AudioDataset
     dataset_name = training_cfg.pop("dataset_name", None)
     if dataset_name == "mls":
@@ -616,11 +620,12 @@ def main():
     elif dataset_name == "libritts":
         dataset = LibriTTS()
     elif dataset_name == "librispeech100h":
-        phoneme_parsing_mode = training_cfg.pop("phoneme_parsing_mode", "phoneme")
-        vocab_path = training_cfg.pop("vocab_path", "data/vocab.json")
+       
         dataset = LibriSpeech100h(
             phoneme_parsing_mode=phoneme_parsing_mode, vocab_path=vocab_path
         )
+    elif dataset_name == "librispeech-align":
+        dataset = LibriSpeechAlignDataset()
     else:
         raise ValueError(f"Dataset {dataset_name} not supported")
     hubert_guidance = training_cfg.pop("hubert_guidance", False)
