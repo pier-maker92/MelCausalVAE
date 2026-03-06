@@ -47,12 +47,11 @@ class MelSpectrogramEncoder(torch.nn.Module):
         self.std = 4.864339828491211
         self.mean = -3.325150489807129
         self.normalize = config.normalize
-    
+
     def _update_std_mean_with_momentum(self, mel_spec: torch.Tensor):
         self.std = self.std * 0.99 + mel_spec.std() * 0.01
         self.mean = self.mean * 0.99 + mel_spec.mean() * 0.01
         print(f"std: {self.std}, mean: {self.mean}")
-        
 
     def forward(self, audios_srs: List[Tuple[torch.FloatTensor, int]], **kwargs):
         audios, sampling_rates = zip(*audios_srs)
@@ -67,7 +66,10 @@ class MelSpectrogramEncoder(torch.nn.Module):
             )
         sr = unique_sampling_rates.pop()
         if sr != self.sampling_rate:
-            raise ValueError(f"Sampling rate {sr} is not supported by this model. " f"Expected {self.sampling_rate}.")
+            raise ValueError(
+                f"Sampling rate {sr} is not supported by this model. "
+                f"Expected {self.sampling_rate}."
+            )
         dtype = audios[0].dtype
         device = audios[0].device
         # Get max length for padding
@@ -77,7 +79,9 @@ class MelSpectrogramEncoder(torch.nn.Module):
             batch_size = len(audios)
 
             # Create padded tensor using torch.nn.utils.rnn.pad_sequence
-            padded_audios = torch.nn.utils.rnn.pad_sequence(audios, batch_first=True, padding_value=0.0)
+            padded_audios = torch.nn.utils.rnn.pad_sequence(
+                audios, batch_first=True, padding_value=0.0
+            )
             # Create padding mask
             padding_mask = torch.ones(
                 (batch_size, max_length),
@@ -87,7 +91,29 @@ class MelSpectrogramEncoder(torch.nn.Module):
             for i, audio in enumerate(audios):
                 padding_mask[i, : audio.size(-1)] = False
         else:
-            padded_audios = audios[0]
+            padded_audios = (
+                audios[0].unsqueeze(0) if audios[0].dim() == 1 else audios[0]
+            )
+            if padded_audios.dim() == 2 and padded_audios.size(0) != 1:
+                # If it was [time, channel] or something, but usually it is [channel, time]
+                pass
+            if padded_audios.dim() == 2:
+                # it is [1, time] or [channels, time]. mel_transform expects [batch, time] or [batch, channels, time]
+                # for mono audio it should be [1, time]
+                pass
+
+            # actually torchaudio MelSpectrogram expects (..., time)
+            # if we have only one audio, ensure it is (1, time)
+            if padded_audios.dim() == 1:
+                padded_audios = padded_audios.unsqueeze(0)
+            elif padded_audios.dim() == 2 and padded_audios.size(0) != 1:
+                # if it is (C, T), we need (1, C, T)? No, MelSpectrogram handles (..., T)
+                # but our einops call expects (B, C, T)
+                padded_audios = padded_audios.unsqueeze(0)
+            elif padded_audios.dim() == 2 and padded_audios.size(0) == 1:
+                # it is already (1, T), but we need (B, C, T) for einops b c t?
+                # MelSpectrogram(1, T) -> (1, C, T)
+                pass
             padding_mask = torch.zeros(
                 1,
                 audios[0].size(-1),
@@ -119,7 +145,8 @@ class MelSpectrogramEncoder(torch.nn.Module):
         )  # 93.75Hz
 
         assert padding_mask.shape[1] == mel_spec.shape[1], (
-            f"Temporal dimensions mismatch: padding_mask {padding_mask.shape[1]} vs " f"mel_spec {mel_spec.shape[1]}"
+            f"Temporal dimensions mismatch: padding_mask {padding_mask.shape[1]} vs "
+            f"mel_spec {mel_spec.shape[1]}"
         )
 
         if self.normalize:

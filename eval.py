@@ -265,7 +265,10 @@ def evaluate_dataset(
 
     processed = 0
     image_count = 0
-    total_samples = min(num_samples, len(test_dataloader) * batch_size)
+    if num_samples > 0:
+        total_samples = min(num_samples, len(ds))
+    else:
+        total_samples = len(ds)
     pbar = tqdm(total=total_samples, desc="Evaluating dataset")
     dtype = torch.bfloat16
     images = []
@@ -355,9 +358,17 @@ def evaluate_dataset(
             consistent_wer_val = float(compute_wer(ref_hyp, recon_hyp))
             consistent_cer_val = float(compute_cer(ref_hyp, recon_hyp))
 
-            ref_scores = {"WER": ref_wer_val, "CER": ref_cer_val}
-            recon_scores = {"WER": recon_wer_val, "CER": recon_cer_val}
-            consistency_scores = {"WER": consistent_wer_val, "CER": consistent_cer_val}
+            def to_pct(v):
+                if v is None or math.isnan(v):
+                    return None
+                return round(float(v) * 100.0, 2)
+
+            ref_scores = {"WER": to_pct(ref_wer_val), "CER": to_pct(ref_cer_val)}
+            recon_scores = {"WER": to_pct(recon_wer_val), "CER": to_pct(recon_cer_val)}
+            consistency_scores = {
+                "WER": to_pct(consistent_wer_val),
+                "CER": to_pct(consistent_cer_val),
+            }
 
             results["samples"].append(
                 {
@@ -430,10 +441,10 @@ def evaluate_dataset(
                     float(consistency_scores[m])
                 )
 
-        processed += batch_size
-        if processed >= num_samples:
+        processed += len(audios_srs)
+        pbar.update(len(audios_srs))
+        if num_samples > 0 and processed >= num_samples:
             break
-        pbar.update(batch_size)
     pbar.close()
 
     # --- Batch UTMOS Optimization ---
@@ -449,26 +460,27 @@ def evaluate_dataset(
             orig_mos = mos_map.get(orig_wav_name)
             recon_mos = mos_map.get(recon_wav_name)
             if orig_mos is not None:
-                sample["ref"]["UTMOS"] = orig_mos
+                sample["ref"]["UTMOS"] = round(float(orig_mos), 2)
                 # Add to aggregates
                 key = sample["language"] if setting == "OOD" else "all"
-                per_language[key].setdefault("ref_UTMOS", []).append(orig_mos)
+                per_language[key].setdefault("ref_UTMOS", []).append(float(orig_mos))
             if recon_mos is not None:
-                sample["reconstructed"]["UTMOS"] = recon_mos
+                sample["reconstructed"]["UTMOS"] = round(float(recon_mos), 2)
                 # Add to aggregates
                 key = sample["language"] if setting == "OOD" else "all"
-                per_language[key].setdefault("recon_UTMOS", []).append(recon_mos)
+                per_language[key].setdefault("recon_UTMOS", []).append(float(recon_mos))
 
     # Calculate final delta for all samples
     for sample in results["samples"]:
         delta = {}
         for m in ["WER", "CER", "UTMOS"]:
-            rv = float(sample["ref"].get(m, float("nan")))
-            rcv = float(sample["reconstructed"].get(m, float("nan")))
-            if math.isnan(rv) or math.isnan(rcv):
+            rv = sample["ref"].get(m)
+            rcv = sample["reconstructed"].get(m)
+            if rv is None or rcv is None:
                 delta[m] = None
             else:
-                delta[m] = float(rcv - rv)
+                d_val = float(rcv - rv)
+                delta[m] = round(d_val, 2)
         sample["delta"] = delta
 
     # Cleanup temporary WAVs if requested
@@ -481,13 +493,14 @@ def evaluate_dataset(
         except Exception as e:
             logger.warning(f"Failed to cleanup {tmp_audio_dir}: {e}")
 
-    run.log(
-        {
-            "images": images,
-            "original_audios": original_audios,
-            "reconstructed_audios": reconstructed_audios,
-        },
-    )
+    if run is not None:
+        run.log(
+            {
+                "images": images,
+                "original_audios": original_audios,
+                "reconstructed_audios": reconstructed_audios,
+            },
+        )
 
     # finalize aggregates
     for key, agg in per_language.items():
@@ -505,9 +518,22 @@ def evaluate_dataset(
         consist_wer = _mean(agg.get("consistent_WER", []))
         consist_cer = _mean(agg.get("consistent_CER", []))
 
-        agg_ref = {"WER": ref_wer, "CER": ref_cer, "UTMOS": ref_utmos}
-        agg_recon = {"WER": recon_wer, "CER": recon_cer, "UTMOS": recon_utmos}
-        agg_consist = {"WER": consist_wer, "CER": consist_cer}
+        def to_report(v, is_mos=False):
+            if v is None or math.isnan(v):
+                return None
+            return round(float(v), 2)
+
+        agg_ref = {
+            "WER": to_report(ref_wer),
+            "CER": to_report(ref_cer),
+            "UTMOS": to_report(ref_utmos, True),
+        }
+        agg_recon = {
+            "WER": to_report(recon_wer),
+            "CER": to_report(recon_cer),
+            "UTMOS": to_report(recon_utmos, True),
+        }
+        agg_consist = {"WER": to_report(consist_wer), "CER": to_report(consist_cer)}
 
         agg.clear()
         agg.update(
@@ -515,15 +541,13 @@ def evaluate_dataset(
         )
 
         discrepancy = {}
-        for m, rv, rcv in [
-            ("WER", ref_wer, recon_wer),
-            ("CER", ref_cer, recon_cer),
-            ("UTMOS", ref_utmos, recon_utmos),
-        ]:
+        for m in ["WER", "CER", "UTMOS"]:
+            rv = agg_ref.get(m)
+            rcv = agg_recon.get(m)
             if rv is None or rcv is None:
                 discrepancy[m] = None
             else:
-                discrepancy[m] = float(rcv - rv)
+                discrepancy[m] = round(float(rcv - rv), 2)
 
         results["aggregates"][key] = {
             "ref": agg_ref,
@@ -613,10 +637,16 @@ def run_single_eval(
         ):
             work_dir = work_dir / f"tau{base_args['baseline_tau']}"
     else:
+        ckpt_path = Path(checkpoint)
+        ckpt_dir_name = (
+            ckpt_path.parent.name
+            if ckpt_path.name == "model.safetensors"
+            else ckpt_path.name
+        )
         work_dir = (
             Path(base_args["output_dir"])
             / base_args["exp_name"]
-            / Path(checkpoint).name
+            / ckpt_dir_name
             / f"gpu{gpu_index}_n{n_steps}_t{temperature}_g{guidance_scale}"
         )
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -694,14 +724,18 @@ def orchestrate(
             tasks.append((ckpt, combo))
 
     gpus = get_available_gpus()
-    run = wandb.init(
-        project="MelCausalVAE-eval",
-        name=base_args["exp_name"],
-        config={
-            "setting": base_args["setting"],
-            "languages": base_args["languages"],
-        },
-    )
+
+    use_wandb = base_args.get("report_to") == "wandb"
+    run = None
+    if use_wandb:
+        run = wandb.init(
+            project="MelCausalVAE-eval",
+            name=base_args["exp_name"],
+            config={
+                "setting": base_args["setting"],
+                "languages": base_args["languages"],
+            },
+        )
 
     # Single-process path (default): run sequentially on first GPU (or CPU if none)
     if not multi_gpu:
@@ -753,7 +787,9 @@ def orchestrate(
                 f"Task completed: {res.get('checkpoint')} on GPU {res.get('gpu_index')} status={res.get('status')}"
             )
             results.append(res)
-    run.finish()
+
+    if run is not None:
+        run.finish()
     return results
 
 
@@ -765,7 +801,7 @@ def main():
     parser.add_argument(
         "--report-to", type=str, default="none", choices=["none", "wandb"]
     )
-    parser.add_argument("--num-samples", type=int, default=100)
+    parser.add_argument("--num-samples", type=int, default=0)
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--n-steps", type=int, default=4)
     parser.add_argument("--temperature", type=float, default=0.2)
@@ -910,10 +946,12 @@ def main():
         "output_dir": args.output_dir,
         "wandb_log_images": args.wandb_log_images,
         "wandb_max_images": args.wandb_max_images,
+        "baseline_model": args.baseline_model,
         "baseline_hz": args.baseline_hz,
         "baseline_tau": args.baseline_tau,
         "UTMOS": args.UTMOS,
         "keep_wavs": args.keep_wavs,
+        "filter_librispeech": args.filter_librispeech,
     }
 
     # orchestrate one job per GPU
