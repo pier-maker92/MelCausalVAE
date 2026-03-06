@@ -257,11 +257,11 @@ class VAE(torch.nn.Module):
             inference=True,
         )
         durations = None
-        if self.config.encoder_config.use_aligner:
-            durations = (
-                convformer_output.durations
-                * self.config.encoder_config.compress_factor_C
-            )
+        # if self.config.encoder_config.use_aligner:
+        #     durations = (
+        #         convformer_output.durations
+        #         * self.config.encoder_config.compress_factor_C
+        #     )
         # Generate mel spectrogram from latent
         reconstructed_mel = self.decoder.generate(
             num_steps=num_steps,
