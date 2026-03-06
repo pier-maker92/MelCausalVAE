@@ -233,10 +233,8 @@ class ConvformerEncoder(SigmaVAEEncoder):
                 kwargs["step"], kl_loss_weight=self.kl_loss_weight
             )
 
-        z_upsampled, upsampled_padding_mask = (
-            torch.repeat_interleave(z, self.config.compress_factor_C, dim=1),
-            original_padding_mask,
-        )
+        z_upsampled = z
+        upsampled_padding_mask = original_padding_mask
 
         return ConvformerOutput(
             z=z,
