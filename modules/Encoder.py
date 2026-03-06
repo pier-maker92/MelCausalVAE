@@ -213,49 +213,17 @@ class ConvformerEncoder(SigmaVAEEncoder):
         x, padding_mask = self.downsampler(x, padding_mask.bool())
         x = self.transformer(x)  # [B, T/C, 512]
 
-        if self.config.split_route:
-            mu = self.mu(x.mean(dim=1, keepdim=True))
-            logvar = None
-            if hasattr(self, "logvar"):
-                logvar = self.logvar(x.mean(dim=1, keepdim=True))
-            z = self.reparameterize(mu, logvar)
-            assert not torch.isnan(z).any(), "z contains nan after reparameterization"
-
-            semantic_mu = self.semantic_mu(x)
-            semantic_logvar = None
-            if hasattr(self, "semantic_logvar"):
-                semantic_logvar = self.semantic_logvar(x)
-            semantic_z = self.reparameterize(semantic_mu, semantic_logvar)
-            assert not torch.isnan(
-                semantic_z
-            ).any(), "semantic_z contains nan after reparameterization"
-        else:
-            mu = self.mu(x)
-            logvar = None
-            if hasattr(self, "logvar"):
-                logvar = self.logvar(x)
-            z = self.reparameterize(mu, logvar)
-            assert not torch.isnan(z).any(), "z contains nan after reparameterization"
+        mu = self.mu(x)
+        logvar = None
+        if hasattr(self, "logvar"):
+            logvar = self.logvar(x)
+        z = self.reparameterize(mu, logvar)
+        assert not torch.isnan(z).any(), "z contains nan after reparameterization"
 
         # get alignement
         durations, align_loss = None, None
         if self.config.use_aligner:
-            if self.config.split_route:
-                z_spec = semantic_mu.permute(0, 2, 1)
-            else:
-                z_spec = mu.detach().permute(0, 2, 1)
-            z_aligned, durations, align_loss, aligned_padding_mask = self.aligner(
-                z_spec=z_spec,
-                y_mask=(~padding_mask).unsqueeze(
-                    1
-                ),  # NOTE: padding_mask logic 0 = valid, 1 = padding
-                phonemes=phonemes,
-            )
-            print(durations[0, :10])
-            align_loss = align_loss * 0.01
-            assert not torch.isnan(
-                z_aligned
-            ).any(), "z_aligned contains nan after aligner"
+            pass
 
         kl_loss = None
         if kwargs.get("step", None) is not None:
@@ -264,14 +232,6 @@ class ConvformerEncoder(SigmaVAEEncoder):
             ) * self.get_kl_cosine_schedule(
                 kwargs["step"], kl_loss_weight=self.kl_loss_weight
             )
-            semantic_kl_loss = self.kl_divergence(
-                semantic_mu, semantic_logvar, padding_mask
-            ) * self.get_kl_cosine_schedule(
-                kwargs["step"], kl_loss_weight=self.semantic_kl_loss_weight
-            )
-            kl_loss = kl_loss + semantic_kl_loss
-            z = z.mean(dim=1, keepdim=True).repeat(1, semantic_z.shape[1], 1)
-            z = torch.cat([z, semantic_z], dim=-1)
 
         z_upsampled, upsampled_padding_mask = (
             torch.repeat_interleave(z, self.config.compress_factor_C, dim=1),
