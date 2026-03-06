@@ -187,7 +187,7 @@ class ConvformerEncoder(SigmaVAEEncoder):
 
         # Causal Transformer tail operating on tokens of size 512
         self.transformer = CausalTransformerTail(
-            d_model=64, nheads=tf_heads, nlayers=tf_layers, drop_p=drop_p
+            d_model=512, nheads=tf_heads, nlayers=tf_layers, drop_p=drop_p
         )
 
         self.mu = nn.Linear(512, latent_dim)

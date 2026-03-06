@@ -76,6 +76,7 @@ class LinearResNet(nn.Module):
 
     def forward(self, x, mask=None):
         # x shape: (B, T, in_dim)
+        mask = ~mask
 
         # 1. Input Projection
         x = self.input_proj(x)
@@ -93,4 +94,4 @@ class LinearResNet(nn.Module):
         if mask is not None:
             x = x * mask.unsqueeze(-1)
 
-        return x, mask
+        return x, ~mask
