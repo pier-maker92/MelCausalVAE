@@ -14,7 +14,7 @@ from data.audio_dataset import SimpleAudioDataset, DataCollator, TrainDatasetWra
 from modules.melspecEncoder import MelSpectrogramEncoder, MelSpectrogramConfig
 
 # Specify custom cache directory
-parquet_dir = "/leonardo_scratch/large/userexternal/pmelucci/data"
+parquet_dir = "/workspace/data/speech"
 # import mel spec encoder
 mel_spec_encoder = MelSpectrogramEncoder(config=MelSpectrogramConfig())
 
