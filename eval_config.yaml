@@ -1,0 +1,45 @@
+global_settings:
+  dataset_setting: "LibriSpeech"
+  filter_librispeech: true
+  num_samples: 128
+  batch_size: 64
+  utmos: true
+  output_dir: "/home/ec2-user/MelCausalVAE/evaluation/batch_run"
+
+resources:
+  # List of GPUs available for the pool
+  gpu_ids: [0, 1, 2, 3]
+  
+  # How many CPU threads to allow per process for PyTorch/BLAS
+  threads_per_job: 24
+  
+  # How many physical CPU cores to allocate per job (using taskset). 
+  # Note: A taskset mask will be assigned incrementally (e.g., job 0 -> cores 0-3, job 1 -> cores 4-7)
+  cores_per_job: 24
+
+jobs:
+  # # Baseline Models (eval.py)
+  # baselines:
+  #   - model_name: "encodec"
+  #     # Additional parameters specific to eval.py can be listed here
+  #     extra_args: []
+  #   - model_name: "dualcodec"
+  #     extra_args:
+  #       - "--baseline-hz"
+  #       - "12"
+  #   - model_name: "dualcodec"
+  #     extra_args:
+  #       - "--baseline-hz"
+  #       - "25"
+
+  # Vocoder Models (eval_vocoder.py)
+  vocoders:
+    - vocoder_name: "vocos"
+      # Specific vocoder settings can be passed in extra_args
+      extra_args: []
+    - vocoder_name: "hifigan"
+      extra_args: []
+    - vocoder_name: "bigvgan"
+      extra_args:
+        - "--vocoder-dir"
+        - "/home/ec2-user/MelCausalVAE/bigvgan/bigvgan_v2_24khz_100band_256x"

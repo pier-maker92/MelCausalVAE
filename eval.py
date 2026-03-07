@@ -237,9 +237,27 @@ def evaluate_dataset(
     max_images: int,
     keep_wavs: bool,
     filter_librispeech: bool,
+    original_audio_only: bool,
+    skip_ref_metrics: bool,
     run,
 ) -> Dict[str, Any]:
     results: Dict[str, Any] = {"samples": [], "aggregates": {}}
+
+    gt_filepath = "/home/ec2-user/MelCausalVAE/evaluation/GT/metrics.json"
+    gt_metrics_map = {}
+    if skip_ref_metrics:
+        try:
+            with open(gt_filepath, "r") as f:
+                gt_data = json.load(f)
+                for sample in gt_data.get("samples", []):
+                    map_id = sample.get("id")
+                    if map_id is not None:
+                        gt_metrics_map[str(map_id)] = {
+                            "ref": sample.get("ref", {}),
+                            "ref_transcription": sample.get("ref_transcription", "")
+                        }
+        except Exception as e:
+            logger.warning(f"Could not load pre-computed GT metrics from {gt_filepath}: {e}")
 
     if setting == "LibriSpeech":
         ds = TestDatasetWrapper(
@@ -251,7 +269,7 @@ def evaluate_dataset(
         ds = TestDatasetWrapper(MLSDataset(), "train")
 
     test_dataloader = DataLoader(
-        ds, batch_size=batch_size, shuffle=True, collate_fn=DataCollator()
+        ds, batch_size=batch_size, shuffle=False, collate_fn=DataCollator()
     )
 
     # Aggregation structures
@@ -279,9 +297,12 @@ def evaluate_dataset(
         sr = audios_srs[0][1]
         lang = batch["language"]
         gt_text = batch["transcription"]
+        batch_ids = batch.get("ids") # NO FALLBACK
         audios_srs = [(audio.to(device, dtype=dtype), sr) for audio, sr in audios_srs]
 
-        if baseline_model is None:
+        if original_audio_only:
+            original_mel = None
+        elif baseline_model is None:
             # --- MelCausalVAE PATH ---
             with torch.no_grad():
                 out = model.encode_and_sample(
@@ -298,11 +319,22 @@ def evaluate_dataset(
         # save wavs, prompts, compute metrics
         for idx in range(len(audios_srs)):
             global_idx = processed + idx
-            orig_wav = tmp_audio_dir / f"sample_{global_idx}_orig.wav"
-            recon_wav = tmp_audio_dir / f"sample_{global_idx}_recon.wav"
-            prompt_txt = tmp_audio_dir / f"sample_{global_idx}_prompt.txt"
+            sample_id = batch_ids[idx]
+            
+            orig_wav = tmp_audio_dir / f"sample_{sample_id}_orig.wav"
+            recon_wav = tmp_audio_dir / f"sample_{sample_id}_recon.wav"
+            prompt_txt = tmp_audio_dir / f"sample_{sample_id}_prompt.txt"
 
-            if baseline_model is not None:
+            if original_audio_only:
+                audio, original_sr = audios_srs[idx]
+                original_audio = audio.squeeze().cpu()
+                original_audio = original_audio / (original_audio.abs().max() + 1e-8)
+                save_wav(orig_wav, original_audio, original_sr)
+                prompt_txt.write_text(gt_text[idx])
+                reconstructed_audio = original_audio
+                cur_original_mel = None
+                cur_reconstructed_mel = None
+            elif baseline_model is not None:
                 # --- BASELINE MODEL PATH ---
                 audio, original_sr = audios_srs[idx]
                 reconstructed, out_sr = baseline_model.reconstruct(audio, original_sr)
@@ -316,9 +348,12 @@ def evaluate_dataset(
                     reconstructed_audio.abs().max() + 1e-8
                 )
 
-                save_wav(orig_wav, original_audio, original_sr)
+                if not skip_ref_metrics:
+                    save_wav(orig_wav, original_audio, original_sr)
                 save_wav(recon_wav, reconstructed_audio, out_sr)
                 prompt_txt.write_text(gt_text[idx])
+                cur_original_mel = None
+                cur_reconstructed_mel = None
             else:
                 min_length = min(
                     original_mel[idx].size(0), reconstructed_mel[idx].size(0)
@@ -336,34 +371,53 @@ def evaluate_dataset(
                     vocoder, cur_reconstructed_mel.unsqueeze(0), device
                 )
 
-                save_wav(orig_wav, original_audio, sr)
+                if not skip_ref_metrics:
+                    save_wav(orig_wav, original_audio, sr)
                 save_wav(recon_wav, reconstructed_audio, sr)
                 prompt_txt.write_text(gt_text[idx])
 
             # --- Compute WER and CER using HuBERT-Large ASR ---
             ref_text_normalized = gt_text[idx].lower().strip()
-            ref_hyp = hubert_asr.transcribe(str(orig_wav))
-            recon_hyp = hubert_asr.transcribe(str(recon_wav))
+            if original_audio_only:
+                ref_hyp = hubert_asr.transcribe(str(orig_wav))
+                recon_hyp = ref_hyp
+            else:
+                if not skip_ref_metrics:
+                    ref_hyp = hubert_asr.transcribe(str(orig_wav))
+                else:
+                    ref_info = gt_metrics_map.get(str(sample_id))
+                    ref_hyp = ref_info.get("ref_transcription", "")
+                recon_hyp = hubert_asr.transcribe(str(recon_wav))
 
             # WER / CER for original (reference audio)
-            if ref_text_normalized:
+            if ref_text_normalized and (original_audio_only or not skip_ref_metrics):
                 ref_wer_val = float(compute_wer(ref_text_normalized, ref_hyp))
                 ref_cer_val = float(compute_cer(ref_text_normalized, ref_hyp))
+            else:
+                ref_wer_val = ref_cer_val = float("nan")
+                
+            if ref_text_normalized and not original_audio_only:
                 recon_wer_val = float(compute_wer(ref_text_normalized, recon_hyp))
                 recon_cer_val = float(compute_cer(ref_text_normalized, recon_hyp))
             else:
-                ref_wer_val = ref_cer_val = recon_wer_val = recon_cer_val = float("nan")
+                recon_wer_val = recon_cer_val = float("nan")
 
             # Consistency Metrics (Speech Consistency between ref and recon)
-            consistent_wer_val = float(compute_wer(ref_hyp, recon_hyp))
-            consistent_cer_val = float(compute_cer(ref_hyp, recon_hyp))
+            if not original_audio_only and not skip_ref_metrics:
+                consistent_wer_val = float(compute_wer(ref_hyp, recon_hyp))
+                consistent_cer_val = float(compute_cer(ref_hyp, recon_hyp))
+            else:
+                consistent_wer_val = consistent_cer_val = float("nan")
 
             def to_pct(v):
                 if v is None or math.isnan(v):
                     return None
                 return round(float(v) * 100.0, 2)
 
-            ref_scores = {"WER": to_pct(ref_wer_val), "CER": to_pct(ref_cer_val)}
+            if skip_ref_metrics:
+                ref_scores = gt_metrics_map.get(str(sample_id), {}).get("ref", {})
+            else:
+                ref_scores = {"WER": to_pct(ref_wer_val), "CER": to_pct(ref_cer_val)}
             recon_scores = {"WER": to_pct(recon_wer_val), "CER": to_pct(recon_cer_val)}
             consistency_scores = {
                 "WER": to_pct(consistent_wer_val),
@@ -373,6 +427,7 @@ def evaluate_dataset(
             results["samples"].append(
                 {
                     "index": global_idx,
+                    "id": str(sample_id),
                     "language": lang[idx],
                     "gt_text": ref_text_normalized,
                     "ref_transcription": ref_hyp,
@@ -416,9 +471,8 @@ def evaluate_dataset(
                 original_audios.append(
                     wandb.Audio(original_audio.numpy(), sample_rate=sr)
                 )
-                reconstructed_audios.append(
-                    wandb.Audio(reconstructed_audio.numpy(), sample_rate=sr)
-                )
+                if not original_audio_only:
+                    reconstructed_audios.append(wandb.Audio(reconstructed_audio.numpy(), sample_rate=sr))
 
             # aggregate per language (partial)
             if setting == "OOD":
@@ -428,18 +482,19 @@ def evaluate_dataset(
             if key not in per_language:
                 per_language[key] = {}
             for m in ["WER", "CER"]:
-                if m in ref_scores:
+                if m in ref_scores and ref_scores[m] is not None:
                     per_language[key].setdefault(f"ref_{m}", [])
                     per_language[key][f"ref_{m}"].append(float(ref_scores[m]))
-                if m in recon_scores:
+                if m in recon_scores and recon_scores[m] is not None:
                     per_language[key].setdefault(f"recon_{m}", [])
                     per_language[key][f"recon_{m}"].append(float(recon_scores[m]))
 
             for m in ["WER", "CER"]:
-                per_language[key].setdefault(f"consistent_{m}", [])
-                per_language[key][f"consistent_{m}"].append(
-                    float(consistency_scores[m])
-                )
+                if consistency_scores[m] is not None:
+                    per_language[key].setdefault(f"consistent_{m}", [])
+                    per_language[key][f"consistent_{m}"].append(
+                        float(consistency_scores[m])
+                    )
 
         processed += len(audios_srs)
         pbar.update(len(audios_srs))
@@ -457,18 +512,25 @@ def evaluate_dataset(
         recon_wav_name = sample.pop("recon_wav_name", None)
 
         if mos_map:
-            orig_mos = mos_map.get(orig_wav_name)
-            recon_mos = mos_map.get(recon_wav_name)
-            if orig_mos is not None:
-                sample["ref"]["UTMOS"] = round(float(orig_mos), 2)
-                # Add to aggregates
-                key = sample["language"] if setting == "OOD" else "all"
-                per_language[key].setdefault("ref_UTMOS", []).append(float(orig_mos))
-            if recon_mos is not None:
-                sample["reconstructed"]["UTMOS"] = round(float(recon_mos), 2)
-                # Add to aggregates
-                key = sample["language"] if setting == "OOD" else "all"
-                per_language[key].setdefault("recon_UTMOS", []).append(float(recon_mos))
+            if original_audio_only:
+                orig_mos = mos_map.get(orig_wav_name)
+                if orig_mos is not None:
+                    sample["ref"]["UTMOS"] = round(float(orig_mos), 2)
+                    key = sample["language"] if setting == "OOD" else "all"
+                    per_language[key].setdefault("ref_UTMOS", []).append(float(orig_mos))
+            else:
+                orig_mos = mos_map.get(orig_wav_name)
+                recon_mos = mos_map.get(recon_wav_name)
+                if orig_mos is not None and not skip_ref_metrics:
+                    sample["ref"]["UTMOS"] = round(float(orig_mos), 2)
+                    # Add to aggregates
+                    key = sample["language"] if setting == "OOD" else "all"
+                    per_language[key].setdefault("ref_UTMOS", []).append(float(orig_mos))
+                if recon_mos is not None:
+                    sample["reconstructed"]["UTMOS"] = round(float(recon_mos), 2)
+                    # Add to aggregates
+                    key = sample["language"] if setting == "OOD" else "all"
+                    per_language[key].setdefault("recon_UTMOS", []).append(float(recon_mos))
 
     # Calculate final delta for all samples
     for sample in results["samples"]:
@@ -493,14 +555,16 @@ def evaluate_dataset(
         except Exception as e:
             logger.warning(f"Failed to cleanup {tmp_audio_dir}: {e}")
 
-    if run is not None:
-        run.log(
-            {
-                "images": images,
-                "original_audios": original_audios,
-                "reconstructed_audios": reconstructed_audios,
-            },
-        )
+    log_payload = {}
+    if images:
+        log_payload["images"] = images
+    if original_audios:
+        log_payload["original_audios"] = original_audios
+    if reconstructed_audios:
+        log_payload["reconstructed_audios"] = reconstructed_audios
+    
+    if run is not None and log_payload:
+        run.log(log_payload)
 
     # finalize aggregates
     for key, agg in per_language.items():
@@ -583,11 +647,14 @@ def run_single_eval(
     set_seed(base_args.get("seed", 42))
 
     baseline_model_name = base_args.get("baseline_model")
+    original_audio_only = base_args.get("original_audio_only", False)
     model = None
     vocoder = None
     baseline_model = None
 
-    if baseline_model_name:
+    if original_audio_only:
+        pass # Skip loading everything
+    elif baseline_model_name:
         baseline_hz = base_args.get("baseline_hz")
         baseline_tau = base_args.get("baseline_tau")
         logger.info(f"Using baseline model: {baseline_model_name}")
@@ -624,7 +691,9 @@ def run_single_eval(
     log_images = bool(base_args.get("wandb_log_images", False))
     wandb_max_images = int(base_args.get("wandb_max_images", 10))
 
-    if baseline_model_name:
+    if original_audio_only:
+        work_dir = Path(base_args["output_dir"]) / base_args["exp_name"] / "original_audio"
+    elif baseline_model_name:
         # Reorganized baseline structure: evaluation/baseline_run/<exp_name>/[param_disambiguation]
         work_dir = (
             Path(base_args["output_dir"]) / "baseline_run" / base_args["exp_name"]
@@ -672,6 +741,8 @@ def run_single_eval(
             max_images=wandb_max_images,
             keep_wavs=base_args.get("keep_wavs", False),
             filter_librispeech=base_args.get("filter_librispeech", False),
+            original_audio_only=original_audio_only,
+            skip_ref_metrics=(not base_args.get("compute_ref_metrics", False)) and (not original_audio_only),
             run=run,
         )
         status = "success"
@@ -854,6 +925,17 @@ def main():
     parser.add_argument(
         "--checkpoints-file", type=str, help="File with one checkpoint path per line"
     )
+    
+    parser.add_argument(
+        "--original-audio-only",
+        action="store_true",
+        help="Bypass model entirely and only evaluate original audio metrics.",
+    )
+    parser.add_argument(
+        "--skip-ref-metrics",
+        action="store_true",
+        help="Skip evaluating reference metrics to save time during model evaluation.",
+    )
     parser.add_argument(
         "--hyperparam-sweep",
         type=str,
@@ -894,20 +976,20 @@ def main():
     if args.checkpoints:
         checkpoints.extend(args.checkpoints)
 
-    if args.baseline_model is None and not checkpoints:
+    if args.baseline_model is None and not checkpoints and not args.original_audio_only:
         raise ValueError(
             "No checkpoints provided. Use --checkpoints or --checkpoints-file"
         )
 
-    if args.baseline_model is not None and not checkpoints:
+    if (args.baseline_model is not None or args.original_audio_only) and not checkpoints:
         # Dummy checkpoint for iteration
-        checkpoints = ["baseline_run"]
+        checkpoints = ["baseline_run" if args.baseline_model else "original_audio"]
 
     # load config dict once and pass down
     config_dict = None
     if args.config_path:
         config_dict = load_config(args.config_path)
-    elif args.baseline_model is None:
+    elif args.baseline_model is None and not args.original_audio_only:
         raise ValueError("Internal model evaluation requires --config-path")
 
     # hyperparam combinations
@@ -952,6 +1034,8 @@ def main():
         "UTMOS": args.UTMOS,
         "keep_wavs": args.keep_wavs,
         "filter_librispeech": args.filter_librispeech,
+        "original_audio_only": args.original_audio_only,
+        "skip_ref_metrics": args.skip_ref_metrics,
     }
 
     # orchestrate one job per GPU
