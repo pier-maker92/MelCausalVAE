@@ -1,7 +1,7 @@
 global_settings:
   dataset_setting: "LibriSpeech"
   filter_librispeech: true
-  num_samples: 128
+  num_samples: 0
   batch_size: 64
   utmos: true
   output_dir: "/home/ec2-user/MelCausalVAE/evaluation/batch_run"
@@ -19,26 +19,26 @@ resources:
 
 jobs:
   # # Baseline Models (eval.py)
-  # baselines:
-  #   - model_name: "encodec"
-  #     # Additional parameters specific to eval.py can be listed here
-  #     extra_args: []
-  #   - model_name: "dualcodec"
-  #     extra_args:
-  #       - "--baseline-hz"
-  #       - "12"
-  #   - model_name: "dualcodec"
-  #     extra_args:
-  #       - "--baseline-hz"
-  #       - "25"
+  baselines:
+    # - model_name: "encodec"
+    #   # Additional parameters specific to eval.py can be listed here
+    #   extra_args: []
+    - model_name: "dualcodec"
+      extra_args:
+        - "--baseline-hz"
+        - "12"
+    - model_name: "dualcodec"
+      extra_args:
+        - "--baseline-hz"
+        - "25"
 
   # Vocoder Models (eval_vocoder.py)
   vocoders:
     - vocoder_name: "vocos"
       # Specific vocoder settings can be passed in extra_args
       extra_args: []
-    - vocoder_name: "hifigan"
-      extra_args: []
+    # - vocoder_name: "hifigan"
+    #   extra_args: []
     - vocoder_name: "bigvgan"
       extra_args:
         - "--vocoder-dir"

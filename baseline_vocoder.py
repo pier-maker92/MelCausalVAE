@@ -4,6 +4,18 @@ import torch
 import torchaudio
 import logging
 from typing import Tuple, Optional
+import huggingface_hub
+
+# Monkey-patch hf_hub_download to handle use_auth_token -> token rename if necessary
+# This fixes compatibility between some versions of SpeechBrain and huggingface_hub
+original_hf_hub_download = huggingface_hub.hf_hub_download
+
+def patched_hf_hub_download(*args, **kwargs):
+    if "use_auth_token" in kwargs:
+        kwargs["token"] = kwargs.pop("use_auth_token")
+    return original_hf_hub_download(*args, **kwargs)
+
+huggingface_hub.hf_hub_download = patched_hf_hub_download
 
 logger = logging.getLogger(__name__)
 
