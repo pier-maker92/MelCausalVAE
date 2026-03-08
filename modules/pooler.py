@@ -112,6 +112,11 @@ class QformerPooler(nn.Module):
 
         # 5. Bottleneck projection
         hidden = self.bottleneck(queries)  # [B, N, embed_dim]
+        # 5.1 add mean of the frames
+        dur = align_float.sum(dim=1).unsqueeze(-1)  # [B, N, 1]
+        hidden = hidden + torch.bmm(align_float.transpose(1, 2), hidden) / (
+            dur + 1e-8
+        )  # [B, N, D]
         mu_z = self.mu(hidden)  # [B, N, latent_dim]
         logvar_z = self.logvar(hidden)  # [B, N, latent_dim]
 
