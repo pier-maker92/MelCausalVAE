@@ -17,5 +17,6 @@ convformer:
   split_route: false
   semantic_dim: null
   semantic_kl_loss_weight: null
+  kl_loss_pooler_weight: 1.0e-3
 
 

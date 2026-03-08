@@ -16,6 +16,9 @@ from modules.downsampler import DownSampler
 from modules.resnet import LinearResNet as ResNet
 from modules.similarity import Aligner, SimilarityUpsamplerBatch
 
+from modules.pooler import QformerPooler
+
+# Inizializzazione
 
 
 @dataclass
@@ -59,6 +62,7 @@ class ConvformerEncoderConfig(SigmaVAEencoderConfig):
     force_downsample: bool = False
     split_route: bool = False
     semantic_dim: Optional[int] = None
+    kl_loss_pooler_weight: float = 1e-3
 
 
 class SigmaVAEEncoder(nn.Module):
@@ -185,6 +189,10 @@ class ConvformerEncoder(SigmaVAEEncoder):
                 num_blocks=n_residual_blocks,
             )
 
+        self.alignment_matrix_builder = AlignmentMatrixBuilder(
+            embedding_dim=512,
+        )
+
         # Causal Transformer tail operating on tokens of size 512
         self.transformer = CausalTransformerTail(
             d_model=512, nheads=tf_heads, nlayers=tf_layers, drop_p=drop_p
@@ -199,6 +207,14 @@ class ConvformerEncoder(SigmaVAEEncoder):
                 if name.split(".")[0] in ["mu", "logvar", "aligner", "upsampler"]:
                     continue
                 param.requires_grad = False
+
+        self.pooler = QformerPooler(
+            embed_dim=512,  # Dimensione embeddings L239
+            latent_dim=64,  # Dimensione bottleneck / target mu
+            num_learnable_queries=3,  # Le altre 3 queries del qformer
+        )
+
+        self.kl_loss_pooler_weight = config.kl_loss_pooler_weight
 
     def forward(
         self,
@@ -223,7 +239,32 @@ class ConvformerEncoder(SigmaVAEEncoder):
         # get alignement
         durations, align_loss = None, None
         if self.config.use_aligner:
-            pass
+            align_out = self.alignment_matrix_builder.build(
+                phonemes,
+                target_T,
+                device=x.device,
+                dtype=x.dtype,
+            )
+            alignments = align_out.alignments  # [B, T, N]
+            segment_padding_mask = align_out.phoneme_mask  # [B, N]
+            durations = align_out.durations  # [B, N]
+            segment_labels = align_out.segment_labels
+            embeddings = align_out.embeddings
+
+            if x.shape[1] != alignments.shape[1]:
+                raise RuntimeError(
+                    f"Temporal mismatch: x has T={x.shape[1]}, "
+                    f"alignments have T={alignments.shape[1]}"
+                )
+
+            align_float = alignments.to(x.dtype)  # [B, T, N]
+            dur = align_float.sum(dim=1).unsqueeze(-1)  # [B, N, 1]
+            # x = torch.bmm(align_float.transpose(1, 2), x) / (dur + 1e-8)  # [B, N, D]
+
+            # Forward pass
+            z, mu_recon = self.pooler(
+                embeddings, alignments, mu.detach(), self.kl_loss_pooler_weight
+            )
 
         kl_loss = None
         if kwargs.get("step", None) is not None:
@@ -233,8 +274,17 @@ class ConvformerEncoder(SigmaVAEEncoder):
                 kwargs["step"], kl_loss_weight=self.kl_loss_weight
             )
 
-        z_upsampled = z
-        upsampled_padding_mask = original_padding_mask
+        if self.config.use_aligner:
+            z_upsampled = torch.bmm(align_float, z)  # [B, T, latent_dim]
+            phase = self._compute_phase(align_float, durations)  # [B, T, 1]
+            z_cat = torch.cat([z_upsampled, phase], dim=-1)  # [B, T, latent_dim+1]
+
+            z_upsampled = self.upsample_refine(z_cat.transpose(1, 2)).transpose(1, 2)
+
+            upsampled_padding_mask = frame_padding_mask
+        else:
+            z_upsampled = z
+            upsampled_padding_mask = padding_mask
 
         return ConvformerOutput(
             z=z,
