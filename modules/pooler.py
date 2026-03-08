@@ -20,12 +20,12 @@ class QformerPooler(nn.Module):
             torch.randn(1, 1, num_learnable_queries, embed_dim)
         )
 
-        # Cross Attention: queries are embed_dim, keys/values are latent_dim
+        # Cross Attention: queries are embed_dim, keys/values are embed_dim
         self.cross_attn = nn.MultiheadAttention(
             embed_dim=embed_dim,
             num_heads=num_heads,
-            kdim=latent_dim,
-            vdim=latent_dim,
+            kdim=embed_dim,
+            vdim=embed_dim,
             batch_first=True,
         )
 
@@ -40,26 +40,29 @@ class QformerPooler(nn.Module):
         self.mu = nn.Linear(embed_dim, latent_dim)
         self.logvar = nn.Linear(embed_dim, latent_dim)
 
-        # Convolutional Refiner to reconstruct mu and logvar after upsampling
+        # Convolutional Refiner to reconstruct x after upsampling
         self.refiner = nn.Sequential(
-            nn.Conv1d(latent_dim, latent_dim * 2, kernel_size=3, padding=1),
+            nn.Conv1d(latent_dim + 1, embed_dim, kernel_size=3, padding=1),
             nn.SiLU(),
-            nn.Conv1d(latent_dim * 2, latent_dim * 2, kernel_size=3, padding=1),
+            nn.Conv1d(embed_dim, embed_dim, kernel_size=3, padding=1),
         )
 
-    def forward(self, embeddings, alignments, mu, kl_loss_pooler_weight):
+    def forward(self, embeddings, alignments, x, padding_mask_phoneme, padding_mask_frames, kl_loss_pooler_weight):
         """
         Args:
             embeddings: [B, N, embed_dim] (Phoneme embeddings)
             alignments: [B, T, N] (Monotone matrix of 1s and 0s)
-            mu: [B, T, latent_dim] (Continuous representations)
+            x: [B, T, embed_dim] (Continuous representations)
+            padding_mask_phoneme: [B, T] (Padding mask)
+            padding_mask_frames: [B, T] (Padding mask)
 
         Returns:
-            z: [B, N, latent_dim] (Bottlenecked phoneme-level representations)
-            mu_recon: [B, T, latent_dim] (Reconstructed form of mu)
+            x_recon: [B, T, embed_dim] (Reconstructed form of x)
+            kl_loss: [1] (KL divergence for pooler bottleneck)
+            l1_l2_loss: [1] (Reconstruction loss on x)
         """
         B, N, D = embeddings.shape
-        _, T, _ = mu.shape
+        _, T, _ = x.shape
 
         # 1. Prepare Queries
         # queries from embeddings: [B, N, 1, D]
@@ -96,9 +99,9 @@ class QformerPooler(nn.Module):
 
         # 3. Cross Attention
         # queries: [B, N*4, embed_dim]
-        # keys/values (mu): [B, T, latent_dim]
+        # keys/values (x): [B, T, embed_dim]
         attn_out, _ = self.cross_attn(
-            query=queries, key=mu, value=mu, attn_mask=bool_mask_mha
+            query=queries, key=x, value=x, attn_mask=bool_mask_mha
         )
 
         # Residual and Norm
@@ -113,10 +116,9 @@ class QformerPooler(nn.Module):
         # 5. Bottleneck projection
         hidden = self.bottleneck(queries)  # [B, N, embed_dim]
         # 5.1 add mean of the frames
+        align_float = alignments.to(hidden.dtype)
         dur = align_float.sum(dim=1).unsqueeze(-1)  # [B, N, 1]
-        hidden = hidden + torch.bmm(align_float.transpose(1, 2), hidden) / (
-            dur + 1e-8
-        )  # [B, N, D]
+        hidden = hidden + torch.bmm(align_float.transpose(1, 2), x) / (dur + 1e-8)
         mu_z = self.mu(hidden)  # [B, N, latent_dim]
         logvar_z = self.logvar(hidden)  # [B, N, latent_dim]
 
@@ -130,23 +132,27 @@ class QformerPooler(nn.Module):
         align_float = alignments.to(z.dtype)
         z_upsampled = torch.bmm(align_float, z)  # [B, T, latent_dim]
 
+        # Compute phoneme phase clock
+        dur = align_float.sum(dim=1).clamp(min=1e-5) # [B, N]
+        running = torch.cumsum(align_float, dim=1) - 0.5 # [B, T, N]
+        phase_n = running / dur.unsqueeze(1) # [B, T, N]
+        phase = (phase_n * align_float).sum(dim=-1, keepdim=True) # [B, T, 1]
+        
+        z_upsampled = torch.cat([z_upsampled, phase], dim=-1) # [B, T, latent_dim + 1]
+
         # Convolutional Refiner
-        z_upsampled = z_upsampled.transpose(1, 2)  # [B, latent_dim, T]
-        refiner_out = self.refiner(z_upsampled)  # [B, latent_dim * 2, T]
-        refiner_out = refiner_out.transpose(1, 2)  # [B, T, latent_dim * 2]
-
-        # Chunk the output into mu and logvar
-        mu_recon, logvar_recon = torch.chunk(
-            refiner_out, 2, dim=-1
-        )  # [B, T, latent_dim] each
-
-        # Reparameterization trick for reconstructed z
-        std_recon = torch.exp(0.5 * logvar_recon)
-        eps_recon = torch.randn_like(std_recon)
-        z_recon = mu_recon + eps_recon * std_recon  # [B, T, latent_dim]
+        z_upsampled = z_upsampled.transpose(1, 2)  # [B, latent_dim + 1, T]
+        x_recon = self.refiner(z_upsampled)  # [B, embed_dim, T]
+        x_recon = x_recon.transpose(1, 2)  # [B, T, embed_dim]
 
         # kl loss
-        kl_loss = -0.5 * torch.sum(1 + logvar_z - mu_z.pow(2) - logvar_z.exp())
+        padding_mask_phoneme = padding_mask_phoneme.squeeze(-1)
+        kl_loss = -0.5 * torch.sum(1 + logvar_z[~padding_mask_phoneme] - mu_z[~padding_mask_phoneme].pow(2) - logvar_z[~padding_mask_phoneme].exp())
         kl_loss = kl_loss * kl_loss_pooler_weight
 
-        return z_recon, mu_recon, kl_loss
+        # l1 + l2 loss
+        l1_loss = torch.mean(torch.abs(x[~padding_mask_frames] - x_recon[~padding_mask_frames]))
+        l2_loss = torch.mean((x[~padding_mask_frames] - x_recon[~padding_mask_frames])**2)
+        l1_l2_loss = l1_loss + l2_loss
+
+        return x_recon, kl_loss, l1_l2_loss

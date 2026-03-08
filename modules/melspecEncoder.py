@@ -44,8 +44,8 @@ class MelSpectrogramEncoder(torch.nn.Module):
             center=self.padding == "center",
             power=1,
         )
-        self.std = 2.1042184829711914 # 4.864339828491211.  test/train
-        self.mean = -1.0710804462432861 # -3.325150489807129
+        self.register_buffer("std", torch.tensor(5.580673694610596)) # 2.1042184829711914  train/test
+        self.register_buffer("mean", torch.tensor(-4.2305192947387695)) # -1.0710804462432861 
         self.normalize = config.normalize
 
     def _update_std_mean_with_momentum(self, mel_spec: torch.Tensor):

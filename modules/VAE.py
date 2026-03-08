@@ -79,13 +79,16 @@ def soft_upsampling_with_durations(
     return upsampled * mel_mask.unsqueeze(-1).to(upsampled.dtype)
 
 
+from transformers.utils import ModelOutput
+
 @dataclass
-class VAEOutput:
-    audio_loss: torch.Tensor
-    kl_loss: torch.Tensor
+class VAEOutput(ModelOutput):
+    audio_loss: Optional[torch.Tensor] = None
+    kl_loss: Optional[torch.Tensor] = None
     mu_mean: Optional[torch.Tensor] = None
     mu_var: Optional[torch.Tensor] = None
     align_loss: Optional[torch.Tensor] = None
+    l1_l2_loss: Optional[torch.Tensor] = None
 
 
 @dataclass
@@ -96,6 +99,7 @@ class VAEConfig:
     decoder_config: DiTConfig
     mel_spec_config: MelSpectrogramConfig
     use_aligner: bool = False
+    train_only_aligner: bool = False
 
     @property
     def hidden_size(self):
@@ -128,6 +132,14 @@ class VAE(torch.nn.Module):
         self.decoder.expansion_factor = config.encoder_config.compress_factor_C
         self.dtype = dtype
         self.set_dtype(dtype)
+        
+        if config.train_only_aligner:
+            for name, param in self.named_parameters():
+                if "pooler" not in name:
+                    param.requires_grad = False
+                else:
+                    param.requires_grad = True
+                    
         count_parameters_by_module(self.encoder)
 
     def set_dtype(self, dtype: torch.dtype):
@@ -205,11 +217,16 @@ class VAE(torch.nn.Module):
             step=kwargs.get("training_step", None),
             phonemes=kwargs.get("phonemes", None),
         )
-        audio_loss = self.decoder(
-            target=x,
-            target_padding_mask=convformer_output.upsampled_padding_mask,
-            context_vector=convformer_output.z_upsampled,
-        ).loss
+
+        if self.config.train_only_aligner:
+            audio_loss = torch.tensor(0.0, device=x.device, requires_grad=True)
+            convformer_output.kl_loss = torch.tensor(0.0, device=x.device, requires_grad=True)
+        else:
+            audio_loss = self.decoder(
+                target=x,
+                target_padding_mask=convformer_output.upsampled_padding_mask,
+                context_vector=convformer_output.z_upsampled,
+            ).loss
 
         mu_mean = convformer_output.z[~convformer_output.padding_mask].mean()
         mu_var = convformer_output.z[~convformer_output.padding_mask].var()
@@ -217,6 +234,7 @@ class VAE(torch.nn.Module):
             audio_loss=audio_loss,
             kl_loss=convformer_output.kl_loss,
             align_loss=convformer_output.align_loss,
+            l1_l2_loss=convformer_output.l1_l2_loss,
             mu_mean=mu_mean,
             mu_var=mu_var,
         )

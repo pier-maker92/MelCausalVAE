@@ -1,6 +1,6 @@
 wandb
 vocos
-datasets
+datasets==4.4.0
 torch==2.8
 torchaudio
 matplotlib

@@ -139,7 +139,7 @@ class VAEtrainer(Trainer):
         super().__init__(**kwargs)
         self.phonemes = phonemes
         # Register granular losses
-        granular_losses = ["audio_loss", "kl_loss", "mu_mean", "mu_var", "align_loss"]
+        granular_losses = ["audio_loss", "kl_loss", "mu_mean", "mu_var", "align_loss", "l1_l2_loss"]
         try:
             if getattr(self.model.encoder.config, "semantic_regulation", False):
                 granular_losses.append("semantic_loss")
@@ -167,6 +167,7 @@ class VAEtrainer(Trainer):
             audio_loss = outputs.audio_loss
             kl_loss = outputs.kl_loss
             semantic_loss = getattr(outputs, "semantic_loss", None)
+            l1_l2_loss = getattr(outputs, "l1_l2_loss", None)
             ctc_loss = getattr(outputs, "ctc_loss", None)
             align_loss = getattr(outputs, "align_loss", None)
             mu_mean = getattr(outputs, "mu_mean")
@@ -177,6 +178,7 @@ class VAEtrainer(Trainer):
                 + (semantic_loss if semantic_loss is not None else 0.0)
                 + (ctc_loss if ctc_loss is not None else 0.0)
                 + (align_loss if align_loss is not None else 0.0)
+                + (l1_l2_loss if l1_l2_loss is not None else 0.0)
             )
 
             # Accumulate granular losses
@@ -205,6 +207,12 @@ class VAEtrainer(Trainer):
                     ctc_loss = ctc_loss.mean()
                 self.control.granular_losses["ctc_loss"] += (
                     ctc_loss.detach() / self.args.gradient_accumulation_steps
+                )
+            if l1_l2_loss is not None:
+                if self.args.n_gpu > 1:
+                    l1_l2_loss = l1_l2_loss.mean()
+                self.control.granular_losses["l1_l2_loss"] += (
+                    l1_l2_loss.detach() / self.args.gradient_accumulation_steps
                 )
             if mu_mean is not None:
                 val = mu_mean.detach().float()
@@ -235,12 +243,14 @@ class VAEtrainer(Trainer):
             kl_loss = outputs.kl_loss
             semantic_loss = getattr(outputs, "semantic_loss", None)
             align_loss = getattr(outputs, "align_loss", None)
+            l1_l2_loss = getattr(outputs, "l1_l2_loss", None)
             loss = (
                 audio_loss
                 + kl_loss
                 + (semantic_loss if semantic_loss is not None else 0.0)
                 + (ctc_loss if ctc_loss is not None else 0.0)
                 + (align_loss if align_loss is not None else 0.0)
+                + (l1_l2_loss if l1_l2_loss is not None else 0.0)
             )
             return (loss, outputs) if return_outputs else loss
 
@@ -630,6 +640,7 @@ def main():
         raise ValueError(f"Dataset {dataset_name} not supported")
     hubert_guidance = training_cfg.pop("hubert_guidance", False)
     phonemes = training_cfg.pop("phonemes", False)
+    train_only_aligner = training_cfg.pop("train_only_aligner", False)
 
     # Inject into convformer config for the model
     convformer_cfg["phoneme_parsing_mode"] = phoneme_parsing_mode
@@ -671,6 +682,7 @@ def main():
             encoder_config=encoder_config,
             decoder_config=decoder_config,
             mel_spec_config=MelSpectrogramConfig(),
+            train_only_aligner=train_only_aligner,
         ),
         dtype=dtype,
     )
