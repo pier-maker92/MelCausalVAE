@@ -32,3 +32,4 @@ training:
   phonemes: false
   phoneme_parsing_mode: "phoneme"
   vocab_path: "data/vocab.json"
+  train_only_aligner: false

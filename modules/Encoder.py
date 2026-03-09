@@ -16,8 +16,10 @@ from modules.downsampler import DownSampler
 from modules.resnet import LinearResNet as ResNet
 from modules.similarity import Aligner, SimilarityUpsamplerBatch
 from modules.alignement import AlignmentMatrixBuilder
+from modules.qformer import AlignmentQFormer, DiTConditioningProjector, pooled_norm_penalty, DifferentiableBoundaryCorrector
 
-from modules.pooler import QformerPooler
+
+#from modules.pooler import QformerPooler
 
 # Inizializzazione
 
@@ -194,6 +196,7 @@ class ConvformerEncoder(SigmaVAEEncoder):
         self.alignment_matrix_builder = AlignmentMatrixBuilder(
             embedding_dim=512,
         )
+        self.proj_mean = nn.Linear(512, latent_dim)
 
         # Causal Transformer tail operating on tokens of size 512
         self.transformer = CausalTransformerTail(
@@ -204,10 +207,17 @@ class ConvformerEncoder(SigmaVAEEncoder):
         if config.logvar_layer:
             self.logvar = nn.Linear(512, latent_dim)
 
-        self.pooler = QformerPooler(
-            embed_dim=512,  # Dimensione embeddings L239
-            latent_dim=64,  # Dimensione bottleneck / target mu
-            num_learnable_queries=3,  # Le altre 3 queries del qformer
+        self.pooler = AlignmentQFormer(
+            d_model=512,
+            num_queries_per_phoneme=4,
+            num_layers=4,
+            dropout=0.1,
+            out_dim=latent_dim
+        )
+
+        self.conditioning_proj = DiTConditioningProjector(
+            d_model=latent_dim,
+            dropout=0.1,
         )
 
         if config.freeze_encoder:
@@ -217,6 +227,12 @@ class ConvformerEncoder(SigmaVAEEncoder):
                 param.requires_grad = False
 
         self.kl_loss_pooler_weight = config.kl_loss_pooler_weight
+
+        self.boundary_corrector = DifferentiableBoundaryCorrector(
+            d_model=512,
+            num_layers=2,
+            dropout=0.1,
+        )
 
     def forward(
         self,
@@ -241,7 +257,7 @@ class ConvformerEncoder(SigmaVAEEncoder):
                 dtype=x.dtype,
             )
             alignments = align_out.alignments  # [B, T, N]
-            segment_padding_mask = align_out.phoneme_mask  # [B, N]
+            padding_mask = align_out.phoneme_mask  # [B, N]
             durations = align_out.durations  # [B, N]
             segment_labels = align_out.segment_labels
             embeddings = align_out.embeddings
@@ -257,45 +273,49 @@ class ConvformerEncoder(SigmaVAEEncoder):
             # x = torch.bmm(align_float.transpose(1, 2), x) / (dur + 1e-8)  # [B, N, D]
 
             # Forward pass
-            x, align_loss, l1_l2_loss = self.pooler(
-                embeddings, alignments, x.detach(), segment_padding_mask, padding_mask, self.kl_loss_pooler_weight
+            out = self.pooler(
+                mel_features=x,
+                alignment=alignments,
+                phoneme_mask=padding_mask,
             )
+            z = out.pooled
+            pos = out.rel_pos
+            kl_loss = pooled_norm_penalty(z, padding_mask) * 0
+            pooled_mean = torch.bmm(
+                align_float.permute(0, 2, 1),                        # (B, N, T)
+                self.proj_mean(x)                                        # (B, T, d_model)
+            ) / (durations.unsqueeze(-1) + 1e-8)                  # (B, N, d_model)
+            z += pooled_mean
 
-        mu = self.mu(x)
-        logvar = None
-        if hasattr(self, "logvar"):
-            logvar = self.logvar(x)
-        z = self.reparameterize(mu, logvar)
-        assert not torch.isnan(z).any(), "z contains nan after reparameterization"
+        # mu = self.mu(x)
+        # logvar = None
+        # if hasattr(self, "logvar"):
+        #     logvar = self.logvar(x)
+        # z = self.reparameterize(mu, logvar)
+        # assert not torch.isnan(z).any(), "z contains nan after reparameterization"
 
         
 
-        kl_loss = None
-        if kwargs.get("step", None) is not None:
-            kl_loss = self.kl_divergence(
-                mu, logvar, padding_mask
-            ) * self.get_kl_cosine_schedule(
-                kwargs["step"], kl_loss_weight=self.kl_loss_weight
-            )
+        # kl_loss = None
+        # if kwargs.get("step", None) is not None:
+        #     kl_loss = self.kl_divergence(
+        #         mu, logvar, padding_mask
+        #     ) * self.get_kl_cosine_schedule(
+        #         kwargs["step"], kl_loss_weight=self.kl_loss_weight
+        #     )
 
         if self.config.use_aligner:
-            pass
-        #     z_upsampled = torch.bmm(align_float, z)  # [B, T, latent_dim]
-        #     phase = self._compute_phase(align_float, durations)  # [B, T, 1]
-        #     z_cat = torch.cat([z_upsampled, phase], dim=-1)  # [B, T, latent_dim+1]
-
-        #     z_upsampled = self.upsample_refine(z_cat.transpose(1, 2)).transpose(1, 2)
-
-        #     upsampled_padding_mask = frame_padding_mask
-        # else:
-        z_upsampled = z
-        upsampled_padding_mask = padding_mask
+            z_upsampled = self.conditioning_proj(z, alignments, pos)
+            upsampled_padding_mask = original_padding_mask
+        else:
+            z_upsampled = z
+            upsampled_padding_mask = padding_mask
 
         return ConvformerOutput(
             z=z,
             kl_loss=kl_loss,
             padding_mask=padding_mask,
-            mu=mu,
+            mu=z,
             durations=durations,
             z_upsampled=z_upsampled,
             align_loss=align_loss,
