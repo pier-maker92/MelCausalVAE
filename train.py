@@ -156,6 +156,7 @@ class VAEtrainer(Trainer):
             audios_srs = inputs["output_audios_srs"]
             hubert_guidance = inputs.get("hubert_guidance", None)
             phonemes = inputs.get("phonemes", None)
+            words = inputs.get("words", None)
 
             # Forward pass
             outputs = model(
@@ -163,6 +164,7 @@ class VAEtrainer(Trainer):
                 training_step=self.state.global_step,
                 hubert_guidance=hubert_guidance,
                 phonemes=phonemes,
+                words=words,
             )
             audio_loss = outputs.audio_loss
             kl_loss = outputs.kl_loss
@@ -385,6 +387,7 @@ class VAEtrainer(Trainer):
 
         hubert_guidance = batch.get("hubert_guidance", None)
         phonemes = batch.get("phonemes", None) if self.phonemes else None
+        words = batch.get("words", None)
 
         with torch.no_grad():
             results = self.model.encode_and_sample(
@@ -394,6 +397,7 @@ class VAEtrainer(Trainer):
                 guidance_scale=1.5,
                 hubert_guidance=hubert_guidance,
                 phonemes=phonemes,
+                words=words,
             )
 
         if phonemes is not None:

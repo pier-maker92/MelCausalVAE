@@ -5,6 +5,18 @@ AlignmentMatrixBuilder — Converts phoneme-level timestamp alignments
 Uses MelSpectrogramConfig for the exact time-to-frame mapping:
     frames_per_second = sampling_rate / hop_length   (e.g. 24000/256 = 93.75 Hz)
 
+Optional temporal compression (compress_factor):
+    When the mel spectrogram is passed through an encoder that downsamples
+    the time axis (e.g. a CausalVAE with stride 2 or 4), the effective frame
+    rate seen by downstream modules is:
+
+        effective_fps = frames_per_second / compress_factor
+
+    Setting ``compress_factor=2`` (2X) or ``compress_factor=4`` (4X) makes the
+    builder map phoneme timestamps directly into the *compressed* frame space,
+    so ``total_frames`` passed to ``build()`` should already be the compressed
+    length (T // compress_factor).
+
 Alignment strategy:
   - Stage 1: map each phoneme interval to frames with ±1 frame tolerance.
   - Stage 2: any remaining unassigned frames (discontinuity gaps) are labelled
@@ -122,7 +134,18 @@ class AlignmentMatrixBuilder(nn.Module):
     and produce dense phoneme embeddings.
 
     Args:
-        mel_config: MelSpectrogramConfig used to derive the exact frame rate.
+        mel_config: MelSpectrogramConfig used to derive the base frame rate.
+        compress_factor: Temporal downsampling factor applied by the encoder
+            *after* the mel spectrogram is computed (default ``1`` = no
+            compression).  Supported values: any positive integer, typically
+            ``1``, ``2``, or ``4`` (1X / 2X / 4X).  The effective frame rate
+            used when mapping phoneme timestamps to frame indices is::
+
+                effective_fps = (sampling_rate / hop_length) / compress_factor
+
+            ``total_frames`` passed to :py:meth:`build` / :py:meth:`build_single`
+            must already be the *compressed* frame count
+            (i.e. ``mel_T // compress_factor``).
         num_embeddings: vocabulary capacity (default 120).
         embedding_dim: size of each embedding vector (default 64).
     """
@@ -132,6 +155,7 @@ class AlignmentMatrixBuilder(nn.Module):
     def __init__(
         self,
         mel_config: Optional[MelSpectrogramConfig] = None,
+        compress_factor: int = 1,
         num_embeddings: int = 120,
         embedding_dim: int = 64,
         **kwargs,
@@ -139,11 +163,20 @@ class AlignmentMatrixBuilder(nn.Module):
         super().__init__()
         if mel_config is None:
             mel_config = MelSpectrogramConfig()
+        if compress_factor < 1 or not isinstance(compress_factor, int):
+            raise ValueError(
+                f"compress_factor must be a positive integer, got {compress_factor!r}."
+            )
         self.mel_config = mel_config
+        self.compress_factor = compress_factor
 
-        # Derived constants
-        self.frames_per_second = mel_config.sampling_rate / mel_config.hop_length
-        self.ms_per_frame = 1000.0 / self.frames_per_second
+        # Base frame rate derived from the mel config
+        _base_fps = mel_config.sampling_rate / mel_config.hop_length
+
+        # Effective frame rate after temporal compression
+        # e.g. compress_factor=2 → frames_per_second is halved
+        self.frames_per_second: float = _base_fps / compress_factor
+        self.ms_per_frame: float = 1000.0 / self.frames_per_second
 
         # Vocabulary & embedding
         self.vocab = PhonemeVocabulary(max_size=num_embeddings)
@@ -152,6 +185,32 @@ class AlignmentMatrixBuilder(nn.Module):
             embedding_dim=embedding_dim,
             padding_idx=self.vocab.pad_id,
         )
+
+    # ------------------------------------------------------------------
+    # Frame-rate introspection
+    # ------------------------------------------------------------------
+
+    @property
+    def effective_frame_rate_info(self) -> dict:
+        """
+        Return a dict summarising the frame-rate parameters in use.
+
+        Example (sampling_rate=24000, hop_length=256, compress_factor=4)::
+
+            {
+                'base_fps':        93.75,   # mel frames per second
+                'compress_factor': 4,
+                'effective_fps':   23.4375, # compressed frames per second
+                'ms_per_frame':    42.667,  # ms per compressed frame
+            }
+        """
+        base_fps = self.mel_config.sampling_rate / self.mel_config.hop_length
+        return {
+            "base_fps": base_fps,
+            "compress_factor": self.compress_factor,
+            "effective_fps": self.frames_per_second,
+            "ms_per_frame": self.ms_per_frame,
+        }
 
     # ------------------------------------------------------------------
     # Helpers
@@ -204,52 +263,54 @@ class AlignmentMatrixBuilder(nn.Module):
         self,
         phoneme_alignment: List[dict],
         total_frames: int,
-    ) -> list:
+    ) -> List[int]:
         """
-        Assign a phoneme label to each mel frame.
+        Assign an index (pointing to phoneme_alignment) to each mel frame.
 
         Returns:
-            framewise_label: list[str] of length *total_frames*.
-                             Unassigned frames are marked with ``GAP_TOKEN``.
+            framewise_idx: list[int] of length *total_frames*.
+                           Values are indices into *phoneme_alignment*.
+                           Gaps are marked with -1.
         """
-        gap = self._GAP_SENTINEL
         ms_per_frame = self.ms_per_frame
 
-        # Convert seconds → ms and sort by onset
-        ts_items = sorted(
-            [
-                {
-                    "phoneme": p["phoneme"],
-                    "start_ms": p["start"] * 1000.0,
-                    "end_ms": p["end"] * 1000.0,
-                }
-                for p in phoneme_alignment
-            ],
-            key=lambda x: x["start_ms"],
-        )
+        # Convert seconds → ms
+        ts_items = [
+            {
+                "index": i,
+                "start_ms": p["start"] * 1000.0,
+                "end_ms": p["end"] * 1000.0,
+                "center_ms": (p["start"] + p["end"]) * 500.0,
+            }
+            for i, p in enumerate(phoneme_alignment)
+        ]
+        # Sort by onset to handle overlapping timestamps gracefully
+        ts_items.sort(key=lambda x: x["start_ms"])
 
-        framewise_label: list = [gap] * total_frames
+        # -1 represents a gap
+        framewise_idx: List[int] = [-1] * total_frames
 
-        # ---- Stage 1: exact boundaries with ±1 frame tolerance ----
+        # ---- Pass 1: standard assignment with ±1 frame tolerance ----
         for ts in ts_items:
             start_idx = max(int(ts["start_ms"] / ms_per_frame), 0)
             end_idx = min(self._ceil(ts["end_ms"] / ms_per_frame), total_frames)
 
-            if end_idx - start_idx > total_frames:
-                continue  # degenerate entry — skip
-            end_idx = min(end_idx, total_frames)
-
-            # Fill the exact range, expanding ±1 only into gaps
+            # Stage 1: fill range into gaps (±1 frame tolerance)
             for frame_i in range(max(start_idx - 1, 0), min(end_idx + 1, total_frames)):
-                if framewise_label[frame_i] is gap:
-                    framewise_label[frame_i] = ts["phoneme"]
+                if framewise_idx[frame_i] == -1:
+                    framewise_idx[frame_i] = ts["index"]
 
-        # ---- Stage 2: assign remaining gaps to GAP_TOKEN ----
-        for i in range(total_frames):
-            if framewise_label[i] is gap:
-                framewise_label[i] = GAP_TOKEN
+        # ---- Pass 2: 1-frame minimum guarantee ----
+        # If any phoneme index is missing, force it into its closest frame
+        assigned_indices = set(framewise_idx)
+        for ts in ts_items:
+            if ts["index"] not in assigned_indices:
+                # Target the frame closest to the phoneme's temporal center
+                center_frame = int(ts["center_ms"] / ms_per_frame)
+                center_frame = max(0, min(center_frame, total_frames - 1))
+                framewise_idx[center_frame] = ts["index"]
 
-        return framewise_label
+        return framewise_idx
 
     # ------------------------------------------------------------------
     # Public API
@@ -263,11 +324,8 @@ class AlignmentMatrixBuilder(nn.Module):
         dtype: torch.dtype,
     ) -> AlignmentOutput:
         """
-        Build binary alignment matrices for a batch of utterances,
-        padded to uniform size.
-
-        Returns an :class:`AlignmentOutput` containing alignments,
-        phoneme_mask, durations, segment_labels, label_ids, and embeddings.
+        Build binary alignment matrices for a batch of utterances.
+        Every input phoneme is guaranteed to have at least one frame.
         """
         per_utt: List[torch.Tensor] = []
         all_segment_labels: List[List[str]] = []
@@ -279,28 +337,43 @@ class AlignmentMatrixBuilder(nn.Module):
                 all_segment_labels.append([])
                 continue
 
-            # Stage 1 + gap assignment
-            framewise_label = self._fill_framewise(phoneme_alignment, T)
+            # Get frame-to-index mapping (index into phoneme_alignment or -1)
+            framewise_idx = self._fill_framewise(phoneme_alignment, T)
 
-            # Build segments from contiguous runs of the same label
-            segments: list = []  # (label, start_frame, end_frame)
-            current = framewise_label[0]
+            # Build segments from contiguous runs of the same index.
+            # This prevents merging of identical adjacent phonemes because
+            # they have different indices.
+            segments: List[Tuple[str, int, int]] = []
+            curr_idx = framewise_idx[0]
             start = 0
             for i in range(1, T):
-                if framewise_label[i] != current:
-                    segments.append((current, start, i))
-                    current = framewise_label[i]
+                if framewise_idx[i] != curr_idx:
+                    label = (
+                        phoneme_alignment[curr_idx]["phoneme"]
+                        if curr_idx != -1
+                        else GAP_TOKEN
+                    )
+                    segments.append((label, start, i))
+                    curr_idx = framewise_idx[i]
                     start = i
-            segments.append((current, start, T))
+            # Final segment
+            label = (
+                phoneme_alignment[curr_idx]["phoneme"]
+                if curr_idx != -1
+                else GAP_TOKEN
+            )
+            segments.append((label, start, T))
 
-            # Construct the binary alignment matrix
+            # Construct the binary alignment matrix (T, N)
             N = len(segments)
             alignment = torch.zeros((T, N), dtype=torch.float32)
-            for col, (_label, s, e) in enumerate(segments):
+            segment_labels = []
+            for col, (label, s, e) in enumerate(segments):
                 alignment[s:e, col] = 1.0
+                segment_labels.append(label)
 
             per_utt.append(alignment)
-            all_segment_labels.append([label for label, _s, _e in segments])
+            all_segment_labels.append(segment_labels)
 
         # ---- Pad to (B, max_T, max_N) ----
         B = len(per_utt)
@@ -347,3 +420,126 @@ class AlignmentMatrixBuilder(nn.Module):
         return self.build(
             [phoneme_alignment], [total_frames], device=device, dtype=dtype
         )
+
+
+# ------------------------------------------------------------------
+# Word-level alignment utilities
+# ------------------------------------------------------------------
+
+
+def build_word_frame_alignment(
+    word_alignment: List[dict],
+    total_frames: int,
+    frames_per_second: float,
+) -> torch.LongTensor:
+    """
+    Map word-level timestamps to per-frame word IDs.
+
+    Args:
+        word_alignment: List of dicts with ``start`` (seconds), ``end`` (seconds),
+            and ``word`` keys, in temporal order.
+        total_frames: Number of (possibly compressed) frames.
+        frames_per_second: Effective frame rate (base FPS / compress_factor).
+
+    Returns:
+        ``(T,)`` LongTensor of word indices.  Words are numbered ``0 .. W-1``
+        in order; inter-word gaps receive unique IDs that continue the count
+        so that each gap is its own "word" and never merges with neighbours.
+    """
+    if total_frames == 0:
+        return torch.zeros(0, dtype=torch.long)
+
+    ms_per_frame = 1000.0 / frames_per_second
+
+    # -1 = unassigned / gap
+    frame_word: List[int] = [-1] * total_frames
+
+    for word_idx, w in enumerate(word_alignment):
+        start_ms = w["start"] * 1000.0
+        end_ms = w["end"] * 1000.0
+
+        start_frame = max(int(start_ms / ms_per_frame), 0)
+        end_frame = min(math.ceil(end_ms / ms_per_frame), total_frames)
+
+        # Fill with ±1 tolerance so every word gets at least 1 frame
+        for f in range(max(start_frame - 1, 0), min(end_frame + 1, total_frames)):
+            if frame_word[f] == -1:
+                frame_word[f] = word_idx
+
+    # Guarantee: every word index is assigned at least one frame
+    assigned = set(frame_word)
+    for word_idx, w in enumerate(word_alignment):
+        if word_idx not in assigned:
+            center_ms = (w["start"] + w["end"]) * 500.0
+            center_frame = int(center_ms / ms_per_frame)
+            center_frame = max(0, min(center_frame, total_frames - 1))
+            frame_word[center_frame] = word_idx
+
+    # Convert to monotonic word IDs.
+    # Gaps (-1) get unique IDs so they never merge with adjacent segments.
+    num_words = len(word_alignment)
+    gap_counter = num_words  # IDs for gap frames start after real words
+    word_ids: List[int] = []
+    prev_raw = None
+    for raw in frame_word:
+        if raw == -1:
+            # Each contiguous gap run gets one unique ID
+            if prev_raw != -1 or len(word_ids) == 0:
+                word_ids.append(gap_counter)
+                gap_counter += 1
+            else:
+                word_ids.append(word_ids[-1])
+        else:
+            word_ids.append(raw)
+        prev_raw = raw
+
+    return torch.tensor(word_ids, dtype=torch.long)
+
+
+def build_word_causal_attention_mask(
+    word_ids: torch.LongTensor,
+) -> torch.BoolTensor:
+    """
+    Build a ``(T, T)`` attention mask from per-frame word IDs.
+
+    Semantics of ``mask[i, j] = True``: frame *i* **can** attend to frame *j*.
+
+    - Frames within the same word attend **bidirectionally**.
+    - Frames can attend to all frames of **past** words.
+    - Frames **cannot** attend to frames of **future** words.
+
+    This reduces to ``word_ids[j] <= word_ids[i]``.
+    """
+    # word_ids: (T,)
+    # Compare every pair: result[i, j] = (word_ids[j] <= word_ids[i])
+    return word_ids.unsqueeze(0) <= word_ids.unsqueeze(1)  # (T, T)
+
+
+def build_word_causal_attention_mask_batch(
+    word_ids_list: List[torch.LongTensor],
+    padding_mask: torch.BoolTensor,
+    device: torch.device,
+) -> torch.BoolTensor:
+    """
+    Batched version of :func:`build_word_causal_attention_mask`.
+
+    Args:
+        word_ids_list: Per-utterance word-ID tensors (variable length).
+        padding_mask: ``(B, T_max)`` with ``True`` = **valid**, ``False`` = padding.
+        device: Target device.
+
+    Returns:
+        ``(B, T_max, T_max)`` bool mask.  Padded positions are ``False``.
+    """
+    B = len(word_ids_list)
+    T_max = padding_mask.shape[1]
+
+    masks = torch.zeros(B, T_max, T_max, dtype=torch.bool, device=device)
+    for i, wids in enumerate(word_ids_list):
+        T = wids.shape[0]
+        m = build_word_causal_attention_mask(wids.to(device))  # (T, T)
+        masks[i, :T, :T] = m
+
+    # Zero out padding rows/cols
+    masks = masks & padding_mask.unsqueeze(2) & padding_mask.unsqueeze(1)
+    return masks

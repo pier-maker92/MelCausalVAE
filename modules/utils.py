@@ -137,9 +137,13 @@ class Attend(nn.Module):
         # SDPA: attn_mask True = attend; our mask is True = valid
         attn_mask = None
         if mask is not None:
-            mask_bs = self._normalize_mask(mask, S=Nk)  # [B, Nk]
-            # [B, 1, Nq, Nk], True where we can attend
-            attn_mask = mask_bs.unsqueeze(1).unsqueeze(2).expand(B, 1, Nq, Nk)
+            if mask.ndim == 4:
+                # Already a 4D mask (B, 1, T, T) — use directly
+                attn_mask = mask
+            else:
+                mask_bs = self._normalize_mask(mask, S=Nk)  # [B, Nk]
+                # [B, 1, Nq, Nk], True where we can attend
+                attn_mask = mask_bs.unsqueeze(1).unsqueeze(2).expand(B, 1, Nq, Nk)
 
         out = F.scaled_dot_product_attention(
             q, k, v,
@@ -160,13 +164,17 @@ class Attend(nn.Module):
     ):
         """
         q, k, v: [B, H, N, D]
-        mask: None or [B,S] / [B,1,1,S] with True=valid
+        mask: None, [B,S], [B,1,1,S] with True=valid, or [B,1,T,T] 4D mask
         returns: [B, H, Nq, D]
         """
         assert q.ndim == 4 and k.ndim == 4 and v.ndim == 4, "q,k,v must be [B,H,N,D]"
         B, H, Nq, D = q.shape
         _, Hk, Nk, Dk = k.shape
         assert H == Hk and D == Dk, "Mismatched heads or head_dim between q and k/v"
+
+        # 4D mask: FlashAttention doesn't support it, always use SDPA
+        if mask is not None and mask.ndim == 4:
+            return self._forward_fp32(q, k, v, mask=mask, causal=causal)
 
         # FP32 or non-CUDA: use SDPA fallback
         if not _use_flash(q):

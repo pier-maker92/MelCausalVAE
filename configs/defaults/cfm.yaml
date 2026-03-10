@@ -13,5 +13,6 @@ cfm:
   learned_prior: false
   is_causal: false
   decoder_type: "dit"
+  use_word_causal_mask: false
 
 

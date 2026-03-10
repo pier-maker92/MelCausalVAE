@@ -11,6 +11,11 @@ from dataclasses import dataclass, asdict
 from .Encoder import ConvformerEncoderConfig, ConvformerEncoder
 from .melspecEncoder import MelSpectrogramEncoder, MelSpectrogramConfig
 from .decoder_standard_vae import DecoderVAE, DecoderConfig
+from .alignement import (
+    build_word_frame_alignment,
+    build_word_causal_attention_mask_batch,
+)
+from typing import List
 
 
 def count_parameters_by_module(model):
@@ -205,6 +210,49 @@ class VAE(torch.nn.Module):
 
         return upsampled_z
 
+    def _build_word_causal_mask(
+        self,
+        words: List[List[dict]],
+        upsampled_padding_mask: torch.BoolTensor,
+    ) -> Optional[torch.BoolTensor]:
+        """
+        Build word-causal attention mask from word alignment data.
+
+        Args:
+            words: per-utterance list of word dicts ``{start, end, word}``.
+            upsampled_padding_mask: ``(B, T)`` with ``True`` = padding, ``False`` = valid
+                (convention used by the rest of the codebase).
+
+        Returns:
+            ``(B, T, T)`` bool mask or ``None`` if words data is missing/incomplete.
+        """
+        if words is None or all(w is None for w in words):
+            return None
+
+        device = upsampled_padding_mask.device
+        B, T_max = upsampled_padding_mask.shape
+
+        # padding_mask convention: True=padding, False=valid → invert for our API
+        valid_mask = ~upsampled_padding_mask  # True=valid
+
+        compress_factor = self.config.encoder_config.compress_factor_C
+        mel_cfg = self.config.mel_spec_config
+        fps = (mel_cfg.sampling_rate / mel_cfg.hop_length) / compress_factor
+
+        word_ids_list = []
+        for i in range(B):
+            T_i = valid_mask[i].sum().item()
+            if words[i] is not None and len(words[i]) > 0:
+                wids = build_word_frame_alignment(words[i], T_i, fps)
+            else:
+                # No word data → single word (fully causal fallback)
+                wids = torch.zeros(T_i, dtype=torch.long)
+            word_ids_list.append(wids)
+
+        return build_word_causal_attention_mask_batch(
+            word_ids_list, valid_mask, device
+        )
+
     def forward(self, audios_srs, **kwargs):
         encoded_audios = self.wav2mel(audios_srs)
 
@@ -216,7 +264,16 @@ class VAE(torch.nn.Module):
             padding_mask=encoded_audios.padding_mask,
             step=kwargs.get("training_step", None),
             phonemes=kwargs.get("phonemes", None),
+            words=kwargs.get("words", None),
         )
+
+        # Build word-causal attention mask if enabled
+        word_causal_mask = None
+        if getattr(self.config.decoder_config, "use_word_causal_mask", False):
+            word_causal_mask = self._build_word_causal_mask(
+                words=kwargs.get("words", None),
+                upsampled_padding_mask=convformer_output.upsampled_padding_mask,
+            )
 
         if self.config.train_only_aligner:
             audio_loss = torch.tensor(0.0, device=x.device, requires_grad=True)
@@ -226,6 +283,7 @@ class VAE(torch.nn.Module):
                 target=x,
                 target_padding_mask=convformer_output.upsampled_padding_mask,
                 context_vector=convformer_output.z_upsampled,
+                word_causal_mask=word_causal_mask,
             ).loss
 
         mu_mean = convformer_output.z[~convformer_output.padding_mask].mean()
@@ -257,6 +315,7 @@ class VAE(torch.nn.Module):
         generator: Optional[torch.Generator] = None,
         hubert_guidance: Optional[torch.Tensor] = None,
         phonemes: Optional[list] = None,
+        words: Optional[list] = None,
     ):
         """
         Encode audio to latent space and generate mel spectrogram.
@@ -280,6 +339,15 @@ class VAE(torch.nn.Module):
         #         convformer_output.durations
         #         * self.config.encoder_config.compress_factor_C
         #     )
+
+        # Build word-causal attention mask if enabled
+        word_causal_mask = None
+        if getattr(self.config.decoder_config, "use_word_causal_mask", False):
+            word_causal_mask = self._build_word_causal_mask(
+                words=words,
+                upsampled_padding_mask=convformer_output.upsampled_padding_mask,
+            )
+
         # Generate mel spectrogram from latent
         reconstructed_mel = self.decoder.generate(
             num_steps=num_steps,
@@ -288,6 +356,7 @@ class VAE(torch.nn.Module):
             guidance_scale=guidance_scale,
             generator=generator,
             padding_mask=convformer_output.upsampled_padding_mask,
+            word_causal_mask=word_causal_mask,
         )
         if self.config.mel_spec_config.normalize:
             original_mel = self.denormalize_mel(original_mel)

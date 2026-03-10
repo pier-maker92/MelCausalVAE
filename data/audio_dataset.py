@@ -72,6 +72,7 @@ class DataCollator(object):
         batch_tokenized_units_durations = [None] * len(instances)
         batch_transcriptions = [None] * len(instances)
         batch_phonemes = [None] * len(instances)
+        batch_words = [None] * len(instances)
         for i, instance in enumerate(instances):
             if "audio_input" in instance:
                 batch_input_audios_srs[i] = (
@@ -110,6 +111,8 @@ class DataCollator(object):
                 batch_transcriptions[i] = instance["transcription"]
             if "phonemes" in instance:
                 batch_phonemes[i] = instance["phonemes"]
+            if "words" in instance:
+                batch_words[i] = instance["words"]
 
         # if not all none add to the batch
         def all_none(batch):
@@ -131,6 +134,8 @@ class DataCollator(object):
             batch["language"] = batch_language
         if not all_none(batch_ids):
             batch["ids"] = batch_ids
+        if not all_none(batch_words):
+            batch["words"] = batch_words
         if not all_none(batch_tokenized_units) and not all_none(
             batch_tokenized_units_durations
         ):
@@ -187,6 +192,7 @@ class TrainDatasetWrapper(SimpleAudioDataset):
         data_dict["language"] = data.get("language", "en-us")
         if self.phonemes:
             data_dict["phonemes"] = data.get("phonemes", None)
+            data_dict["words"] = data.get("words", None)
         # FIXME creating this monstrosity to test the padding system with a A10 gpu of only 16 GB
         limit = 50
         if self.hubert_guidance:

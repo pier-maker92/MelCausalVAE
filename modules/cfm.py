@@ -36,6 +36,7 @@ class DiTConfig:
     learned_prior: bool = False
     use_vp_schedule: bool = False
     is_causal: bool = True
+    use_word_causal_mask: bool = False
     decoder_type: str = "dit"
 
 
@@ -161,12 +162,14 @@ class DiT(torch.nn.Module):
         state: torch.FloatTensor,
         target: Optional[torch.FloatTensor] = None,
         flow_mask: Optional[torch.BoolTensor] = None,
+        word_causal_mask: Optional[torch.BoolTensor] = None,
     ):
         mask_to_loss = ~flow_mask
         v = self.transformer(
             x=state,
             times=times,
             attention_mask=mask_to_loss,
+            word_causal_mask=word_causal_mask,
         )
         loss = None
         if target is not None:
@@ -181,6 +184,7 @@ class DiT(torch.nn.Module):
         target: torch.FloatTensor,
         target_padding_mask: torch.BoolTensor,
         context_vector: torch.FloatTensor,
+        word_causal_mask: Optional[torch.BoolTensor] = None,
         **kwargs,
     ):
         assert not torch.isnan(context_vector).any(), "context vector contains nan"
@@ -198,7 +202,9 @@ class DiT(torch.nn.Module):
 
         # ---- get the flow ----
         loss = self.let_it_flow(
-            times=times, state=state, target=v_target, flow_mask=target_padding_mask
+            times=times, state=state, target=v_target,
+            flow_mask=target_padding_mask,
+            word_causal_mask=word_causal_mask,
         )
 
         return DiTOutput(
@@ -214,6 +220,7 @@ class DiT(torch.nn.Module):
         guidance_scale: float = 1.0,
         generator: Optional[torch.Generator] = None,
         std: float = 1.0,
+        word_causal_mask: Optional[torch.BoolTensor] = None,
     ):
         cfg_scale = guidance_scale
         # ---- context vector z ----
@@ -263,6 +270,7 @@ class DiT(torch.nn.Module):
                 cfg_scale=cfg_scale,
                 context_vector=context_vector,
                 attention_mask=~padding_mask,
+                word_causal_mask=word_causal_mask,
             )
             return features
 
@@ -280,6 +288,7 @@ class DiT(torch.nn.Module):
         cfg_scale: float,
         context_vector: torch.FloatTensor,
         attention_mask: Optional[torch.BoolTensor] = None,
+        word_causal_mask: Optional[torch.BoolTensor] = None,
     ):
         times = times.repeat(state.shape[0])
         cond_state = self.noise_proj(torch.cat([context_vector, state], dim=-1))
@@ -288,6 +297,7 @@ class DiT(torch.nn.Module):
             x=cond_state,
             times=times,
             attention_mask=attention_mask,
+            word_causal_mask=word_causal_mask,
         )
         if cfg_scale == 1.0:
             return cond_out
@@ -299,6 +309,7 @@ class DiT(torch.nn.Module):
             x=uncond_state,
             times=times,
             attention_mask=attention_mask,
+            word_causal_mask=word_causal_mask,
         )
 
         final = (cfg_scale * cond_out + (1 - cfg_scale) * uncond_out).to(

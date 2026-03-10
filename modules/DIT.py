@@ -130,6 +130,7 @@ class Transformer(Module):
         x: torch.FloatTensor,
         times: torch.FloatTensor,
         attention_mask: Optional[torch.BoolTensor] = None,
+        word_causal_mask: Optional[torch.BoolTensor] = None,
     ):
         batch, seq_len, *_ = x.shape
         t = times
@@ -142,6 +143,17 @@ class Transformer(Module):
         if attention_mask is None:
             attention_mask = torch.ones((batch, seq_len), device=x.device, dtype=torch.bool)
 
+        # Build the mask that will be passed to every attention layer.
+        # word_causal_mask (B, T, T) encodes both padding AND word-boundary causality,
+        # so it replaces the regular causal flag.
+        if word_causal_mask is not None:
+            # Expand to (B, 1, T, T) for head broadcast
+            effective_mask = word_causal_mask.unsqueeze(1)
+            use_causal_flag = False  # causality is already in the mask
+        else:
+            effective_mask = attention_mask
+            use_causal_flag = self.is_causal
+
         # time embedding
         time_emb = self.sinu_pos_emb(t)
 
@@ -149,8 +161,16 @@ class Transformer(Module):
         if self.has_register_tokens:
             register_tokens = repeat(self.register_tokens, "n d -> b n d", b=batch)
             x, ps = pack([register_tokens, x], "b * d")
-            if exists(attention_mask):
-                attention_mask = F.pad(attention_mask, (self.num_register_tokens, 0), value=True)
+            if exists(effective_mask):
+                if effective_mask.ndim == 4:
+                    # Pad 4D mask: register tokens can attend to everything and be attended to
+                    n_reg = self.num_register_tokens
+                    # Expand cols: prepend True for register token columns
+                    effective_mask = F.pad(effective_mask, (n_reg, 0), value=True)
+                    # Expand rows: prepend True for register token rows
+                    effective_mask = F.pad(effective_mask, (0, 0, n_reg, 0), value=True)
+                else:
+                    effective_mask = F.pad(effective_mask, (self.num_register_tokens, 0), value=True)
 
         # keep track of skip connections
         skip_connects = []
@@ -187,7 +207,7 @@ class Transformer(Module):
                 x = skip_combiner(x)
 
             attn_input = attn_prenorm(x, **rmsnorm_kwargs)
-            x = attn(attn_input, mask=attention_mask, rotary_emb=rotary_emb, causal=self.is_causal) + x
+            x = attn(attn_input, mask=effective_mask, rotary_emb=rotary_emb, causal=use_causal_flag) + x
 
             ff_input = ff_prenorm(x, **rmsnorm_kwargs)
             x = ff(ff_input) + x

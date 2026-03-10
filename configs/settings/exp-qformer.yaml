@@ -1,24 +1,24 @@
 training:
   dataset_name: librispeech-align
   train_only_aligner: false
-  output_dir: checkpoints/MelCausalVAE/qformer # variable rate training
+  output_dir: checkpoints/MelCausalVAE/qformer-bi # variable rate training
   num_train_epochs: 5
   learning_rate: 1e-4
-  per_device_train_batch_size: 4
+  per_device_train_batch_size: 8
   report_to: wandb
-  wandb_project: flexi-vae
-  wandb_run_name: qformer
+  wandb_project: flexi-vae-paper
+  wandb_run_name: qformer-bi
   fp16: false
   bf16: true
   save_steps: 1000
   eval_strategy: "steps"
   eval_steps: 1000
   save_total_limit: 1
-  gradient_accumulation_steps: 2
+  gradient_accumulation_steps: 1
   dataloader_num_workers: 4
   min_learning_rate: 1e-6
-  from_pretrained: /workspace/MelCausalVAE/checkpoints/MelCausalVAE/qformer/checkpoint-3000/model.safetensors
-  #resume_from_checkpoint: /workspace/MelCausalVAE/checkpoints/MelCausalVAE/logvar/checkpoint-2000
+  #from_pretrained: /workspace/MelCausalVAE/checkpoints/MelCausalVAE/qformer/checkpoint-15000/model.safetensors
+  #resume_from_checkpoint: /workspace/MelCausalVAE/checkpoints/MelCausalVAE/qformer/checkpoint-2000
   phonemes: true
 
 convformer:
@@ -26,14 +26,15 @@ convformer:
   tf_heads: 8
   tf_layers: 4
   latent_dim: 64
-  logvar_layer: false
+  logvar_layer: true
   use_sofplus: false
-  target_std: 1.0
+  target_std: 0.5
   kl_loss_warmup_steps: 500
-  kl_loss_weight: 1.0
+  kl_loss_weight: 1e-10
   use_aligner: true
   freeze_encoder: false
   threshold: 0.90
+  force_downsample: false
 
 cfm:
   unet_dim: 1024
@@ -45,4 +46,5 @@ cfm:
   uncond_prob: 0.15
   learned_prior: false
   is_causal: true
+  use_word_causal_mask: true
   decoder_type: "dit"

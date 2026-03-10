@@ -233,12 +233,12 @@ class QFormerLayer(nn.Module):
 
     def forward(
         self,
-        queries: torch.Tensor,              # (B, N*Q, d_model)
+        queries: torch.Tensor,              # (B, N*Q_tot, d_model)
         mel_features: torch.Tensor,         # (B, T,   d_model) — already pos-encoded
-        cross_mask: torch.Tensor,           # (B*H, N*Q, T)  additive float mask
-        causal_mask: torch.Tensor,          # (N*Q, N*Q)     additive float mask
-        sa_key_padding_mask: torch.Tensor,  # (B, N*Q)       True = padding key
-    ) -> torch.Tensor:                      # (B, N*Q, d_model)
+        cross_mask: torch.Tensor,           # (B*H, N*Q_tot, T)  additive float mask
+        causal_mask: torch.Tensor,          # (N*Q_tot, N*Q_tot) additive float mask
+        sa_key_padding_mask: torch.Tensor,  # (B, N*Q_tot)       True = padding key
+    ) -> torch.Tensor:                      # (B, N*Q_tot, d_model)
 
         # 1 — Cross-attention (pre-norm), alignment mask applied
         q = self.norm_ca(queries)
@@ -250,9 +250,6 @@ class QFormerLayer(nn.Module):
 
         # 2 — Causal self-attention (pre-norm):
         #     group n attends only to groups 0..n (past + self, not future).
-        #     key_padding_mask explicitly zeroes out padding phoneme keys so
-        #     that real queries never draw weight from padding content,
-        #     regardless of causal ordering.
         q = self.norm_sa(queries)
         sa_out, _ = self.self_attn(
             q, q, q,
@@ -278,22 +275,22 @@ class PhonemeQueryPooler(nn.Module):
 
     Operation::
 
-        (B, N, Q, d_model)
-          → reshape  → (B, N, Q*d_model)
-          → Linear(Q*d_model, d_model)
+        (B, N, Q_tot, d_model)
+          → reshape  → (B, N, Q_tot*d_model)
+          → Linear(Q_tot*d_model, d_model)
           → LayerNorm
           → (B, N, d_model)
     """
 
-    def __init__(self, num_queries: int, d_model: int) -> None:
+    def __init__(self, num_queries_total: int, d_model: int) -> None:
         super().__init__()
-        self.proj = nn.Linear(num_queries * d_model, d_model, bias=True)
+        self.proj = nn.Linear(num_queries_total * d_model, d_model, bias=True)
         self.norm = nn.LayerNorm(d_model)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            x: ``(B, N, Q, d_model)``
+            x: ``(B, N, Q_tot, d_model)``
         Returns:
             ``(B, N, d_model)``
         """
@@ -311,7 +308,7 @@ class QFormerOutput:
     """Structured output of :py:meth:`AlignmentQFormer.forward`."""
 
     hidden_states: torch.Tensor
-    """``(B, N, Q, d_model)`` — per-query representations per phoneme."""
+    """``(B, N, Q_tot, d_model)`` — per-query representations per phoneme."""
 
     pooled: torch.Tensor
     """``(B, N, d_model)`` — one vector per phoneme after concat-pool."""
@@ -324,7 +321,7 @@ class QFormerOutput:
     """
 
     attn_mask: torch.Tensor
-    """``(B*H, N*Q, T)`` additive cross-attention mask (0 / -inf)."""
+    """``(B*H, N*Q_tot, T)`` additive cross-attention mask (0 / -inf)."""
 
 
 # ---------------------------------------------------------------------------
@@ -334,35 +331,22 @@ class QFormerOutput:
 
 class AlignmentQFormer(nn.Module):
     """
-    Q-Former with alignment-gated cross-attention, sinusoidal intra-phoneme
-    relative positional encoding, and concat-pool.
+    Q-Former with alignment-gated cross-attention (expanded context),
+    sinusoidal intra-phoneme relative positional encoding, and concat-pool.
+
+    Now includes a data-driven "mean query" in addition to learnable prototypes.
 
     Args:
         d_model:                 Model / embedding dimension (must be even).
         num_heads:               Number of attention heads.
-        num_queries_per_phoneme: Learnable queries per phoneme (default **4**).
-        num_layers:              Number of Q-Former layers (default 2).
-        ffn_dim:                 Inner FFN dimension (default ``4 * d_model``).
+        num_queries_per_phoneme: Number of learnable queries per phoneme.
+                                 The total number of queries per phoneme will be
+                                 ``num_queries_per_phoneme + 1`` (including mean).
+        num_layers:              Number of Q-Former layers.
+        ffn_dim:                 Inner FFN dimension.
         dropout:                 Dropout probability.
-
-    Example::
-
-        qformer = AlignmentQFormer(d_model=256, num_heads=8)
-
-        out = qformer(
-            mel_features = mel_enc,                  # (B, T, 256)
-            alignment    = align_out.alignments,     # (B, T, N)
-            phoneme_mask = align_out.phoneme_mask,   # (B, N)
-        )
-        # out.hidden_states → (B, N, 4, 256)
-        # out.pooled        → (B, N, 256)
-        # out.rel_pos       → (B, T)     ← [0,1] per frame, for DiT cond
-        #
-        # DiT frame-level conditioning:
-        #   pos_emb  = qformer.pos_encoder(out.rel_pos)
-        #   phon_idx = align_out.alignments.argmax(-1)       # (B, T)
-        #   expanded = phon_idx.unsqueeze(-1).expand(B, T, 256)
-        #   cond     = out.pooled.gather(1, expanded) + pos_emb
+        context_expansion:       Number of frames to expand the context window
+                                 by in both directions (default 5).
     """
 
     def __init__(
@@ -373,6 +357,8 @@ class AlignmentQFormer(nn.Module):
         num_layers: int = 2,
         ffn_dim: Optional[int] = None,
         dropout: float = 0.1,
+        out_dim: int = 64,
+        context_expansion: int = 5,
     ) -> None:
         super().__init__()
 
@@ -383,12 +369,12 @@ class AlignmentQFormer(nn.Module):
 
         self.d_model = d_model
         self.num_heads = num_heads
-        self.Q = num_queries_per_phoneme
+        self.Q_learnable = num_queries_per_phoneme
+        self.Q_tot = num_queries_per_phoneme + 1
+        self.context_expansion = context_expansion
         ffn_dim = ffn_dim or 4 * d_model
 
-        # Shared learnable query prototypes (Q, d_model).
-        # All groups start identical; symmetry is broken immediately by the
-        # alignment-masked cross-attention in the first layer.
+        # Shared learnable query prototypes
         self.query_proto = nn.Parameter(torch.empty(num_queries_per_phoneme, d_model))
         nn.init.trunc_normal_(self.query_proto, std=0.02)
 
@@ -404,63 +390,62 @@ class AlignmentQFormer(nn.Module):
         # Final layer norm before pooling
         self.out_norm = nn.LayerNorm(d_model)
 
-        # Concat-pool: (B, N, Q, d_model) → (B, N, d_model)
-        self.pooler = PhonemeQueryPooler(num_queries_per_phoneme, d_model)
+        # Concat-pool: (B, N, Q_tot, d_model) → (B, N, d_model)
+        self.pooler = PhonemeQueryPooler(self.Q_tot, d_model)
+        self.proj = nn.Linear(d_model, out_dim)
 
     # ---------------------------------------------------------------------- #
     # Mask construction                                                        #
     # ---------------------------------------------------------------------- #
 
     def _build_causal_mask(self, N: int, device: torch.device) -> torch.Tensor:
-        """
-        Build an additive causal mask ``(N*Q, N*Q)`` for self-attention.
-
-        Query at flat index ``n*Q + k`` may attend to position ``j`` iff
-        ``j // Q <= n`` (same or earlier phoneme group).
-
-        * Allowed  → **0.0**
-        * Blocked  → **-inf**
-        """
-        Q = self.Q
+        """Build an additive causal mask ``(N*Q_tot, N*Q_tot)`` for self-attention."""
+        Q = self.Q_tot
         total = N * Q
-        # group index for each query position
-        group = torch.arange(total, device=device) // Q          # (N*Q,)
-        # allowed: group[j] <= group[i]  →  causal over phoneme groups
-        allowed = group.unsqueeze(0) <= group.unsqueeze(1)        # (N*Q, N*Q)
+        group = torch.arange(total, device=device) // Q
+        allowed = group.unsqueeze(0) <= group.unsqueeze(1)
         mask = torch.zeros(total, total, device=device)
         mask = mask.masked_fill(~allowed, float("-inf"))
-        return mask                                               # (N*Q, N*Q)
+        return mask
 
     def _build_cross_attn_mask(
         self,
         alignment: torch.Tensor,                   # (B, T, N)
-        phoneme_mask: Optional[torch.BoolTensor],  # (B, N) or None
-    ) -> torch.Tensor:                             # (B*H, N*Q, T)
+        phoneme_mask: Optional[torch.BoolTensor],  # (B, N)
+    ) -> torch.Tensor:                             # (B*H, N*Q_tot, T)
         """
-        Build an additive float mask ``(B*H, N*Q, T)``.
-
-        * Allowed  — query n, frame t where alignment[b,t,n]==1  →  **0.0**
-        * Blocked  — everything else                             →  **-inf**
-
-        Two safety guards prevent NaN in softmax:
-
-        1. Fully-empty phoneme rows (no assigned frames) → reset to 0.
-        2. Padding phoneme rows (``phoneme_mask == True``) → reset to 0.
+        Build an additive mask with context expansion of ±5 frames.
         """
         B, T, N = alignment.shape
-        Q, H = self.Q, self.num_heads
+        Q_tot, H = self.Q_tot, self.num_heads
+
+        # Expand alignment: (B, T, N) -> (B, N, T)
+        # Use max_pool1d to dilate the binary mask along the time dimension
+        aligned_t = alignment.permute(0, 2, 1)  # (B, N, T)
+        
+        if self.context_expansion > 0:
+            pad = self.context_expansion
+            # max_pool1d requires (Batch, Channels, Length)
+            expanded = nn.functional.max_pool1d(
+                aligned_t, 
+                kernel_size=2 * pad + 1, 
+                stride=1, 
+                padding=pad
+            )
+        else:
+            expanded = aligned_t
 
         mask_bool = (
-            alignment.permute(0, 2, 1)               # (B, N, T)
-            .unsqueeze(2).expand(B, N, Q, T)         # (B, N, Q, T)
-            .reshape(B, N * Q, T)
+            expanded.unsqueeze(2)           # (B, N, 1, T)
+            .expand(B, N, Q_tot, T)         # (B, N, Q_tot, T)
+            .reshape(B, N * Q_tot, T)
             .bool()
         )
 
-        additive = alignment.new_zeros(B, N * Q, T)
+        additive = expanded.new_zeros(B, N * Q_tot, T)
         additive = additive.masked_fill(~mask_bool, float("-inf"))
 
-        # Guard 1: empty phonemes
+        # Guard 1: empty phonemes (fallback to original alignment to avoid NaN if all expanded are zero)
         empty = (~mask_bool).all(dim=-1, keepdim=True)
         additive = additive.masked_fill(empty, 0.0)
 
@@ -468,17 +453,16 @@ class AlignmentQFormer(nn.Module):
         if phoneme_mask is not None:
             pad_rows = (
                 phoneme_mask                                     # (B, N)
-                .unsqueeze(2).expand(B, N, Q)
-                .reshape(B, N * Q)
+                .unsqueeze(2).expand(B, N, Q_tot)
+                .reshape(B, N * Q_tot)
                 .unsqueeze(-1)
             )
             additive = additive.masked_fill(pad_rows, 0.0)
 
-        # Expand for heads → (B*H, N*Q, T)
         return (
             additive
-            .unsqueeze(1).expand(B, H, N * Q, T)
-            .reshape(B * H, N * Q, T)
+            .unsqueeze(1).expand(B, H, N * Q_tot, T)
+            .reshape(B * H, N * Q_tot, T)
             .contiguous()
         )
 
@@ -492,90 +476,66 @@ class AlignmentQFormer(nn.Module):
         alignment: torch.Tensor,                            # (B, T, N) float 0/1
         phoneme_mask: Optional[torch.BoolTensor] = None,   # (B, N) True=padding
     ) -> QFormerOutput:
-        """
-        Parameters
-        ----------
-        mel_features:
-            Encoded mel-spectrogram frames ``(B, T, d_model)``.
-        alignment:
-            Binary alignment matrix ``(B, T, N)``; ``alignment[b,t,n]==1``
-            iff frame ``t`` belongs to phoneme segment ``n``.
-        phoneme_mask:
-            Padding mask ``(B, N)``.  ``True`` = padded segment.
-
-        Returns
-        -------
-        :class:`QFormerOutput`
-        """
         B, T, N = alignment.shape
-        Q = self.Q
+        Q_learn = self.Q_learnable
+        Q_tot = self.Q_tot
+
+        # 1. Relative positional encoding
+        rel_pos = compute_relative_positions(alignment)
+        pos_emb = self.pos_encoder(rel_pos)
+        mel_pos = mel_features + pos_emb
 
         # ------------------------------------------------------------------ #
-        # 1. Relative positional encoding                                      #
-        #    rel_pos : (B, T) in [0, 1]  — 0 = first frame of phoneme,        #
-        #                                  1 = last  frame of phoneme          #
-        #    pos_emb : (B, T, d_model)   — injected into mel keys/values       #
+        # 2. Initialise queries: [Mean Query; Prototype_1; ...; Prototype_Q] #
         # ------------------------------------------------------------------ #
-        rel_pos  = compute_relative_positions(alignment)         # (B, T)
-        pos_emb  = self.pos_encoder(rel_pos)                     # (B, T, d_model)
-        mel_pos  = mel_features + pos_emb                        # (B, T, d_model)
-
-        # ------------------------------------------------------------------ #
-        # 2. Initialise queries from shared prototypes                         #
-        # ------------------------------------------------------------------ #
-        queries = (
-            self.query_proto                          # (Q, d_model)
-            .view(1, 1, Q, self.d_model)
-            .expand(B, N, Q, self.d_model)            # (B, N, Q, d_model)
-            .contiguous()                             # make contiguous before reshape
-            .reshape(B, N * Q, self.d_model)          # (B, N*Q, d_model)
+        # Learnable prototypes: (B, N, Q_learn, d_model)
+        proto = (
+            self.query_proto
+            .view(1, 1, Q_learn, self.d_model)
+            .expand(B, N, Q_learn, self.d_model)
         )
 
-        # ------------------------------------------------------------------ #
-        # 3. Cross-attention mask                                              #
-        # ------------------------------------------------------------------ #
+        # Compute data-driven mean query per phoneme: (B, N, d_model)
+        # Using the formulation: x = bmm(align.T, x) / (dur + 1e-8)
+        align_t = alignment.transpose(1, 2)              # (B, N, T)
+        dur = alignment.sum(dim=1).unsqueeze(-1)         # (B, N, 1)
+        mean_query = torch.bmm(align_t, mel_features) / (dur + 1e-8)
+        mean_query = mean_query.unsqueeze(2)             # (B, N, 1, d_model)
+
+        # Concatenate: (B, N, Q_tot, d_model)
+        queries = torch.cat([mean_query, proto], dim=2)
+        queries = queries.reshape(B, N * Q_tot, self.d_model).contiguous()
+
+        # 3. Cross-attention mask (with ±5 frames expansion)
         cross_mask = self._build_cross_attn_mask(alignment, phoneme_mask)
 
-        # ------------------------------------------------------------------ #
-        # 4. Causal self-attention mask  (N*Q, N*Q)                           #
-        #    Group n attends only to groups 0..n — monotonic, no future leak. #
-        # ------------------------------------------------------------------ #
+        # 4. Causal self-attention mask (N*Q_tot, N*Q_tot)
         causal_mask = self._build_causal_mask(N, device=mel_features.device)
 
-        # ------------------------------------------------------------------ #
-        # 5. Self-attention key padding mask  (B, N*Q)                        #
-        #    Expands phoneme_mask from (B, N) to (B, N*Q) so that real        #
-        #    queries never draw attention weight from padding phoneme keys,    #
-        #    regardless of their position in the causal order.                #
-        # ------------------------------------------------------------------ #
+        # 5. Self-attention key padding mask (B, N*Q_tot)
         if phoneme_mask is not None:
             sa_key_padding_mask = (
-                phoneme_mask                              # (B, N)
-                .unsqueeze(2).expand(B, N, Q)            # (B, N, Q)
-                .contiguous().reshape(B, N * Q)          # (B, N*Q)
+                phoneme_mask
+                .unsqueeze(2).expand(B, N, Q_tot)
+                .contiguous().reshape(B, N * Q_tot)
             )
         else:
             sa_key_padding_mask = torch.zeros(
-                B, N * Q, dtype=torch.bool, device=mel_features.device
+                B, N * Q_tot, dtype=torch.bool, device=mel_features.device
             )
 
-        # ------------------------------------------------------------------ #
-        # 6. Q-Former layers                                                   #
-        # ------------------------------------------------------------------ #
+        # 6. Q-Former layers
         for layer in self.layers:
             queries = layer(
                 queries, mel_pos, cross_mask, causal_mask, sa_key_padding_mask
             )
 
-        # ------------------------------------------------------------------ #
-        # 7. Norm + reshape → (B, N, Q, d_model)                              #
-        # ------------------------------------------------------------------ #
-        hidden_states = self.out_norm(queries).reshape(B, N, Q, self.d_model)
+        # 7. Norm + reshape → (B, N, Q_tot, d_model)
+        hidden_states = self.out_norm(queries).reshape(B, N, Q_tot, self.d_model)
 
-        # ------------------------------------------------------------------ #
-        # 8. Concat-pool → (B, N, d_model)                                    #
-        # ------------------------------------------------------------------ #
+        # 8. Concat-pool → (B, N, out_dim)
         pooled = self.pooler(hidden_states)
+        pooled = self.proj(pooled)
 
         return QFormerOutput(
             hidden_states=hidden_states,
@@ -649,47 +609,36 @@ class DiTConditioningProjector(nn.Module):
     def __init__(
         self,
         d_model: int,
-        pos_encoder: RelativePositionEncoder,
         dropout: float = 0.0,
     ) -> None:
         super().__init__()
-        self.pos_encoder = pos_encoder                          # shared
+        self.pos_encoder = RelativePositionEncoder(d_model=d_model)                          # shared
         self.proj = nn.Linear(2 * d_model, d_model, bias=True)
         self.drop = nn.Dropout(dropout)
 
     def forward(
         self,
-        pooled: torch.Tensor,                           # (B, N, d_model)
-        alignment: torch.Tensor,                        # (B, T, N) hard or soft
-        rel_pos: torch.Tensor,                          # (B, T) in [0, 1]
-        soft_align: Optional[torch.Tensor] = None,      # (B, T, N) from corrector
-    ) -> torch.Tensor:                                  # (B, T, d_model)
+        pooled: torch.Tensor,     # (B, N, d_model)
+        alignment: torch.Tensor,  # (B, T, N)  float — hard or soft
+        rel_pos: torch.Tensor,    # (B, T)     float in [0, 1]
+    ) -> torch.Tensor:            # (B, T, d_model)
         """
         Parameters
         ----------
         pooled:
             Per-phoneme compressed vectors from :class:`AlignmentQFormer`.
         alignment:
-            Hard binary alignment ``(B, T, N)`` — used for ``rel_pos`` only
-            when ``soft_align`` is provided, otherwise used for upsampling.
+            Binary (or soft) alignment matrix ``(B, T, N)``.
         rel_pos:
             Intra-phoneme relative positions ``(B, T)`` from
             :attr:`QFormerOutput.rel_pos`.
-        soft_align:
-            Optional soft alignment ``(B, T, N)`` from
-            :class:`DifferentiableBoundaryCorrector`.  When provided,
-            replaces the hard ``alignment`` for upsampling — giving smooth,
-            differentiable boundaries instead of hard steps.
 
         Returns
         -------
         ``(B, T, d_model)`` — frame-level conditioning ready for the DiT.
         """
-        # use soft alignment for upsampling if available, else hard
-        upsample_align = soft_align if soft_align is not None else alignment
-
         # (B, T, N) x (B, N, d_model) → (B, T, d_model)
-        phoneme_at_t = torch.bmm(upsample_align, pooled)
+        phoneme_at_t = torch.bmm(alignment, pooled)
 
         # scalar [0,1] → (B, T, d_model)
         pos_feat = self.pos_encoder(rel_pos)
@@ -748,154 +697,3 @@ def pooled_norm_penalty(
         return sq_norm.sum() / n_valid
     else:
         return sq_norm.mean()
-
-
-# ---------------------------------------------------------------------------
-# Differentiable boundary corrector
-# ---------------------------------------------------------------------------
-
-
-class DifferentiableBoundaryCorrector(nn.Module):
-    """
-    Learns to shift phoneme boundaries to minimise reconstruction error,
-    producing a **soft, differentiable alignment matrix** from hard durations.
-
-    Motivation
-    ----------
-    Hard upsampling via ``bmm(alignment_hard, pooled)`` produces step
-    discontinuities at phoneme boundaries that the DiT has never seen during
-    training with fixed-rate compression.  This module replaces the hard
-    alignment with a **Gaussian soft alignment** whose centres can be shifted
-    by a small learned delta — making boundaries differentiable and smooth.
-
-    Operation
-    ---------
-    1. Compute expected phoneme centres from durations::
-
-        centers_n = cumsum(durations)_n - durations_n / 2   # (B, N)
-
-    2. Predict a small shift ``δ_n`` from ``pooled_mean`` via a 2-layer MLP::
-
-        δ = tanh(MLP(pooled_mean)) * max_shift              # (B, N)
-
-    3. Build a Gaussian soft alignment::
-
-        soft_align[b, t, n] = softmax_n( -(t - (center_n + δ_n))² / 2σ² )
-
-       ``softmax`` over N ensures each frame's weights sum to 1 across phonemes.
-
-    4. Return ``soft_align (B, T, N)`` — a drop-in replacement for the hard
-       alignment in ``bmm(soft_align, pooled)``.
-
-    Args:
-        d_model:    Input dimension of ``pooled_mean``.
-        max_shift:  Maximum boundary shift in frames (default 4).
-        sigma:      Gaussian bandwidth in frames (default 2.0).
-                    Larger → smoother boundaries, smaller → closer to hard.
-
-    The gradient of the reconstruction loss flows through ``soft_align``
-    → ``centers + δ`` → ``δ`` → MLP weights — the model learns to correct
-    aligner errors end-to-end.
-
-    Example::
-
-        corrector = DifferentiableBoundaryCorrector(d_model=256)
-
-        soft_align = corrector(
-            pooled_mean = pooled_mean,   # (B, N, d_model)
-            durations   = durations,     # (B, N)  integer frame counts
-            T           = mel_T,         # target time dimension
-            phoneme_mask = mask,         # (B, N)  True = padding
-        )
-        # soft_align → (B, T, N)
-        phoneme_at_t = torch.bmm(soft_align, pooled)   # (B, T, d_model)
-    """
-
-    def __init__(
-        self,
-        d_model: int,
-        max_shift: float = 4.0,
-        sigma: float = 1.0,
-    ) -> None:
-        super().__init__()
-        self.max_shift = max_shift
-        self.sigma = sigma
-
-        # lightweight MLP: d_model → d_model//2 → 1
-        self.mlp = nn.Sequential(
-            nn.Linear(d_model, d_model // 2),
-            nn.GELU(),
-            nn.Linear(d_model // 2, 1),   # scalar shift per phoneme
-        )
-
-    def forward(
-        self,
-        pooled_mean: torch.Tensor,                      # (B, N, d_model)
-        durations: torch.Tensor,                        # (B, N) float/long
-        T: int,                                         # target frames
-        phoneme_mask: Optional[torch.BoolTensor] = None,  # (B, N) True=pad
-    ) -> torch.Tensor:                                  # (B, T, N)
-        """
-        Parameters
-        ----------
-        pooled_mean:
-            Mean-pooled phoneme vectors computed on the hard alignment.
-            Used as input to the boundary shift MLP.
-        durations:
-            Hard frame counts per phoneme ``(B, N)`` from
-            ``AlignmentOutput.durations``.
-        T:
-            Target time dimension — must match ``mel_features.shape[1]``.
-        phoneme_mask:
-            ``(B, N)`` padding mask.  Padding phonemes receive zero weight.
-
-        Returns
-        -------
-        ``(B, T, N)`` soft alignment matrix where each row (frame) sums to 1
-        across valid phonemes.
-        """
-        B, N, _ = pooled_mean.shape
-        durations = durations.float()                    # (B, N)
-
-        # ------------------------------------------------------------------ #
-        # 1. Hard phoneme centres from cumulative durations                   #
-        #    center_n = sum(dur_0..n-1) + dur_n/2  (1-based frame index)      #
-        # ------------------------------------------------------------------ #
-        cum = durations.cumsum(dim=1)                    # (B, N)
-        centers = cum - durations / 2.0                  # (B, N)
-
-        # ------------------------------------------------------------------ #
-        # 2. Learned boundary shift  δ ∈ (-max_shift, +max_shift)             #
-        # ------------------------------------------------------------------ #
-        delta = torch.tanh(self.mlp(pooled_mean).squeeze(-1))  # (B, N)
-        delta = delta * self.max_shift                          # (B, N)
-
-        # zero shift for padding phonemes — don't move phantom boundaries
-        if phoneme_mask is not None:
-            delta = delta.masked_fill(phoneme_mask, 0.0)
-
-        centers_shifted = centers + delta                # (B, N)
-
-        # ------------------------------------------------------------------ #
-        # 3. Gaussian soft alignment                                           #
-        #    dist[b, t, n] = (t - center_shifted[b, n])²                      #
-        # ------------------------------------------------------------------ #
-        t_grid = torch.arange(T, dtype=torch.float32, device=pooled_mean.device)
-        # (B, N, T) — squared distance from each frame to each phoneme centre
-        dist_sq = (
-            t_grid.view(1, 1, T) - centers_shifted.unsqueeze(-1)
-        ).pow(2)                                         # (B, N, T)
-
-        # logits for softmax over N — (B, N, T)
-        logits = -dist_sq / (2.0 * self.sigma ** 2)
-
-        # mask padding phonemes with -inf before softmax
-        if phoneme_mask is not None:
-            logits = logits.masked_fill(
-                phoneme_mask.unsqueeze(-1), float("-inf")
-            )
-
-        # softmax over phoneme dim → each frame sums to 1 across phonemes
-        soft_align = torch.softmax(logits, dim=1)        # (B, N, T)
-
-        return soft_align.permute(0, 2, 1)               # (B, T, N)

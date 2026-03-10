@@ -16,7 +16,7 @@ from modules.downsampler import DownSampler
 from modules.resnet import LinearResNet as ResNet
 from modules.similarity import Aligner, SimilarityUpsamplerBatch
 from modules.alignement import AlignmentMatrixBuilder
-from modules.qformer import AlignmentQFormer, DiTConditioningProjector, pooled_norm_penalty, DifferentiableBoundaryCorrector
+from modules.qformer import AlignmentQFormer, DiTConditioningProjector, pooled_norm_penalty, DiTConditioningProjector
 
 
 #from modules.pooler import QformerPooler
@@ -194,6 +194,7 @@ class ConvformerEncoder(SigmaVAEEncoder):
             )
 
         self.alignment_matrix_builder = AlignmentMatrixBuilder(
+            compress_factor=config.compress_factor_C,
             embedding_dim=512,
         )
         self.proj_mean = nn.Linear(512, latent_dim)
@@ -212,12 +213,12 @@ class ConvformerEncoder(SigmaVAEEncoder):
             num_queries_per_phoneme=4,
             num_layers=4,
             dropout=0.1,
-            out_dim=latent_dim
+            out_dim=512
         )
 
+        # TODO create an upsample convolution causal for conditioning_proj
         self.conditioning_proj = DiTConditioningProjector(
-            d_model=latent_dim,
-            dropout=0.1,
+            d_model=64,
         )
 
         if config.freeze_encoder:
@@ -225,14 +226,6 @@ class ConvformerEncoder(SigmaVAEEncoder):
                 if name.split(".")[0] in ["pooler"]:
                     continue
                 param.requires_grad = False
-
-        self.kl_loss_pooler_weight = config.kl_loss_pooler_weight
-
-        self.boundary_corrector = DifferentiableBoundaryCorrector(
-            d_model=512,
-            num_layers=2,
-            dropout=0.1,
-        )
 
     def forward(
         self,
@@ -242,9 +235,10 @@ class ConvformerEncoder(SigmaVAEEncoder):
         **kwargs,
     ):  # x: [B, T, 100]
 
-        target_T = (~padding_mask).sum(dim=1)
+        
         original_padding_mask = padding_mask.clone()
         x, padding_mask = self.downsampler(x, padding_mask.bool())
+        target_T = (~padding_mask).sum(dim=1)
         x = self.transformer(x)  # [B, T/C, 512]
 
         # get alignement
@@ -278,38 +272,32 @@ class ConvformerEncoder(SigmaVAEEncoder):
                 alignment=alignments,
                 phoneme_mask=padding_mask,
             )
-            z = out.pooled
+            x = out.pooled
             pos = out.rel_pos
-            kl_loss = pooled_norm_penalty(z, padding_mask) * 0
-            pooled_mean = torch.bmm(
-                align_float.permute(0, 2, 1),                        # (B, N, T)
-                self.proj_mean(x)                                        # (B, T, d_model)
-            ) / (durations.unsqueeze(-1) + 1e-8)                  # (B, N, d_model)
-            z += pooled_mean
+            kl_loss = pooled_norm_penalty(x, padding_mask) * 0
 
-        # mu = self.mu(x)
-        # logvar = None
-        # if hasattr(self, "logvar"):
-        #     logvar = self.logvar(x)
-        # z = self.reparameterize(mu, logvar)
-        # assert not torch.isnan(z).any(), "z contains nan after reparameterization"
+        mu = self.mu(x)
+        logvar = None
+        if hasattr(self, "logvar"):
+            logvar = self.logvar(x)
+        z = self.reparameterize(mu, logvar)
+        assert not torch.isnan(z).any(), "z contains nan after reparameterization"
 
-        
-
-        # kl_loss = None
-        # if kwargs.get("step", None) is not None:
-        #     kl_loss = self.kl_divergence(
-        #         mu, logvar, padding_mask
-        #     ) * self.get_kl_cosine_schedule(
-        #         kwargs["step"], kl_loss_weight=self.kl_loss_weight
-        #     )
+        kl_loss = None
+        if kwargs.get("step", None) is not None:
+            kl_loss = self.kl_divergence(
+                mu, logvar, padding_mask
+            ) * self.get_kl_cosine_schedule(
+                kwargs["step"], kl_loss_weight=self.kl_loss_weight
+            )
 
         if self.config.use_aligner:
-            z_upsampled = self.conditioning_proj(z, alignments, pos)
+            z_upsampled = self.conditioning_proj(pooled = z, alignment = align_float, rel_pos = pos)
+            z_upsampled = torch.repeat_interleave(z_upsampled, self.config.compress_factor_C, dim=1)
             upsampled_padding_mask = original_padding_mask
         else:
-            z_upsampled = z
-            upsampled_padding_mask = padding_mask
+            z_upsampled = torch.repeat_interleave(z, self.config.compress_factor_C, dim=1)
+            upsampled_padding_mask = original_padding_mask
 
         return ConvformerOutput(
             z=z,

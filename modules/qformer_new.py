@@ -373,7 +373,6 @@ class AlignmentQFormer(nn.Module):
         num_layers: int = 2,
         ffn_dim: Optional[int] = None,
         dropout: float = 0.1,
-        out_dim: int = 64
     ) -> None:
         super().__init__()
 
@@ -407,7 +406,6 @@ class AlignmentQFormer(nn.Module):
 
         # Concat-pool: (B, N, Q, d_model) → (B, N, d_model)
         self.pooler = PhonemeQueryPooler(num_queries_per_phoneme, d_model)
-        self.proj = nn.Linear(d_model, out_dim)
 
     # ---------------------------------------------------------------------- #
     # Mask construction                                                        #
@@ -578,7 +576,6 @@ class AlignmentQFormer(nn.Module):
         # 8. Concat-pool → (B, N, d_model)                                    #
         # ------------------------------------------------------------------ #
         pooled = self.pooler(hidden_states)
-        pooled = self.proj(pooled)
 
         return QFormerOutput(
             hidden_states=hidden_states,
@@ -652,36 +649,47 @@ class DiTConditioningProjector(nn.Module):
     def __init__(
         self,
         d_model: int,
+        pos_encoder: RelativePositionEncoder,
         dropout: float = 0.0,
     ) -> None:
         super().__init__()
-        self.pos_encoder = RelativePositionEncoder(d_model=d_model)                          # shared
+        self.pos_encoder = pos_encoder                          # shared
         self.proj = nn.Linear(2 * d_model, d_model, bias=True)
         self.drop = nn.Dropout(dropout)
 
     def forward(
         self,
-        pooled: torch.Tensor,     # (B, N, d_model)
-        alignment: torch.Tensor,  # (B, T, N)  float — hard or soft
-        rel_pos: torch.Tensor,    # (B, T)     float in [0, 1]
-    ) -> torch.Tensor:            # (B, T, d_model)
+        pooled: torch.Tensor,                           # (B, N, d_model)
+        alignment: torch.Tensor,                        # (B, T, N) hard or soft
+        rel_pos: torch.Tensor,                          # (B, T) in [0, 1]
+        soft_align: Optional[torch.Tensor] = None,      # (B, T, N) from corrector
+    ) -> torch.Tensor:                                  # (B, T, d_model)
         """
         Parameters
         ----------
         pooled:
             Per-phoneme compressed vectors from :class:`AlignmentQFormer`.
         alignment:
-            Binary (or soft) alignment matrix ``(B, T, N)``.
+            Hard binary alignment ``(B, T, N)`` — used for ``rel_pos`` only
+            when ``soft_align`` is provided, otherwise used for upsampling.
         rel_pos:
             Intra-phoneme relative positions ``(B, T)`` from
             :attr:`QFormerOutput.rel_pos`.
+        soft_align:
+            Optional soft alignment ``(B, T, N)`` from
+            :class:`DifferentiableBoundaryCorrector`.  When provided,
+            replaces the hard ``alignment`` for upsampling — giving smooth,
+            differentiable boundaries instead of hard steps.
 
         Returns
         -------
         ``(B, T, d_model)`` — frame-level conditioning ready for the DiT.
         """
+        # use soft alignment for upsampling if available, else hard
+        upsample_align = soft_align if soft_align is not None else alignment
+
         # (B, T, N) x (B, N, d_model) → (B, T, d_model)
-        phoneme_at_t = torch.bmm(alignment, pooled)
+        phoneme_at_t = torch.bmm(upsample_align, pooled)
 
         # scalar [0,1] → (B, T, d_model)
         pos_feat = self.pos_encoder(rel_pos)
@@ -740,3 +748,154 @@ def pooled_norm_penalty(
         return sq_norm.sum() / n_valid
     else:
         return sq_norm.mean()
+
+
+# ---------------------------------------------------------------------------
+# Differentiable boundary corrector
+# ---------------------------------------------------------------------------
+
+
+class DifferentiableBoundaryCorrector(nn.Module):
+    """
+    Learns to shift phoneme boundaries to minimise reconstruction error,
+    producing a **soft, differentiable alignment matrix** from hard durations.
+
+    Motivation
+    ----------
+    Hard upsampling via ``bmm(alignment_hard, pooled)`` produces step
+    discontinuities at phoneme boundaries that the DiT has never seen during
+    training with fixed-rate compression.  This module replaces the hard
+    alignment with a **Gaussian soft alignment** whose centres can be shifted
+    by a small learned delta — making boundaries differentiable and smooth.
+
+    Operation
+    ---------
+    1. Compute expected phoneme centres from durations::
+
+        centers_n = cumsum(durations)_n - durations_n / 2   # (B, N)
+
+    2. Predict a small shift ``δ_n`` from ``pooled_mean`` via a 2-layer MLP::
+
+        δ = tanh(MLP(pooled_mean)) * max_shift              # (B, N)
+
+    3. Build a Gaussian soft alignment::
+
+        soft_align[b, t, n] = softmax_n( -(t - (center_n + δ_n))² / 2σ² )
+
+       ``softmax`` over N ensures each frame's weights sum to 1 across phonemes.
+
+    4. Return ``soft_align (B, T, N)`` — a drop-in replacement for the hard
+       alignment in ``bmm(soft_align, pooled)``.
+
+    Args:
+        d_model:    Input dimension of ``pooled_mean``.
+        max_shift:  Maximum boundary shift in frames (default 4).
+        sigma:      Gaussian bandwidth in frames (default 2.0).
+                    Larger → smoother boundaries, smaller → closer to hard.
+
+    The gradient of the reconstruction loss flows through ``soft_align``
+    → ``centers + δ`` → ``δ`` → MLP weights — the model learns to correct
+    aligner errors end-to-end.
+
+    Example::
+
+        corrector = DifferentiableBoundaryCorrector(d_model=256)
+
+        soft_align = corrector(
+            pooled_mean = pooled_mean,   # (B, N, d_model)
+            durations   = durations,     # (B, N)  integer frame counts
+            T           = mel_T,         # target time dimension
+            phoneme_mask = mask,         # (B, N)  True = padding
+        )
+        # soft_align → (B, T, N)
+        phoneme_at_t = torch.bmm(soft_align, pooled)   # (B, T, d_model)
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        max_shift: float = 4.0,
+        sigma: float = 1.0,
+    ) -> None:
+        super().__init__()
+        self.max_shift = max_shift
+        self.sigma = sigma
+
+        # lightweight MLP: d_model → d_model//2 → 1
+        self.mlp = nn.Sequential(
+            nn.Linear(d_model, d_model // 2),
+            nn.GELU(),
+            nn.Linear(d_model // 2, 1),   # scalar shift per phoneme
+        )
+
+    def forward(
+        self,
+        pooled_mean: torch.Tensor,                      # (B, N, d_model)
+        durations: torch.Tensor,                        # (B, N) float/long
+        T: int,                                         # target frames
+        phoneme_mask: Optional[torch.BoolTensor] = None,  # (B, N) True=pad
+    ) -> torch.Tensor:                                  # (B, T, N)
+        """
+        Parameters
+        ----------
+        pooled_mean:
+            Mean-pooled phoneme vectors computed on the hard alignment.
+            Used as input to the boundary shift MLP.
+        durations:
+            Hard frame counts per phoneme ``(B, N)`` from
+            ``AlignmentOutput.durations``.
+        T:
+            Target time dimension — must match ``mel_features.shape[1]``.
+        phoneme_mask:
+            ``(B, N)`` padding mask.  Padding phonemes receive zero weight.
+
+        Returns
+        -------
+        ``(B, T, N)`` soft alignment matrix where each row (frame) sums to 1
+        across valid phonemes.
+        """
+        B, N, _ = pooled_mean.shape
+        durations = durations.float()                    # (B, N)
+
+        # ------------------------------------------------------------------ #
+        # 1. Hard phoneme centres from cumulative durations                   #
+        #    center_n = sum(dur_0..n-1) + dur_n/2  (1-based frame index)      #
+        # ------------------------------------------------------------------ #
+        cum = durations.cumsum(dim=1)                    # (B, N)
+        centers = cum - durations / 2.0                  # (B, N)
+
+        # ------------------------------------------------------------------ #
+        # 2. Learned boundary shift  δ ∈ (-max_shift, +max_shift)             #
+        # ------------------------------------------------------------------ #
+        delta = torch.tanh(self.mlp(pooled_mean).squeeze(-1))  # (B, N)
+        delta = delta * self.max_shift                          # (B, N)
+
+        # zero shift for padding phonemes — don't move phantom boundaries
+        if phoneme_mask is not None:
+            delta = delta.masked_fill(phoneme_mask, 0.0)
+
+        centers_shifted = centers + delta                # (B, N)
+
+        # ------------------------------------------------------------------ #
+        # 3. Gaussian soft alignment                                           #
+        #    dist[b, t, n] = (t - center_shifted[b, n])²                      #
+        # ------------------------------------------------------------------ #
+        t_grid = torch.arange(T, dtype=torch.float32, device=pooled_mean.device)
+        # (B, N, T) — squared distance from each frame to each phoneme centre
+        dist_sq = (
+            t_grid.view(1, 1, T) - centers_shifted.unsqueeze(-1)
+        ).pow(2)                                         # (B, N, T)
+
+        # logits for softmax over N — (B, N, T)
+        logits = -dist_sq / (2.0 * self.sigma ** 2)
+
+        # mask padding phonemes with -inf before softmax
+        if phoneme_mask is not None:
+            logits = logits.masked_fill(
+                phoneme_mask.unsqueeze(-1), float("-inf")
+            )
+
+        # softmax over phoneme dim → each frame sums to 1 across phonemes
+        soft_align = torch.softmax(logits, dim=1)        # (B, N, T)
+
+        return soft_align.permute(0, 2, 1)               # (B, T, N)
