@@ -12,14 +12,21 @@ from typing import Optional, List
 
 
 from modules.flash_attn_encoder import FlashTransformerEncoder
-from modules.downsampler import DownSampler
+
+# from modules.downsampler import DownSampler
+from modules.downsampler_2d import DownSamplerConfig, DownSampler
 from modules.resnet import LinearResNet as ResNet
 from modules.similarity import Aligner, SimilarityUpsamplerBatch
 from modules.alignement import AlignmentMatrixBuilder
-from modules.qformer import AlignmentQFormer, DiTConditioningProjector, pooled_norm_penalty, DiTConditioningProjector
+from modules.qformer import (
+    AlignmentQFormer,
+    DiTConditioningProjector,
+    pooled_norm_penalty,
+    DiTConditioningProjector,
+)
 
 
-#from modules.pooler import QformerPooler
+# from modules.pooler import QformerPooler
 
 # Inizializzazione
 
@@ -51,14 +58,15 @@ class SigmaVAEencoderConfig:
 
 @dataclass
 class ConvformerEncoderConfig(SigmaVAEencoderConfig):
-    compress_factor_C: int = 8
-    tf_heads: int = 8
-    tf_layers: int = 4
-    drop_p: float = 0.1
-    latent_dim: int = 64
+    d_model: int = 128
     n_residual_blocks: int = 3
+    compress_factor_C: int = 1
+    latent_dim: int = 64
+    drop_p: float = 0.1
+    tf_heads: int = 8
+    tf_layers: int = 2
     num_embeddings: int = 100
-    embedding_dim: int = 80
+    embedding_dim: int = 128
     phoneme_parsing_mode: str = "phoneme"
     vocab_path: str = "data/vocab.json"
     use_aligner: bool = False
@@ -163,35 +171,36 @@ class CausalTransformerTail(nn.Module):
         return self.enc(tokens, causal=True)
 
 
-# TransformerEncoder with causal masking via is_causal for left-only attention [web:84][web:92]
-
-
 class ConvformerEncoder(SigmaVAEEncoder):
     def __init__(self, config: ConvformerEncoderConfig):
         super().__init__(config)
 
         compress_factor_C = config.compress_factor_C
+        d_model = config.d_model
         tf_heads = config.tf_heads
         tf_layers = config.tf_layers
         drop_p = config.drop_p
         latent_dim = config.latent_dim
         n_residual_blocks = config.n_residual_blocks
 
+        downsampler_config = DownSamplerConfig(
+            d_model=d_model,
+            separable=True,
+            n_residual_blocks=n_residual_blocks,
+            compress_factor=compress_factor_C,
+            dropout=drop_p,
+        )
+
         if config.force_downsample:
-            self.downsampler = DownSampler(
-                d_in=100,
-                d_hidden=512,
-                d_out=512,
-                compress_factor=compress_factor_C,
-                causal=True,
-            )
+            self.downsampler = DownSampler(downsampler_config)
         else:
-            self.downsampler = ResNet(
-                in_dim=100,
-                hidden_dim=512,
-                output_dim=512,
-                num_blocks=n_residual_blocks,
-            )
+            raise ValueError("Deprecated")
+            # self.downsampler = ResNet(
+            #     in_dim=100,
+            #     hidden_dim=512,
+            #     output_dim=512,
+            #     num_blocks=n_residual_blocks,
+            # )
 
         self.alignment_matrix_builder = AlignmentMatrixBuilder(
             compress_factor=config.compress_factor_C,
@@ -213,7 +222,7 @@ class ConvformerEncoder(SigmaVAEEncoder):
             num_queries_per_phoneme=4,
             num_layers=4,
             dropout=0.1,
-            out_dim=512
+            out_dim=512,
         )
 
         # TODO create an upsample convolution causal for conditioning_proj
@@ -235,7 +244,6 @@ class ConvformerEncoder(SigmaVAEEncoder):
         **kwargs,
     ):  # x: [B, T, 100]
 
-        
         original_padding_mask = padding_mask.clone()
         x, padding_mask = self.downsampler(x, padding_mask.bool())
         target_T = (~padding_mask).sum(dim=1)
@@ -292,11 +300,17 @@ class ConvformerEncoder(SigmaVAEEncoder):
             )
 
         if self.config.use_aligner:
-            z_upsampled = self.conditioning_proj(pooled = z, alignment = align_float, rel_pos = pos)
-            z_upsampled = torch.repeat_interleave(z_upsampled, self.config.compress_factor_C, dim=1)
+            z_upsampled = self.conditioning_proj(
+                pooled=z, alignment=align_float, rel_pos=pos
+            )
+            z_upsampled = torch.repeat_interleave(
+                z_upsampled, self.config.compress_factor_C, dim=1
+            )
             upsampled_padding_mask = original_padding_mask
         else:
-            z_upsampled = torch.repeat_interleave(z, self.config.compress_factor_C, dim=1)
+            z_upsampled = torch.repeat_interleave(
+                z, self.config.compress_factor_C, dim=1
+            )
             upsampled_padding_mask = original_padding_mask
 
         return ConvformerOutput(

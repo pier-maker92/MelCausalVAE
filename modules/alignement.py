@@ -358,9 +358,7 @@ class AlignmentMatrixBuilder(nn.Module):
                     start = i
             # Final segment
             label = (
-                phoneme_alignment[curr_idx]["phoneme"]
-                if curr_idx != -1
-                else GAP_TOKEN
+                phoneme_alignment[curr_idx]["phoneme"] if curr_idx != -1 else GAP_TOKEN
             )
             segments.append((label, start, T))
 

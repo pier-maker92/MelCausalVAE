@@ -1,7 +1,7 @@
 wandb
 vocos
 datasets==4.4.0
-torch==2.8
+torch
 torchaudio
 matplotlib
 torchdiffeq
