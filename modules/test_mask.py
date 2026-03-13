@@ -164,4 +164,22 @@ if __name__ == "__main__":
     out = qformer(
         frames, alignments.alignments, alignments.embeddings, alignments.phoneme_mask
     )
-    breakpoint()
+
+    # Test DurationConditioningProjector
+    from modules.qformer import DurationConditioningProjector
+
+    print(f"Pooled shape: {out.pooled.shape}")
+
+    projector = DurationConditioningProjector(
+        d_in=out.pooled.shape[-1],
+        d_out=256,
+        channels=256,
+        kernel_size=31,
+        n_layers=3
+    ).to(device).to(dtype)
+
+    durations = alignments.durations
+    cond = projector(out.pooled, durations, out.rel_pos)
+
+    print(f"Conditioning shape: {cond.shape}")
+    print("Success: QFormer and DurationConditioningProjector test passed.")

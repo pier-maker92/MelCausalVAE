@@ -20,17 +20,12 @@ from modules.similarity import Aligner, SimilarityUpsamplerBatch
 from modules.alignement import AlignmentMatrixBuilder
 from modules.qformer import (
     AlignmentQFormer,
-    DiTConditioningProjector,
+    DurationConditioningProjector,
     pooled_norm_penalty,
-    DiTConditioningProjector,
 )
 
 
-# from modules.pooler import QformerPooler
-
 # Inizializzazione
-
-
 @dataclass
 class ConvformerOutput:
     z: torch.FloatTensor
@@ -66,7 +61,6 @@ class ConvformerEncoderConfig(SigmaVAEencoderConfig):
     tf_heads: int = 8
     tf_layers: int = 2
     num_embeddings: int = 100
-    embedding_dim: int = 128
     phoneme_parsing_mode: str = "phoneme"
     vocab_path: str = "data/vocab.json"
     use_aligner: bool = False
@@ -204,30 +198,30 @@ class ConvformerEncoder(SigmaVAEEncoder):
 
         self.alignment_matrix_builder = AlignmentMatrixBuilder(
             compress_factor=config.compress_factor_C,
-            embedding_dim=512,
+            embedding_dim=d_model,
         )
-        self.proj_mean = nn.Linear(512, latent_dim)
+        self.proj_mean = nn.Linear(d_model, latent_dim)
 
         # Causal Transformer tail operating on tokens of size 512
         self.transformer = CausalTransformerTail(
-            d_model=512, nheads=tf_heads, nlayers=tf_layers, drop_p=drop_p
+            d_model=d_model, nheads=tf_heads, nlayers=tf_layers, drop_p=drop_p
         )
 
-        self.mu = nn.Linear(512, latent_dim)
+        self.mu = nn.Linear(d_model, latent_dim)
         if config.logvar_layer:
-            self.logvar = nn.Linear(512, latent_dim)
+            self.logvar = nn.Linear(d_model, latent_dim)
 
         self.pooler = AlignmentQFormer(
-            d_model=512,
-            num_queries_per_phoneme=4,
+            d_model=d_model,
+            num_queries_per_phoneme=3,
             num_layers=4,
-            dropout=0.1,
-            out_dim=512,
+            dropout=drop_p,
+            out_dim=d_model,
         )
 
         # TODO create an upsample convolution causal for conditioning_proj
-        self.conditioning_proj = DiTConditioningProjector(
-            d_model=64,
+        self.conditioning_proj = DurationConditioningProjector(
+            d_in=d_model,
         )
 
         if config.freeze_encoder:
@@ -271,13 +265,12 @@ class ConvformerEncoder(SigmaVAEEncoder):
                 )
 
             align_float = alignments.to(x.dtype)  # [B, T, N]
-            dur = align_float.sum(dim=1).unsqueeze(-1)  # [B, N, 1]
-            # x = torch.bmm(align_float.transpose(1, 2), x) / (dur + 1e-8)  # [B, N, D]
 
             # Forward pass
             out = self.pooler(
                 mel_features=x,
                 alignment=alignments,
+                phoneme_embeddings=embeddings,
                 phoneme_mask=padding_mask,
             )
             x = out.pooled
@@ -301,7 +294,7 @@ class ConvformerEncoder(SigmaVAEEncoder):
 
         if self.config.use_aligner:
             z_upsampled = self.conditioning_proj(
-                pooled=z, alignment=align_float, rel_pos=pos
+                pooled=z, durations=durations, rel_pos=pos
             )
             z_upsampled = torch.repeat_interleave(
                 z_upsampled, self.config.compress_factor_C, dim=1

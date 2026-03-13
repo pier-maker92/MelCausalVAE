@@ -396,6 +396,9 @@ class DurationConditioningProjector(nn.Module):
         # Input projection (phoneme dim → internal channels)
         self.in_proj = nn.Linear(d_in, channels) if d_in != channels else nn.Identity()
 
+        # Relative position encoder
+        self.pos_encoder = RelativePositionEncoder(d_model=channels)
+
         # Causal conv stack with increasing dilations
         dilations = [2**i for i in range(n_layers)]  # [1, 2, 4, ...]
         self.conv_blocks = nn.ModuleList(
@@ -447,6 +450,7 @@ class DurationConditioningProjector(nn.Module):
         self,
         pooled: torch.Tensor,  # (B, N, d_in)
         durations: torch.Tensor,  # (B, N) int — frames per phoneme
+        rel_pos: torch.Tensor,  # (B, T) float in [0, 1]
     ) -> torch.Tensor:  # (B, T, d_out)
         """
         Parameters
@@ -456,6 +460,9 @@ class DurationConditioningProjector(nn.Module):
         durations:
             Integer durations ``(B, N)`` — number of mel frames each phoneme
             spans.  Can be obtained as ``alignment.sum(dim=1).long()``.
+        rel_pos:
+            Intra-phoneme relative positions ``(B, T)`` from
+            ``compute_relative_positions(alignment)``.
 
         Returns
         -------
@@ -467,10 +474,13 @@ class DurationConditioningProjector(nn.Module):
         # 2. Project into internal channel width
         x = self.in_proj(x)  # (B, T, channels)
 
-        # 3. Causal conv stack
+        # 3. Add relative position embeddings
+        x = x + self.pos_encoder(rel_pos)
+
+        # 4. Causal conv stack
         for block in self.conv_blocks:
             x = block(x)
 
-        # 4. Final norm + output projection
+        # 5. Final norm + output projection
         x = self.out_norm(x)
         return self.out_proj(x)  # (B, T, d_out)
