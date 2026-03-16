@@ -13,7 +13,7 @@ from typing import Optional, List
 
 from modules.flash_attn_encoder import FlashTransformerEncoder
 
-# from modules.downsampler import DownSampler
+#from modules.downsampler import DownSampler
 from modules.downsampler_2d import DownSamplerConfig, DownSampler
 from modules.resnet import LinearResNet as ResNet
 from modules.similarity import Aligner, SimilarityUpsamplerBatch
@@ -21,7 +21,7 @@ from modules.alignement import AlignmentMatrixBuilder
 from modules.qformer import (
     AlignmentQFormer,
     DurationConditioningProjector,
-    pooled_norm_penalty,
+    compute_relative_positions,
 )
 
 
@@ -179,14 +179,20 @@ class ConvformerEncoder(SigmaVAEEncoder):
 
         downsampler_config = DownSamplerConfig(
             d_model=d_model,
-            separable=True,
+            separable=False,
             n_residual_blocks=n_residual_blocks,
             compress_factor=compress_factor_C,
-            dropout=drop_p,
+            drop_p=drop_p,
         )
 
         if config.force_downsample:
             self.downsampler = DownSampler(downsampler_config)
+            # self.downsampler = DownSampler(
+            #     d_in = 100,
+            #     d_hidden = 1024,
+            #     d_out = 512,
+            #     compress_factor = compress_factor_C,
+            # )
         else:
             raise ValueError("Deprecated")
             # self.downsampler = ResNet(
@@ -211,17 +217,17 @@ class ConvformerEncoder(SigmaVAEEncoder):
         if config.logvar_layer:
             self.logvar = nn.Linear(d_model, latent_dim)
 
-        self.pooler = AlignmentQFormer(
-            d_model=d_model,
-            num_queries_per_phoneme=3,
-            num_layers=4,
-            dropout=drop_p,
-            out_dim=d_model,
-        )
+        # self.pooler = AlignmentQFormer(
+        #     d_model=d_model,
+        #     num_queries_per_phoneme=3,
+        #     num_layers=4,
+        #     dropout=drop_p,
+        #     out_dim=d_model,
+        # )
 
         # TODO create an upsample convolution causal for conditioning_proj
         self.conditioning_proj = DurationConditioningProjector(
-            d_in=d_model,
+            d_in=latent_dim,
         )
 
         if config.freeze_encoder:
@@ -257,6 +263,7 @@ class ConvformerEncoder(SigmaVAEEncoder):
             durations = align_out.durations  # [B, N]
             segment_labels = align_out.segment_labels
             embeddings = align_out.embeddings
+            rel_pos = compute_relative_positions(alignments)
 
             if x.shape[1] != alignments.shape[1]:
                 raise RuntimeError(
@@ -273,9 +280,8 @@ class ConvformerEncoder(SigmaVAEEncoder):
                 phoneme_embeddings=embeddings,
                 phoneme_mask=padding_mask,
             )
-            x = out.pooled
+            x = out.pooled #torch.bmm(align_float.permute(0,2,1), x) / (durations.unsqueeze(-1) + 1e-8)
             pos = out.rel_pos
-            kl_loss = pooled_norm_penalty(x, padding_mask) * 0
 
         mu = self.mu(x)
         logvar = None

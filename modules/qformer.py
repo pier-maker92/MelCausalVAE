@@ -134,8 +134,11 @@ class QFormerLayer(nn.Module):
         causal_mask: torch.Tensor,
         sa_key_padding_mask: torch.Tensor,
         last_layer: bool = False,
+        temperature: float = 1.0,
     ):
         q = self.norm_ca(queries)
+        if temperature != 1.0:
+            q = q / temperature
         ca_out, attn_weights = self.cross_attn(
             q, mel_features, mel_features, attn_mask=cross_mask
         )
@@ -174,6 +177,7 @@ class AlignmentQFormer(nn.Module):
         dropout: float = 0.1,
         out_dim: int = 64,
         context_expansion: int = 5,
+        temperature: float = 1.0,
     ):
         super().__init__()
         self.d_model = d_model
@@ -181,6 +185,7 @@ class AlignmentQFormer(nn.Module):
         self.Q_learnable = num_queries_per_phoneme
         self.Q_tot = num_queries_per_phoneme + 1
         self.context_expansion = context_expansion
+        self.temperature = temperature
         ffn_dim = ffn_dim or 4 * d_model
 
         self.query_proto = nn.Parameter(torch.empty(num_queries_per_phoneme, d_model))
@@ -214,7 +219,7 @@ class AlignmentQFormer(nn.Module):
         allowed = group.unsqueeze(0) == group.unsqueeze(1)  # (total, total)
 
         mask = torch.zeros(total, total, device=device)
-        mask = mask.masked_fill(~allowed, float("-inf"))
+        mask = mask.masked_fill(~allowed, -1e8)
         return mask
 
     def _build_cross_attn_mask(
@@ -234,7 +239,7 @@ class AlignmentQFormer(nn.Module):
             expanded.unsqueeze(2).expand(B, N, Q_tot, T).reshape(B, N * Q_tot, T).bool()
         )
         additive = expanded.new_zeros(B, N * Q_tot, T).masked_fill(
-            ~mask_bool, float("-inf")
+            ~mask_bool, -1e8
         )
         empty = (~mask_bool).all(dim=-1, keepdim=True)
         additive = additive.masked_fill(empty, 0.0)
@@ -297,21 +302,13 @@ class AlignmentQFormer(nn.Module):
                 causal_mask,
                 sa_key_padding_mask,
                 last_layer=last,
+                temperature=self.temperature,
             )
             if not last:
                 queries = out
 
         # Weighted mean+std pooling
-        weights = (
-            out
-            + cross_mask.reshape(B, self.num_heads, N * Q_tot, T)[
-                :, 0, :, :
-            ]  # mask is the same for each head
-        ).reshape(B, N, Q_tot, T)[
-            :, :, 0, :
-        ]  #  we take only the first query scores (NOTE: there was self attn in previous layers)
-        weights = F.softmax(weights, dim=-1, dtype=mel_features.dtype)
-        # fill NaN with 0
+        weights = out.reshape(B, N, Q_tot, T)[:, :, 0, :] 
         weights = weights.nan_to_num(0.0)
 
         # # plot weigths
@@ -322,11 +319,11 @@ class AlignmentQFormer(nn.Module):
         #     plt.savefig(f"weights_{i}.png")
         #     plt.close()
 
-        mu = torch.bmm(weights, mel_features)
-        diff = mel_features.unsqueeze(1) - mu.unsqueeze(2)  # (B, N, T, D)
-        var = (weights.unsqueeze(-1) * diff**2).sum(dim=2)  # (B, N, D)
-        z_n = torch.cat([mu, torch.sqrt(var + 1e-5)], dim=-1)
-        pooled = self.proj(z_n)
+        pooled = torch.bmm(weights, mel_features)
+        # diff = mel_features.unsqueeze(1) - mu.unsqueeze(2)  # (B, N, T, D)
+        # var = (weights.unsqueeze(-1) * diff**2).sum(dim=2)  # (B, N, D)
+        # z_n = torch.cat([mu, torch.sqrt(var + 1e-5)], dim=-1)
+        # pooled = self.proj(z_n)
 
         return QFormerOutput(
             pooled=pooled,
@@ -341,146 +338,128 @@ class AlignmentQFormer(nn.Module):
 
 
 class CausalConv1dBlock(nn.Module):
-    """Single causal 1D conv block: LN → GELU → CausalConv1d → Dropout + residual."""
 
     def __init__(
         self,
         channels: int,
-        kernel_size: int,
-        dilation: int = 1,
+        kernel_size: int = 31,
         dropout: float = 0.1,
-    ) -> None:
+    ):
         super().__init__()
-        self.causal_pad = (kernel_size - 1) * dilation  # left-only padding
+
+        self.pad = kernel_size - 1
+
         self.norm = nn.LayerNorm(channels)
-        self.act = nn.GELU()
+
         self.conv = nn.Conv1d(
             channels,
             channels,
             kernel_size,
-            dilation=dilation,
-            padding=0,  # we pad manually for causality
+            padding=0,
         )
+
+        self.act = nn.GELU()
+
         self.drop = nn.Dropout(dropout)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            x: (B, T, C)   — channel-last layout
-        Returns:
-            (B, T, C)
-        """
+    def forward(self, x):
+
         residual = x
-        h = self.act(self.norm(x))  # (B, T, C)
-        h = h.transpose(1, 2)  # (B, C, T) for Conv1d
-        h = F.pad(h, (self.causal_pad, 0))  # left-only causal pad
-        h = self.conv(h)  # (B, C, T)
-        h = h.transpose(1, 2)  # (B, T, C)
-        return residual + self.drop(h)
+
+        x = self.norm(x)
+        x = self.act(x)
+
+        x = x.transpose(1, 2)
+
+        x = F.pad(x, (self.pad, 0))  # causal padding
+
+        x = self.conv(x)
+
+        x = x.transpose(1, 2)
+
+        return residual + self.drop(x)
 
 
 class DurationConditioningProjector(nn.Module):
+
     def __init__(
         self,
-        d_in: int,
-        d_out: Optional[int] = None,
-        channels: Optional[int] = None,
-        kernel_size: int = 31,
-        n_layers: int = 3,
-        dropout: float = 0.1,
-    ) -> None:
+        d_in,
+        d_out=None,
+        channels=None,
+        kernel_size=31,
+        n_layers=3,
+        dropout=0.1,
+    ):
         super().__init__()
+
         d_out = d_out or d_in
         channels = channels or d_in
 
-        # Input projection (phoneme dim → internal channels)
         self.in_proj = nn.Linear(d_in, channels) if d_in != channels else nn.Identity()
 
-        # Relative position encoder
-        self.pos_encoder = RelativePositionEncoder(d_model=channels)
+        self.pos_encoder = RelativePositionEncoder(channels)
 
-        # Causal conv stack with increasing dilations
-        dilations = [2**i for i in range(n_layers)]  # [1, 2, 4, ...]
         self.conv_blocks = nn.ModuleList(
             [
                 CausalConv1dBlock(
                     channels=channels,
                     kernel_size=kernel_size,
-                    dilation=d,
                     dropout=dropout,
                 )
-                for d in dilations
+                for _ in range(n_layers)
             ]
         )
 
         self.out_norm = nn.LayerNorm(channels)
 
-        # Output projection (internal channels → d_out)
         self.out_proj = (
             nn.Linear(channels, d_out) if channels != d_out else nn.Identity()
         )
 
-    @staticmethod
-    def _upsample_by_duration(
-        phoneme_vectors: torch.Tensor,
-        durations: torch.Tensor,
-    ) -> torch.Tensor:
-        """
-        Repeat each phoneme vector according to its duration.
-
-        Args:
-            phoneme_vectors: (B, N, D)
-            durations:       (B, N) int — number of frames per phoneme.
-
-        Returns:
-            (B, T, D) where ``T = durations.sum(dim=-1).max()``, zero-padded
-            for shorter items in the batch.
-        """
-        B, N, D = phoneme_vectors.shape
-        T_max = durations.sum(dim=-1).max().item()
-        out = phoneme_vectors.new_zeros(B, T_max, D)
-        for b in range(B):
-            # repeat_interleave along N using per-element counts
-            out[b, : durations[b].sum()] = torch.repeat_interleave(
-                phoneme_vectors[b], durations[b], dim=0
-            )
-        return out
-
     def forward(
         self,
-        pooled: torch.Tensor,  # (B, N, d_in)
-        durations: torch.Tensor,  # (B, N) int — frames per phoneme
-        rel_pos: torch.Tensor,  # (B, T) float in [0, 1]
-    ) -> torch.Tensor:  # (B, T, d_out)
-        """
-        Parameters
-        ----------
-        pooled:
-            Per-phoneme compressed vectors (e.g. from :class:`AlignmentQFormer`).
-        durations:
-            Integer durations ``(B, N)`` — number of mel frames each phoneme
-            spans.  Can be obtained as ``alignment.sum(dim=1).long()``.
-        rel_pos:
-            Intra-phoneme relative positions ``(B, T)`` from
-            ``compute_relative_positions(alignment)``.
+        pooled,      # (B,N,D)
+        durations,   # (B,N)
+        rel_pos,     # (B,T)
+    ):
 
-        Returns
-        -------
-        ``(B, T, d_out)`` — frame-level conditioning, causally smoothed.
-        """
-        # 1. Upsample: (B, N, d_in) → (B, T, d_in)
-        x = self._upsample_by_duration(pooled, durations)
+        x = upsample_by_duration(pooled, durations)
 
-        # 2. Project into internal channel width
-        x = self.in_proj(x)  # (B, T, channels)
+        x = self.in_proj(x)
 
-        # 3. Add relative position embeddings
         x = x + self.pos_encoder(rel_pos)
 
-        # 4. Causal conv stack
         for block in self.conv_blocks:
             x = block(x)
 
-        # 5. Final norm + output projection
         x = self.out_norm(x)
-        return self.out_proj(x)  # (B, T, d_out)
+
+        return self.out_proj(x)
+
+
+def upsample_by_duration(pooled, durations):
+
+    B, N, D = pooled.shape
+
+    T = durations.sum(dim=1).max()
+
+    device = pooled.device
+
+    frame_index = torch.arange(T, device=device)
+
+    cum_dur = torch.cumsum(durations, dim=1)
+
+    start = cum_dur - durations
+
+    mask = (frame_index[None, None, :] >= start[..., None]) & (
+        frame_index[None, None, :] < cum_dur[..., None]
+    )
+
+    idx = mask.float().argmax(dim=1)
+
+    return torch.gather(
+        pooled,
+        1,
+        idx.unsqueeze(-1).expand(-1, -1, D),
+    )

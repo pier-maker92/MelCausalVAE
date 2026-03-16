@@ -187,7 +187,7 @@ class VAEtrainer(Trainer):
             if self.args.n_gpu > 1:
                 audio_loss = audio_loss.mean()
                 kl_loss = kl_loss.mean()
-                align_loss = align_loss.mean()
+                #align_loss = align_loss.mean()
             self.control.granular_losses["audio_loss"] += (
                 audio_loss.detach() / self.args.gradient_accumulation_steps
             )
@@ -392,9 +392,9 @@ class VAEtrainer(Trainer):
         with torch.no_grad():
             results = self.model.encode_and_sample(
                 audios_srs=audios_srs,
-                num_steps=16,
+                num_steps=8,
                 temperature=1.0,
-                guidance_scale=1.5,
+                guidance_scale=1.0,
                 hubert_guidance=hubert_guidance,
                 phonemes=phonemes,
                 words=words,

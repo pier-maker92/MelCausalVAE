@@ -51,7 +51,7 @@ class MelSpectrogramEncoder(torch.nn.Module):
     def _update_std_mean_with_momentum(self, mel_spec: torch.Tensor):
         self.std = self.std * 0.99 + mel_spec.std() * 0.01
         self.mean = self.mean * 0.99 + mel_spec.mean() * 0.01
-        print(f"std: {self.std}, mean: {self.mean}")
+        #print(f"std: {self.std}, mean: {self.mean}")
 
     def forward(self, audios_srs: List[Tuple[torch.FloatTensor, int]], **kwargs):
         audios, sampling_rates = zip(*audios_srs)

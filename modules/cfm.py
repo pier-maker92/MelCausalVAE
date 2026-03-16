@@ -173,10 +173,18 @@ class DiT(torch.nn.Module):
         )
         loss = None
         if target is not None:
-            v_to_loss = v[mask_to_loss].view(-1, self.mel_channels)
-            target_to_loss = target[mask_to_loss].view(-1, self.mel_channels)
-            # Compute loss in fp32 for numerical stability with fp16
-            loss = F.mse_loss(v_to_loss.float(), target_to_loss.float()).to(v.dtype)
+            v_to_loss      = v[mask_to_loss].view(-1, self.mel_channels).float()
+            target_to_loss = target[mask_to_loss].view(-1, self.mel_channels).float()
+
+            # freq_weights: (mel_channels,) → broadcast su (N, mel_channels)
+            freq_weights = torch.linspace(
+                0.5, 2.0, self.mel_channels, device=v.device
+            )
+            # normalizzazione: la media dei pesi = 1 → loss paragonabile alla MSE
+            freq_weights = freq_weights / freq_weights.mean()
+
+            loss = (((v_to_loss - target_to_loss) ** 2) * freq_weights).mean().to(v.dtype)
+
         return loss
 
     def forward(

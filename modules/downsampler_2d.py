@@ -231,14 +231,34 @@ class DownSampler(nn.Module):
         d_out = config.d_model if config.out_dim is None else config.out_dim
         self.out_proj = nn.Linear(config.d_model, d_out)
 
-    def forward(self, x: torch.FloatTensor):
+    def forward(
+        self, x: torch.FloatTensor, padding_mask: Optional[torch.BoolTensor] = None
+    ):
         # x: shape [B, T, D]
         x = x.unsqueeze(1)
         x = self.freq_mixer(x)
         for layer in self.downsampling.values():
             x = layer(x)
         x = self.freq_out_proj(x).squeeze(-1).permute(0, 2, 1)
-        return self.out_proj(x)
+        x = self.out_proj(x)
+
+        if padding_mask is not None:
+            # Downsample padding_mask.
+            # Since each downsampling block has stride 2 in time, we subsample by 2 at each stage.
+            # Total downsampling factor is self.compress_factor.
+            # We use interpolation to ensure it matches the target length exactly.
+            target_length = x.shape[1]
+            padding_mask = (
+                torch.nn.functional.interpolate(
+                    padding_mask.unsqueeze(1).float(),
+                    size=target_length,
+                    mode="nearest",
+                ).squeeze(1)
+                > 0.5
+            )
+            return x, padding_mask
+
+        return x
 
 
 def count_parameters(model):

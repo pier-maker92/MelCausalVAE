@@ -1098,10 +1098,10 @@ if __name__ == "__main__":
 
 # LibriSpeech test set evaluation with HuBERT ASR:
 # python eval.py \
-#   --config-path configs/settings/setting1.yaml \
-#   --checkpoints <checkpoint_path> \
+#   --config-path /home/ec2-user/MelCausalVAE/configs/settings/exp-compression.yaml \
+#   --checkpoints /home/ec2-user/MelCausalVAE/checkpoints/MelCausalVAE/2d-compression-8X/model.safetensors \
 #   --setting LibriSpeech \
 #   --num-samples 100 --batch-size 4 \
 #   --n-steps 4 --temperature 0.2 --guidance-scale 1.3 \
 #   --exp-name librispeech_eval \
-#   --output-dir /workspace/MelCausalVAE/evaluation
+#   --output-dir /home/ec2-user/MelCausalVAE/evaluation
