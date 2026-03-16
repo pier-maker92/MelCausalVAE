@@ -69,15 +69,15 @@ class SigmaVAEEncoder(nn.Module):
         return mu + eps * std
 
     def kl_divergence(
-        self, mu: torch.FloatTensor, logvar: Optional[torch.FloatTensor], padding_mask: torch.BoolTensor
+        self, mu: torch.FloatTensor, logvar: Optional[torch.FloatTensor], padding_mask: torch.BoolTensor, dtype:torch.dtype
     ) -> torch.FloatTensor:
         if logvar is None:
             # Compute in fp32 for numerical stability
-            mu_valid = mu[~padding_mask].float()
+            mu_valid = mu[~padding_mask].to(dtype)
             return F.mse_loss(mu_valid, torch.zeros_like(mu_valid)).to(mu.dtype)
         # Compute KL divergence in fp32 for numerical stability with fp16
-        mu_valid = mu[~padding_mask].float()
-        logvar_valid = logvar[~padding_mask].float()
+        mu_valid = mu[~padding_mask].to(dtype)
+        logvar_valid = logvar[~padding_mask].to(dtype)
         kl = -0.5 * torch.sum(1 + logvar_valid - mu_valid.pow(2) - logvar_valid.exp())
         return kl.to(mu.dtype)
 
@@ -86,10 +86,10 @@ class SigmaVAEEncoder(nn.Module):
             torch.randn(mu.shape[0], mu.shape[1], dtype=mu.dtype, device=mu.device) * self.config.target_std
         )
 
-    def _resize_padding_mask(self, padding_mask: torch.BoolTensor, target_length: int) -> torch.BoolTensor:
+    def _resize_padding_mask(self, padding_mask: torch.BoolTensor, target_length: int, dtype:torch.dtype) -> torch.BoolTensor:
         padding_mask = (
             F.interpolate(
-                padding_mask.unsqueeze(1).float(),
+                padding_mask.unsqueeze(1).to(dtype),
                 size=target_length,
                 mode="linear",
                 align_corners=False,
@@ -215,20 +215,9 @@ class CausalDownsamplingBlock(nn.Module):
 class CausalTransformerTail(nn.Module):
     def __init__(self, d_model=512, nheads=8, nlayers=4, drop_p=0.1):
         super().__init__()
-        # layer = nn.TransformerEncoderLayer(
-        #     d_model=d_model,
-        #     nhead=nheads,
-        #     dim_feedforward=d_model * 4,
-        #     dropout=drop_p,
-        #     batch_first=True,
-        #     norm_first=True,
-        # )
-        # self.enc = nn.TransformerEncoder(layer, num_layers=nlayers)
         self.enc = FlashTransformerEncoder(d_model=d_model, nhead=nheads, nlayers=nlayers, drop_p=drop_p)
 
     def forward(self, tokens):  # [B, T_tok, d_model]
-        # L = tokens.size(1)
-        # causal_mask = torch.triu(torch.ones(L, L, dtype=torch.bool, device=tokens.device), diagonal=1)
         return self.enc(tokens, causal=True)
 
 
@@ -324,23 +313,24 @@ class ConvformerEncoder(SigmaVAEEncoder):
 
         semantic_loss = None
         if kwargs.get("semantic_guidance", None) is not None:
-            semantic_loss = self.semantic_regulator(
-                target=z,
-                guidance=kwargs["semantic_guidance"].semantic_features,
-                guidance_mask=kwargs["semantic_guidance"].padding_mask,
-                target_padding_mask=self._resize_padding_mask(padding_mask, mu.shape[1]),
-            )
+            raise NotImplementedError("Semantic guidance is not implemented yet")
+            # semantic_loss = self.semantic_regulator(
+            #     target=z,
+            #     guidance=kwargs["semantic_guidance"].semantic_features,
+            #     guidance_mask=kwargs["semantic_guidance"].padding_mask,
+            #     target_padding_mask=self._resize_padding_mask(padding_mask, mu.shape[1]),
+            # )
 
         kl_loss = None
         if kwargs.get("step", None) is not None:
             kl_loss = self.kl_divergence(
-                mu, logvar, self._resize_padding_mask(padding_mask, mu.shape[1])
+                mu, logvar, self._resize_padding_mask(padding_mask, mu.shape[1], dtype=z.dtype), dtype=z.dtype
             ) * self.get_kl_cosine_schedule(kwargs["step"])
 
         return ConvformerOutput(
             z=z,
             kl_loss=kl_loss,
-            padding_mask=self._resize_padding_mask(padding_mask, mu.shape[1]),
+            padding_mask=self._resize_padding_mask(padding_mask, mu.shape[1], dtype=z.dtype),
             mu=mu,
             semantic_loss=semantic_loss,
         )

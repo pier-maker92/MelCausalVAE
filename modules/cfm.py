@@ -178,7 +178,6 @@ class DiT(torch.nn.Module):
             else:
                 context_vector = torch.zeros_like(context_vector)
         # We need times
-        # We need times
         times = torch.rand(
             (target.shape[0],),
             dtype=context_vector.dtype,
@@ -186,12 +185,11 @@ class DiT(torch.nn.Module):
         )
         t = rearrange(times, "b -> b 1 1")
         # Now we need noise, x0 sampled from a normal distribution
-        x0 = torch.randn_like(target)
+        x0 = torch.randn_like(target).to(context_vector.dtype)
         # w is the noise signal that is transformed by the flow
-        w = (1 - (1 - self.sigma) * t) * x0 + t * target
+        w = ((1 - (1 - self.sigma) * t) * x0 + t * target).to(context_vector.dtype)
         # target is the original signal minus the noise
-        target = target - (1 - self.sigma) * x0
-
+        target = (target - (1 - self.sigma) * x0).to(context_vector.dtype)
         state = self.noise_proj(torch.cat([context_vector, w], dim=-1))
         return state, times, target
 

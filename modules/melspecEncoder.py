@@ -47,6 +47,11 @@ class MelSpectrogramEncoder(torch.nn.Module):
         self.std = 2.080231189727783
         self.mean = -1.0173088312149048
         self.normalize = config.normalize
+    
+    def _update_std_mean_with_momentum(self, mel_spec: torch.Tensor):
+        self.std = self.std * 0.99 + mel_spec.std() * 0.01
+        self.mean = self.mean * 0.99 + mel_spec.mean() * 0.01
+        print(f"std: {self.std}, mean: {self.mean}")
 
     def forward(self, audios_srs: List[Tuple[torch.FloatTensor, int]], **kwargs):
         audios, sampling_rates = zip(*audios_srs)
@@ -92,6 +97,7 @@ class MelSpectrogramEncoder(torch.nn.Module):
         # self.mel_transform.mel_scale.fb.to(torch.float32).to(device=device)
 
         mel_spec = self.mel_transform(padded_audios.to(torch.float32))
+        
         # Keep in fp32 for log operation to avoid fp16 underflow
         mel_spec = torch.log(mel_spec + 1e-6)
         mel_spec = einops.rearrange(mel_spec, "b c t -> b t c")
@@ -109,6 +115,10 @@ class MelSpectrogramEncoder(torch.nn.Module):
             .squeeze(0)
             .squeeze(0)
         )  # 93.75Hz
+
+        # for features, mask in zip(mel_spec, padding_mask):
+        #     self._update_std_mean_with_momentum(features[~mask])
+            
 
         assert padding_mask.shape[1] == mel_spec.shape[1], (
             f"Temporal dimensions mismatch: padding_mask {padding_mask.shape[1]} vs " f"mel_spec {mel_spec.shape[1]}"

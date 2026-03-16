@@ -8,10 +8,10 @@ from vocos import Vocos
 from pathlib import Path
 from typing import Dict, List
 import matplotlib.pyplot as plt
-from .modules.cfm import DiTConfig
-from .modules.VAE import VAE, VAEConfig
-from .modules.Encoder import ConvformerEncoderConfig
-from .modules.melspecEncoder import MelSpectrogramConfig
+from modules.cfm import DiTConfig
+from modules.VAE import VAE, VAEConfig
+from modules.Encoder import ConvformerEncoderConfig
+from modules.melspecEncoder import MelSpectrogramConfig
 from transformers import (
     Trainer,
     TrainingArguments,
@@ -19,14 +19,16 @@ from transformers import (
     TrainerControl,
     TrainerState,
     set_seed,
-    is_torch_tpu_available,
 )
 
 # data
-from .data.mls import MLSDataset
-from .data.libri_tts import LibriTTS
-from .data.audio_dataset import DataCollator
-from .data.audio_dataset import TrainDatasetWrapper
+from data.mls import MLSDataset
+from data.libri_tts import LibriTTS
+from data.audio_dataset import DataCollator
+from data.audio_dataset import TrainDatasetWrapper
+from data.librispeech_align import LibriSpeechAlignDataset
+import torch.distributed as dist
+
 
 
 # Set up logging
@@ -36,10 +38,6 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
-
-if is_torch_tpu_available(check_device=False):
-    import torch_xla.core.xla_model as xm
-
 
 class AddGranularLossesToTrainerState(TrainerCallback):
     """Callback to add granular losses to trainer state"""
@@ -72,7 +70,7 @@ class VAEtrainer(Trainer):
             pass
         self.add_callback(AddGranularLossesToTrainerState(granular_losses))
 
-    def compute_loss(self, model, inputs, return_outputs=False):
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         """Compute the loss for the VAE"""
         if hasattr(self.control, "granular_losses") and model.training:
             audios_srs = inputs["output_audios_srs"]
@@ -81,11 +79,11 @@ class VAEtrainer(Trainer):
                 audios_srs=audios_srs,
                 training_step=self.state.global_step,
             )
-            audio_loss = outputs.audio_loss
-            kl_loss = outputs.kl_loss
-            semantic_loss = getattr(outputs, "semantic_loss", None)
-            mu_mean = getattr(outputs, "mu_mean")
-            mu_var = getattr(outputs, "mu_var")
+            audio_loss = outputs["audio_loss"]
+            kl_loss = outputs["kl_loss"]
+            semantic_loss = outputs.get("semantic_loss", None)
+            mu_mean = outputs.get("mu_mean")
+            mu_var = outputs.get("mu_var")
             loss = audio_loss + kl_loss + (semantic_loss if semantic_loss is not None else 0.0)
 
             # Accumulate granular losses
@@ -130,10 +128,14 @@ class VAEtrainer(Trainer):
             loss = audio_loss + kl_loss + (semantic_loss if semantic_loss is not None else 0.0)
             return (loss, outputs) if return_outputs else loss
 
-    def _maybe_log_save_evaluate(self, tr_loss, grad_norm, model, trial, epoch, ignore_keys_for_eval):
+    def _maybe_log_save_evaluate(self, *args, **kwargs):
+        tr_loss = args[0]
+        grad_norm = args[1]
+        model = args[2]
+        trial = args[3]
+        epoch = args[4]
+        ignore_keys_for_eval = args[5]
         if self.control.should_log and self.state.global_step > self._globalstep_last_logged:
-            if is_torch_tpu_available():
-                xm.mark_step()
 
             logs: Dict[str, float] = {}
 
@@ -178,7 +180,7 @@ class VAEtrainer(Trainer):
             self._report_to_hp_search(trial, self.state.global_step, metrics)
 
         if self.control.should_save:
-            self._save_checkpoint(model, trial, metrics=metrics)
+            self._save_checkpoint(model, trial ) #metrics=metrics
             self.control = self.callback_handler.on_save(self.args, self.state, self.control)
 
     def evaluate(
@@ -226,7 +228,10 @@ class VAEtrainer(Trainer):
             # Create visualizations
             images = []
             # Resolve device id safely for distributed/non-distributed
-            device_id = torch.distributed.get_rank()
+            if dist.is_available() and dist.is_initialized():
+                device_id = dist.get_rank()
+            else:
+                device_id = 0
 
             audios = []
             audio_paths = []
@@ -414,6 +419,8 @@ def main():
         dataset = MLSDataset()
     elif dataset_name == "libritts":
         dataset = LibriTTS()
+    elif dataset_name == "librispeech_aligned":
+        dataset = LibriSpeechAlignDataset()
     else:
         raise ValueError(f"Dataset {dataset_name} not supported")
     train_dataset = TrainDatasetWrapper(dataset, "train")
