@@ -145,6 +145,10 @@ class QFormerLayer(nn.Module):
             sa_out, _ = self.self_attn(
                 q, q, q, attn_mask=causal_mask, key_padding_mask=sa_key_padding_mask
             )
+            # Padding phonemes can have ALL keys masked (causal restricts to same
+            # group, key_padding marks all of those as pad) → softmax yields NaN.
+            # Zero those out so NaN doesn't propagate through subsequent layers.
+            sa_out = sa_out.nan_to_num(0.0)
             queries = queries + self.drop(sa_out)
             queries = queries + self.ffn(self.norm_ff(queries))
             out = queries
@@ -214,7 +218,7 @@ class AlignmentQFormer(nn.Module):
         allowed = group.unsqueeze(0) == group.unsqueeze(1)  # (total, total)
 
         mask = torch.zeros(total, total, device=device)
-        mask = mask.masked_fill(~allowed, float("-inf"))
+        mask = mask.masked_fill(~allowed, -1e9)
         return mask
 
     def _build_cross_attn_mask(
@@ -234,7 +238,7 @@ class AlignmentQFormer(nn.Module):
             expanded.unsqueeze(2).expand(B, N, Q_tot, T).reshape(B, N * Q_tot, T).bool()
         )
         additive = expanded.new_zeros(B, N * Q_tot, T).masked_fill(
-            ~mask_bool, float("-inf")
+            ~mask_bool, -1e9
         )
         empty = (~mask_bool).all(dim=-1, keepdim=True)
         additive = additive.masked_fill(empty, 0.0)

@@ -44,14 +44,14 @@ class MelSpectrogramEncoder(torch.nn.Module):
             center=self.padding == "center",
             power=1,
         )
-        self.register_buffer("std", torch.tensor(5.580673694610596)) # 2.1042184829711914  train/test
-        self.register_buffer("mean", torch.tensor(-4.2305192947387695)) # -1.0710804462432861 
+        self.std = 2.080231189727783
+        self.mean = -1.0173088312149048
         self.normalize = config.normalize
 
-    def _update_std_mean_with_momentum(self, mel_spec: torch.Tensor):
-        self.std = self.std * 0.99 + mel_spec.std() * 0.01
-        self.mean = self.mean * 0.99 + mel_spec.mean() * 0.01
-        print(f"std: {self.std}, mean: {self.mean}")
+    # def _update_std_mean_with_momentum(self, mel_spec: torch.Tensor):
+    #     self.std = self.std * 0.99 + mel_spec.std() * 0.01
+    #     self.mean = self.mean * 0.99 + mel_spec.mean() * 0.01
+    #     print(f"std: {self.std}, mean: {self.mean}")
 
     def forward(self, audios_srs: List[Tuple[torch.FloatTensor, int]], **kwargs):
         audios, sampling_rates = zip(*audios_srs)
@@ -127,8 +127,6 @@ class MelSpectrogramEncoder(torch.nn.Module):
         mel_spec = self.mel_transform(padded_audios.to(torch.float32))
         # Keep in fp32 for log operation to avoid fp16 underflow
         mel_spec = torch.log(mel_spec + 1e-6)
-        # call std and mean update with momentum
-        self._update_std_mean_with_momentum(mel_spec)
         mel_spec = einops.rearrange(mel_spec, "b c t -> b t c")
         # Convert to target dtype after log operation
         mel_spec = mel_spec.to(dtype)

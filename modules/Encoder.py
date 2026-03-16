@@ -13,15 +13,15 @@ from typing import Optional, List
 
 from modules.flash_attn_encoder import FlashTransformerEncoder
 
-# from modules.downsampler import DownSampler
-from modules.downsampler_2d import DownSamplerConfig, DownSampler
+from modules.downsampler import DownSampler
+
+# from modules.downsampler_2d import DownSamplerConfig, DownSampler
 from modules.resnet import LinearResNet as ResNet
 from modules.similarity import Aligner, SimilarityUpsamplerBatch
 from modules.alignement import AlignmentMatrixBuilder
 from modules.qformer import (
     AlignmentQFormer,
     DurationConditioningProjector,
-    pooled_norm_penalty,
 )
 
 
@@ -177,16 +177,24 @@ class ConvformerEncoder(SigmaVAEEncoder):
         latent_dim = config.latent_dim
         n_residual_blocks = config.n_residual_blocks
 
-        downsampler_config = DownSamplerConfig(
-            d_model=d_model,
-            separable=True,
-            n_residual_blocks=n_residual_blocks,
-            compress_factor=compress_factor_C,
-            dropout=drop_p,
-        )
+        # downsampler_config = DownSamplerConfig(
+        #     d_model=d_model,
+        #     separable=True,
+        #     n_residual_blocks=n_residual_blocks,
+        #     compress_factor=compress_factor_C,
+        #     dropout=drop_p,
+        # )
 
         if config.force_downsample:
-            self.downsampler = DownSampler(downsampler_config)
+            # self.downsampler = DownSampler(downsampler_config)
+            self.downsampler = DownSampler(
+                d_in=100,
+                d_hidden=d_model,
+                d_out=d_model,
+                compress_factor=compress_factor_C,
+                causal=True,
+                n_residual_blocks=n_residual_blocks,
+            )
         else:
             raise ValueError("Deprecated")
             # self.downsampler = ResNet(
@@ -221,7 +229,7 @@ class ConvformerEncoder(SigmaVAEEncoder):
 
         # TODO create an upsample convolution causal for conditioning_proj
         self.conditioning_proj = DurationConditioningProjector(
-            d_in=d_model,
+            d_in=latent_dim,
         )
 
         if config.freeze_encoder:
@@ -275,7 +283,6 @@ class ConvformerEncoder(SigmaVAEEncoder):
             )
             x = out.pooled
             pos = out.rel_pos
-            kl_loss = pooled_norm_penalty(x, padding_mask) * 0
 
         mu = self.mu(x)
         logvar = None
