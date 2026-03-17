@@ -221,9 +221,9 @@ class VAEtrainer(Trainer):
             with torch.no_grad():
                 results = self.model.encode_and_sample(
                     audios_srs=audios_srs,
-                    num_steps=8,
-                    temperature=1.0,
-                    guidance_scale=1.5,
+                    num_steps=16,
+                    temperature=.7,
+                    guidance_scale=1.3,
                 )
             # Create visualizations
             images = []

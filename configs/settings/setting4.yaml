@@ -1,13 +1,14 @@
 # Only specify values that override defaults in configs/defaults/*.yaml
 training:
   dataset_name: librispeech_aligned
-  output_dir: checkpoints/MelCausalVAE/restored-downsample8X
+  output_dir: checkpoints/MelCausalVAE/fixcfm-downsample8X
   num_train_epochs: 10
   learning_rate: 1e-4
   per_device_train_batch_size: 6
+  per_device_eval_batch_size: 1
   report_to: wandb
   wandb_project: convformer-cfm
-  wandb_run_name: restored-downsample8X
+  wandb_run_name: fixcfm-downsample8X
   fp16: false
   bf16: true
   save_steps: 1000
@@ -15,8 +16,8 @@ training:
   save_total_limit: 1
   gradient_accumulation_steps: 1
   dataloader_num_workers: 4
-  #from_pretrained: /home/ec2-user/checkpoints/MelCausalVAE/setting3/checkpoint-16000/model.safetensors
-  #resume_from_checkpoint: checkpoints/MelCausalVAE/setting4-semantic-regulator/checkpoint-1000
+  from_pretrained: /home/ec2-user/MelCausalVAE/checkpoints/MelCausalVAE/restored-downsample8X/checkpoint-16000/model.safetensors
+  #resume_from_checkpoint: /home/ec2-user/MelCausalVAE/checkpoints/MelCausalVAE/restored-downsample8X/checkpoint-16000
 
 convformer:
   compress_factor_C: 8

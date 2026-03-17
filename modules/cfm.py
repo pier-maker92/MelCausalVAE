@@ -120,6 +120,7 @@ class DiT(torch.nn.Module):
             attn_flash=True,
         )
         self.transformer.to(dtype=torch.bfloat16)
+        
 
     def reparameterize(self, mu: torch.FloatTensor, std: Optional[float] = None) -> torch.FloatTensor:
         eps = torch.randn_like(mu)
@@ -142,7 +143,7 @@ class DiT(torch.nn.Module):
         generator: Optional[torch.Generator] = None,
         std: Optional[float] = None,
     ):
-        context_vector = self.reparameterize(context_vector, std=std)
+        #context_vector = self.reparameterize(context_vector, std=std)
         context_vector = context_vector.repeat_interleave(self.expansion_factor, dim=1)
         if target is not None:
             min_length = min(context_vector.shape[1], target.shape[1])
@@ -210,8 +211,8 @@ class DiT(torch.nn.Module):
         if target is not None:
             v_to_loss = v[mask_to_loss].view(-1, self.mel_channels)
             target_to_loss = target[mask_to_loss].view(-1, self.mel_channels)
-            # Compute loss in fp32 for numerical stability with fp16
-            loss = F.mse_loss(v_to_loss.float(), target_to_loss.float()).to(v.dtype)
+            loss = ((v_to_loss - target_to_loss) ** 2).mean()
+            loss = loss.to(v.dtype)
 
         return loss
 
@@ -246,7 +247,7 @@ class DiT(torch.nn.Module):
         temperature: float = 1.0,
         guidance_scale: float = 1.0,
         generator: Optional[torch.Generator] = None,
-        std: float = 1.0,
+        std: float = 0.0,
     ):
         cfg_scale = guidance_scale
         # ---- context vector z ----

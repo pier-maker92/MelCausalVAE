@@ -24,7 +24,7 @@ training:
   bf16: true
   fp16: false
   resume_from_checkpoint: null
-  per_device_eval_batch_size: 4
+  per_device_eval_batch_size: 1
   gradient_accumulation_steps: 1
   from_pretrained: null
   dataset_name: null
