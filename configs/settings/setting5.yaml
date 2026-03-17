@@ -1,21 +1,23 @@
+# Only specify values that override defaults in configs/defaults/*.yaml
 training:
-  dataset_name: libritts
-  output_dir: checkpoints/MelCausalVAE/setting5 # from causal to non-causal with semantic regulator
-  num_train_epochs: 2
+  dataset_name: librispeech_aligned
+  output_dir: checkpoints/MelCausalVAE/logvar-downsample8X-ft
+  num_train_epochs: 10
   learning_rate: 1e-4
-  per_device_train_batch_size: 2
+  per_device_train_batch_size: 6
+  per_device_eval_batch_size: 1
   report_to: wandb
   wandb_project: convformer-cfm
-  wandb_run_name: causal-to-non-causal-with-semantic-regulator-libritts-ft-smallkl
+  wandb_run_name: logvar-downsample8X-ft
   fp16: false
   bf16: true
   save_steps: 1000
-  eval_steps: 1000
+  eval_steps: 500
   save_total_limit: 1
-  gradient_accumulation_steps: 2
+  gradient_accumulation_steps: 1
   dataloader_num_workers: 4
-  from_pretrained: /home/ec2-user/checkpoints/MelCausalVAE/setting3/checkpoint-16000/model.safetensors
-  resume_from_checkpoint: checkpoints/MelCausalVAE/setting5/checkpoint-1000
+  from_pretrained: /home/ec2-user/MelCausalVAE/checkpoints/MelCausalVAE/restored-downsample8X/checkpoint-16000/model.safetensors
+  #resume_from_checkpoint: /home/ec2-user/MelCausalVAE/checkpoints/MelCausalVAE/restored-downsample8X/checkpoint-14000
 
 convformer:
   compress_factor_C: 8
@@ -23,11 +25,11 @@ convformer:
   tf_layers: 4
   latent_dim: 64
   n_residual_blocks: 3
-  logvar_layer: false
+  logvar_layer: true
   use_sofplus: false
   target_std: 1.0
   kl_loss_warmup_steps: 100
-  kl_loss_weight: 1e-3
+  kl_loss_weight: 1e-10
 
 cfm:
   unet_dim: 1024
@@ -38,4 +40,4 @@ cfm:
   audio_latent_dim: 64
   uncond_prob: 0.15
   learned_prior: false
-  is_causal: false
+  is_causal: true
