@@ -4,7 +4,7 @@ training:
   output_dir: checkpoints/MelCausalVAE/q-former-fix # variable rate training
   num_train_epochs: 2
   learning_rate: 1e-4
-  per_device_train_batch_size: 4
+  per_device_train_batch_size: 24
   report_to: wandb
   wandb_project: flexi-vae-paper
   wandb_run_name: q-former-fix
@@ -14,7 +14,7 @@ training:
   eval_strategy: "steps"
   eval_steps: 1000
   save_total_limit: 1
-  gradient_accumulation_steps: 2
+  gradient_accumulation_steps: 1
   dataloader_num_workers: 4
   min_learning_rate: 5e-5
   #from_pretrained: /workspace/MelCausalVAE/checkpoints/MelCausalVAE/qformer/checkpoint-15000/model.safetensors

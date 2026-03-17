@@ -187,7 +187,7 @@ class VAEtrainer(Trainer):
             if self.args.n_gpu > 1:
                 audio_loss = audio_loss.mean()
                 kl_loss = kl_loss.mean()
-                align_loss = align_loss.mean()
+                #align_loss = align_loss.mean()
             self.control.granular_losses["audio_loss"] += (
                 audio_loss.detach() / self.args.gradient_accumulation_steps
             )
