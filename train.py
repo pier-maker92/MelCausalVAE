@@ -440,6 +440,7 @@ def main():
     # Create model config
     # Build model configs from merged YAML
     decoder_config = DiTConfig(**cfm_cfg)
+    use_classic_decoder = convformer_cfg.pop("use_classic_decoder", False)
     encoder_config = ConvformerEncoderConfig(**convformer_cfg)
     # Create model
     logger.info("Creating VAE model...")
@@ -448,6 +449,7 @@ def main():
             encoder_config=encoder_config,
             decoder_config=decoder_config,
             mel_spec_config=MelSpectrogramConfig(),
+            use_classic_decoder=use_classic_decoder,
         ),
         dtype=dtype,
     )

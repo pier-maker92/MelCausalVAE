@@ -54,6 +54,7 @@ class DataCollator(object):
         batch_aligned_transcription_ids = [None] * len(instances)
         batch_transcription = [None] * len(instances)
         batch_language = [None] * len(instances)
+        batch_ids = [None] * len(instances)
         for i, instance in enumerate(instances):
             if "audio_input" in instance:
                 batch_input_audios_srs[i] = (
@@ -78,6 +79,8 @@ class DataCollator(object):
                 batch_transcription[i] = instance["transcription"]
             if "language" in instance:
                 batch_language[i] = instance["language"]
+            if "ids" in instance:
+                batch_ids[i] = instance["ids"]
 
         # if not all none add to the batch
         def all_none(batch):
@@ -97,6 +100,8 @@ class DataCollator(object):
             batch["transcription"] = batch_transcription
         if not all_none(batch_language):
             batch["language"] = batch_language
+        if not all_none(batch_ids):
+            batch["ids"] = batch_ids
         return batch
 
 
@@ -113,6 +118,7 @@ class TrainDatasetWrapper(SimpleAudioDataset):
         data_dict = {}
         data = self.dataset[idx]
         self._process_audio_output(data_dict, data["audio"])
+        data_dict["ids"] = data.get("id")
         return data_dict
 
 
@@ -129,8 +135,18 @@ class TestDatasetWrapper(SimpleAudioDataset):
         data_dict = {}
         data = self.dataset[idx]
         self._process_audio_output(data_dict, data["audio"])
-        self._process_transcription(data_dict, data.get("text_normalized", "transcript"))
+
+        # Robust transcription field lookup
+        transcription = (
+            data.get("text")
+            or data.get("text_normalized")
+            or data.get("transcript")
+            or "transcript"
+        )
+        self._process_transcription(data_dict, transcription)
+
         data_dict["language"] = data.get("language", "en")
+        data_dict["ids"] = data.get("id")
         return data_dict
 
     def _process_transcription(self, data_dict, transcription):

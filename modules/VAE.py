@@ -7,6 +7,7 @@ from .semantic_module import SeamlessM4Tv2Encoder
 from .semantic_mapper import SemanticMapperConfig, Z2YMapper
 from .Encoder import ConvformerEncoderConfig, ConvformerEncoder
 from .melspecEncoder import MelSpectrogramEncoder, MelSpectrogramConfig
+from .ConvformerDecoder import ConvformerDecoder, ConvformerDecoderConfig
 
 def count_parameters_by_module(model, title: str):
     table_width = 65
@@ -48,6 +49,7 @@ class VAEConfig:
     mel_spec_config: MelSpectrogramConfig
     add_semantic_distillation: bool = False
     add_semantic_mapper: bool = False
+    use_classic_decoder: bool = False
 
     @property
     def hidden_size(self):
@@ -61,6 +63,7 @@ class VAEConfig:
             "encoder_config": asdict(self.encoder_config),
             "decoder_config": asdict(self.decoder_config),
             "mel_spec_config": asdict(self.mel_spec_config),
+            "use_classic_decoder": self.use_classic_decoder,
         }
 
 
@@ -68,14 +71,18 @@ class VAE(torch.nn.Module):
     def __init__(self, config: VAEConfig, dtype: torch.dtype):
         super().__init__()
         self.config = config
-        self.decoder = DiT(config.decoder_config)
+        if config.use_classic_decoder:
+            classic_dec_cfg = ConvformerDecoderConfig.from_encoder_config(config.encoder_config)
+            self.decoder = ConvformerDecoder(classic_dec_cfg)
+        else:
+            self.decoder = DiT(config.decoder_config)
+            self.decoder.expansion_factor = config.encoder_config.compress_factor_C
         self.encoder = ConvformerEncoder(config.encoder_config)
         self.wav2mel = MelSpectrogramEncoder(config.mel_spec_config)
         if config.add_semantic_distillation:
             self.semantic_module = SeamlessM4Tv2Encoder(dtype=dtype)
         if config.add_semantic_mapper:
             self.semantic_mapper = Z2YMapper(config.semantic_mapper_config)
-        self.decoder.expansion_factor = config.encoder_config.compress_factor_C
         self.dtype = dtype
         self.set_dtype(dtype)
         count_parameters_by_module(self.encoder, "Encoder")
