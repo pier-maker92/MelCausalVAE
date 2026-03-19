@@ -68,6 +68,8 @@ class VAEConfig:
 
 
 class VAE(torch.nn.Module):
+    _keys_to_ignore_on_save = None
+    
     def __init__(self, config: VAEConfig, dtype: torch.dtype):
         super().__init__()
         self.config = config
@@ -114,6 +116,7 @@ class VAE(torch.nn.Module):
 
     def forward(self, audios_srs, **kwargs):
         encoded_audios = self.wav2mel(audios_srs)
+        #corrupted_encoded_audios = self.wav2mel(kwargs.get("corrupted_audios_srs"))
         semantic_output = None
         if self.config.add_semantic_distillation:
             semantic_output = self.semantic_module(audios_srs)
@@ -141,10 +144,14 @@ class VAE(torch.nn.Module):
 
     @torch.no_grad()
     def denormalize_mel(self, mel: torch.Tensor):
+        if not self.config.mel_spec_config.normalize:
+            return mel
         return mel * self.wav2mel.std + self.wav2mel.mean
 
     @torch.no_grad()
     def normalize_mel(self, mel: torch.Tensor):
+        if not self.config.mel_spec_config.normalize:
+            return mel
         return (mel - self.wav2mel.mean) / self.wav2mel.std
 
     @torch.no_grad()

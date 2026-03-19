@@ -13,7 +13,7 @@ from modules.melspecEncoder import MelSpectrogramEncoder, MelSpectrogramConfig
 from data.audio_dataset import SimpleAudioDataset, DataCollator, TrainDatasetWrapper
 
 # Specify custom cache directory
-cache_dir = "/home/ec2-user/dataset_cache"
+parquet_dir = "/home/ec2-user/data"
 # import mel spec encoder
 mel_spec_encoder = MelSpectrogramEncoder(config=MelSpectrogramConfig())
 
@@ -26,23 +26,18 @@ class LibriTTS(SimpleAudioDataset):
     def __init__(self):
         super().__init__()
         # Load the two datasets
-        datasets = []
-        for subset in ["clean", "other"]:
-            ds = load_dataset(
-                "parler-tts/libritts_r_filtered",
-                subset,
-                cache_dir=cache_dir,
-                num_proc=min(
-                    os.cpu_count(),
-                    16,
-                ),
-            )
-            datasets.append(ds)
+        dataset = load_dataset(
+            "parquet",
+            data_dir=f"{parquet_dir}/libritts",
+        )
         partitions_per_destination = defaultdict(list)
-        for dataset in datasets:
-            for partition in dataset:
-                # print(f"partition: {partition}, destination: {self._partition_to_destination(partition)}")
-                partitions_per_destination[self._partition_to_destination(partition)].append(dataset[partition])
+        for partition in dataset:
+            print(
+                f"partition: {partition}, destination: {self._partition_to_destination(partition)}"
+            )
+            partitions_per_destination[
+                self._partition_to_destination(partition)
+            ].append(dataset[partition])
 
         for destination in partitions_per_destination:
             setattr(
@@ -52,9 +47,9 @@ class LibriTTS(SimpleAudioDataset):
             )
 
     def _partition_to_destination(self, partition_name):
-        if "train" in partition_name:
+        if partition_name in ["train", "validation"]:
             return "train"
-        elif "dev" in partition_name or "test" in partition_name:
+        elif partition_name in ["test"]:
             return "test"
 
 

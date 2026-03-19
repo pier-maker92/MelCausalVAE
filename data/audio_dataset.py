@@ -7,9 +7,118 @@ import torchaudio.transforms as T
 from torch.utils.data import Dataset
 from typing import Optional, Sequence, Dict
 
+import torch
+import torch.nn as nn
+import torchaudio.transforms as T
+from torchaudio_filters import LowPass, Pad, BandPass
+import random
+
+
+class AudioAugmenter(nn.Module):
+    def __init__(
+        self,
+        p_gain=.7,
+        p_gaussian=.7,
+        p_colored=.6,
+        p_clipping=.8,
+        p_dropout=1.0,
+        p_lowpass=.4,
+        p_bandpass=.4
+    ):
+        super().__init__()
+
+        self.p_gain = p_gain
+        self.p_gaussian = p_gaussian
+        self.p_colored = p_colored
+        self.p_clipping = p_clipping
+        self.p_dropout = p_dropout
+        self.p_lowpass = p_lowpass
+        self.p_bandpass = p_bandpass
+
+    # -------------------------
+    # augmentations
+    # -------------------------
+    def add_gaussian_noise(self, audio, std):
+        noise = torch.randn_like(audio) * std
+        return audio + noise
+
+    def add_colored_noise(self, audio, std, alpha):
+        noise = torch.randn_like(audio)
+
+        freqs = torch.fft.rfftfreq(audio.shape[-1], d=1.0).to(audio.device)
+        freqs[0] = 1e-6
+
+        spectrum = torch.fft.rfft(noise)
+        spectrum = spectrum / (freqs ** (alpha / 2))
+
+        colored = torch.fft.irfft(spectrum, n=audio.shape[-1])
+        return audio + std * colored
+
+    def random_gain(self, audio):
+        gain = random.uniform(0.7, 1.3)
+        return audio * gain
+
+    def random_clipping(self, audio):
+        threshold = random.uniform(0.3, 0.9)
+        audio = torch.clamp(audio, -threshold, threshold) / threshold
+        return audio
+
+    def time_dropout(self, audio):
+        T_len = audio.shape[-1]
+        width = int(T_len * random.uniform(0.005, 0.02))
+
+        if width > 0:
+            start = random.randint(0, max(0, T_len - width))
+            audio[..., start:start + width] = 0
+
+        return audio
+
+    def lowpass(self, audio, sr):
+        cutoff = random.uniform(3000, 8000)
+        return LowPass(cutoff, sr)(audio)
+
+    def bandpass(self, audio, sr):
+        low = random.uniform(100,400)
+        high = random.uniform(7000,12000)
+        bp = BandPass(low, high, sr)
+        return bp(audio)
+
+    # -------------------------
+    # forward
+    # -------------------------
+    def forward(self, audio: torch.Tensor, sr: int):
+        """
+        audio: (B, T) or (1, T)
+        """
+
+        if random.random() < self.p_gain:
+            audio = self.random_gain(audio)
+
+        if random.random() < self.p_gaussian:
+            std = random.uniform(0.001, 0.002)
+            audio = self.add_gaussian_noise(audio, std)
+
+        if random.random() < self.p_colored:
+            alpha = random.uniform(0.001, 0.002)
+            std = random.uniform(0.0001, 0.0005)
+            audio = self.add_colored_noise(audio, std=std, alpha=alpha)
+
+        if random.random() < self.p_clipping:
+            audio = self.random_clipping(audio)
+
+        if random.random() < .5:
+            if random.random() < self.p_bandpass:
+                audio = self.bandpass(audio, sr)
+        else:
+            if random.random() < self.p_lowpass:
+                audio = self.lowpass(audio, sr)
+
+        return audio
+
 
 class SimpleAudioDataset(Dataset):
     def __init__(self):
+        self.augmenter = AudioAugmenter()
         pass
 
     def _process_audio(self, audio: torch.Tensor, sr: int, target_sr: int):
@@ -38,6 +147,8 @@ class SimpleAudioDataset(Dataset):
             target_sr=24000,  # FIXME: hardcoded
         )
         data_dict.update({"audio_output": [audio_output], "audio_output_sr": [sr_output]})
+        corrupted = self.augmenter(audio_output, sr_output)
+        data_dict.update({"corrupted_audio": [corrupted], "corrupted_audio_sr": [sr_output]})
 
 
 @dataclass
@@ -55,6 +166,7 @@ class DataCollator(object):
         batch_transcription = [None] * len(instances)
         batch_language = [None] * len(instances)
         batch_ids = [None] * len(instances)
+        batch_corrupted_audios_srs = [None] * len(instances)
         for i, instance in enumerate(instances):
             if "audio_input" in instance:
                 batch_input_audios_srs[i] = (
@@ -70,6 +182,11 @@ class DataCollator(object):
                 batch_condition_audios_srs[i] = (
                     instance["audio_condition"][0],
                     instance["audio_condition_sr"][0],
+                )
+            if "corrupted_audio" in instance:
+                batch_corrupted_audios_srs[i] = (
+                    instance["corrupted_audio"][0],
+                    instance["corrupted_audio_sr"][0],
                 )
             if "transcription_ids" in instance:
                 batch_transcription_ids[i] = instance["transcription_ids"]
@@ -102,6 +219,8 @@ class DataCollator(object):
             batch["language"] = batch_language
         if not all_none(batch_ids):
             batch["ids"] = batch_ids
+        if not all_none(batch_corrupted_audios_srs):
+            batch["corrupted_audios_srs"] = batch_corrupted_audios_srs
         return batch
 
 
@@ -138,8 +257,7 @@ class TestDatasetWrapper(SimpleAudioDataset):
 
         # Robust transcription field lookup
         transcription = (
-            data.get("text")
-            or data.get("text_normalized")
+            data.get("text_normalized")
             or data.get("transcript")
             or "transcript"
         )

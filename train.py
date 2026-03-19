@@ -74,10 +74,12 @@ class VAEtrainer(Trainer):
         """Compute the loss for the VAE"""
         if hasattr(self.control, "granular_losses") and model.training:
             audios_srs = inputs["output_audios_srs"]
+            corrupted_audios_srs = inputs["corrupted_audios_srs"]
             # Forward pass
             outputs = model(
                 audios_srs=audios_srs,
                 training_step=self.state.global_step,
+                corrupted_audios_srs=corrupted_audios_srs,
             )
             audio_loss = outputs["audio_loss"]
             kl_loss = outputs["kl_loss"]
@@ -205,8 +207,25 @@ class VAEtrainer(Trainer):
         """
         logger.info(f"Generating reconstruction samples...")
 
-        vocos = Vocos.from_pretrained("charactr/vocos-mel-24khz")
-        vocos.to(self.args.device)
+        if getattr(self.model.config.mel_spec_config, "use_bigvgan_mel", False):
+            try:
+                import sys
+                import os
+                bigvgan_path = "/home/ec2-user/MelCausalVAE/bigvgan/bigvgan_v2_24khz_100band_256x"
+                if bigvgan_path not in sys.path:
+                    sys.path.append(bigvgan_path)
+                import bigvgan
+                vocoder = bigvgan.BigVGAN.from_pretrained(bigvgan_path, use_cuda_kernel=False)
+                vocoder_type = "bigvgan"
+            except Exception as e:
+                logger.error(f"Failed to load BigVGAN vocoder: {e}. Falling back to Vocos.")
+                vocoder = Vocos.from_pretrained("charactr/vocos-mel-24khz")
+                vocoder_type = "vocos"
+        else:
+            vocoder = Vocos.from_pretrained("charactr/vocos-mel-24khz")
+            vocoder_type = "vocos"
+            
+        vocoder.to(self.args.device)
 
         # Get some samples from the eval dataset using its dataloader
         eval_dataloader = self.get_eval_dataloader(self.eval_dataset)
@@ -250,15 +269,22 @@ class VAEtrainer(Trainer):
                 )
                 plt.close(fig)
 
-                # Decode reconstructed mel to audio with Vocos
+                # Decode reconstructed mel to audio
                 mel = results["reconstructed_mel"][idx]  # [T, F]
                 pad_mask = results["padding_mask"][idx]  # [T]
                 valid_mel = mel[: (~pad_mask).sum()]
 
-                # Shape for Vocos: [B, F, T]
+                # Shape for Vocos/BigVGAN: [B, F, T]
                 features = valid_mel.unsqueeze(0).permute(0, 2, 1).to(torch.bfloat16).to(self.args.device)
-                waveform = vocos.decode(features)  # [1, samples]
-                waveform = waveform.float().squeeze(0).detach().cpu()
+                
+                if vocoder_type == "bigvgan":
+                    # BigVGAN expects exp(mel)
+                    #features = torch.exp(features.float())
+                    waveform = vocoder(features)
+                else:
+                    waveform = vocoder.decode(features)  # [1, samples]
+                
+                waveform = waveform.float().squeeze().detach().cpu()
                 # normalize waveform to -1 to 1
                 waveform = waveform / (waveform.abs().max() + 1e-8)
                 sr = audios_srs[idx][1]
@@ -444,11 +470,17 @@ def main():
     encoder_config = ConvformerEncoderConfig(**convformer_cfg)
     # Create model
     logger.info("Creating VAE model...")
+    mel_spec_config = MelSpectrogramConfig(
+        use_bigvgan_mel=convformer_cfg.get("use_bigvgan_mel", False),
+    )
+    if mel_spec_config.use_bigvgan_mel:
+        logger.info("Using BigVGAN-compatible mel spectrogram")
+        
     model = VAE(
         config=VAEConfig(
             encoder_config=encoder_config,
             decoder_config=decoder_config,
-            mel_spec_config=MelSpectrogramConfig(),
+            mel_spec_config=mel_spec_config,
             use_classic_decoder=use_classic_decoder,
         ),
         dtype=dtype,

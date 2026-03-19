@@ -283,7 +283,7 @@ class DiT(torch.nn.Module):
             )
             return features
 
-        odeint_kwargs = dict(atol=1e-5, rtol=1e-5, method="euler")
+        odeint_kwargs = dict(atol=1e-5, rtol=1e-5, method="midpoint")
         trajectory = odeint(fn, y0, t_span, **odeint_kwargs)
 
         generated_latents = trajectory[-1]

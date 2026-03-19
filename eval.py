@@ -144,12 +144,14 @@ def load_config(config_path: str) -> Dict[str, Any]:
 
 def build_model_from_config(
     config_dict: Dict[str, Any], checkpoint_path: Optional[str], device: torch.device
-) -> Tuple[VAE, Vocos]:
+) -> Tuple[VAE, torch.nn.Module, str, VAEConfig]:
 
     encoder_cfg = ConvformerEncoderConfig(**config_dict["convformer"])  # type: ignore
     decoder_cfg = DiTConfig(**config_dict["cfm"])  # type: ignore
     decoder_cfg.expansion_factor = encoder_cfg.compress_factor_C
-    mel_cfg = MelSpectrogramConfig()  # type: ignore
+    mel_cfg = MelSpectrogramConfig(
+        use_bigvgan_mel=config_dict["convformer"].get("use_bigvgan_mel", False)
+    )  # type: ignore
     use_classic_decoder = config_dict.get("use_classic_decoder", False)
     vae_cfg = VAEConfig(
         encoder_config=encoder_cfg, decoder_config=decoder_cfg, mel_spec_config=mel_cfg,
@@ -162,18 +164,36 @@ def build_model_from_config(
     model.set_dtype(torch.bfloat16)
     model.eval()
 
-    vocos = Vocos.from_pretrained("charactr/vocos-mel-24khz")
-    vocos.to(device)
-    return model, vocos, vae_cfg
+    if mel_cfg.use_bigvgan_mel:
+        try:
+            bigvgan_path = "/home/ec2-user/MelCausalVAE/bigvgan/bigvgan_v2_24khz_100band_256x"
+            if bigvgan_path not in sys.path:
+                sys.path.append(bigvgan_path)
+            import bigvgan
+            vocoder = bigvgan.BigVGAN.from_pretrained(bigvgan_path, use_cuda_kernel=False)
+            vocoder_type = "bigvgan"
+        except Exception as e:
+            logger.error(f"Failed to load BigVGAN vocoder: {e}. Falling back to Vocos.")
+            vocoder = Vocos.from_pretrained("charactr/vocos-mel-24khz")
+            vocoder_type = "vocos"
+    else:
+        vocoder = Vocos.from_pretrained("charactr/vocos-mel-24khz")
+        vocoder_type = "vocos"
+
+    vocoder.to(device)
+    return model, vocoder, vocoder_type, vae_cfg
 
 
 def mel_to_audio(
-    vocoder: Vocos, mel: torch.Tensor, device: torch.device
+    vocoder: torch.nn.Module, mel: torch.Tensor, device: torch.device, vocoder_type: str = "vocos"
 ) -> torch.Tensor:
     features = mel.permute(0, 2, 1).to(device)
-    vocoder.to(device)
-    waveform = vocoder.decode(features)  # [1, samples]
-    waveform = waveform.float().squeeze(0).detach().cpu()
+    if vocoder_type == "bigvgan":
+        waveform = vocoder(features)
+    else:
+        waveform = vocoder.decode(features)  # [1, samples]
+    
+    waveform = waveform.float().squeeze().detach().cpu()
     # normalize to prevent clipping
     waveform = waveform / (waveform.abs().max() + 1e-8)
     return waveform.view(-1)
@@ -226,7 +246,8 @@ def evaluate_dataset(
     num_samples: int,
     batch_size: int,
     model: Optional[VAE],
-    vocoder: Optional[Vocos],
+    vocoder: Optional[torch.nn.Module],
+    vocoder_type: str,
     baseline_model: Optional[BaselineAudioCodec],
     n_steps: int,
     temperature: float,
@@ -245,7 +266,14 @@ def evaluate_dataset(
 ) -> Dict[str, Any]:
     results: Dict[str, Any] = {"samples": [], "aggregates": {}}
 
-    gt_filepath = "/home/ec2-user/MelCausalVAE/evaluation/GT/metrics.json"
+    # Map setting to specific GT metrics file
+    gt_filename = "metrics.json"
+    if setting == "LibriSpeech":
+        gt_filename = "librispeech.json"
+    elif setting == "LibriTTS":
+        gt_filename = "libritts.json"
+        
+    gt_filepath = Path("/home/ec2-user/MelCausalVAE/evaluation/GT") / gt_filename
     gt_metrics_map = {}
     if skip_ref_metrics:
         try:
@@ -265,10 +293,10 @@ def evaluate_dataset(
         ds = TestDatasetWrapper(
             LibriSpeechAlignTestDataset(do_filter=filter_librispeech), "test"
         )
-    elif setting == "ID":
+    elif setting == "LibriTTS":
         ds = TestDatasetWrapper(LibriTTS(), "test")
     else:
-        ds = TestDatasetWrapper(MLSDataset(), "train")
+        raise NotImplementedError(f"{setting} not implemented")
 
     test_dataloader = DataLoader(
         ds, batch_size=batch_size, shuffle=False, collate_fn=DataCollator()
@@ -367,10 +395,10 @@ def evaluate_dataset(
                 cur_reconstructed_mel = cur_reconstructed_mel[~cur_padding_mask]
 
                 original_audio = mel_to_audio(
-                    vocoder, cur_original_mel.unsqueeze(0), device
+                    vocoder, cur_original_mel.unsqueeze(0), device, vocoder_type
                 )
                 reconstructed_audio = mel_to_audio(
-                    vocoder, cur_reconstructed_mel.unsqueeze(0), device
+                    vocoder, cur_reconstructed_mel.unsqueeze(0), device, vocoder_type
                 )
 
                 if not skip_ref_metrics:
@@ -652,6 +680,7 @@ def run_single_eval(
     original_audio_only = base_args.get("original_audio_only", False)
     model = None
     vocoder = None
+    vocoder_type = "vocos"
     baseline_model = None
 
     if original_audio_only:
@@ -668,7 +697,7 @@ def run_single_eval(
         )
     else:
         # build model
-        model, vocoder, vae_cfg = build_model_from_config(
+        model, vocoder, vocoder_type, vae_cfg = build_model_from_config(
             base_args["config_dict"], checkpoint, device
         )
 
@@ -731,6 +760,7 @@ def run_single_eval(
             batch_size=batch_size,
             model=model,
             vocoder=vocoder,
+            vocoder_type=vocoder_type,
             baseline_model=baseline_model,
             n_steps=n_steps,
             temperature=temperature,
@@ -880,7 +910,7 @@ def main():
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--guidance-scale", type=float, default=1.3)
     parser.add_argument(
-        "--setting", type=str, default="ID", choices=["ID", "OOD", "LibriSpeech"]
+        "--setting", type=str, default="LibriSpeech", choices=["LibriTTS", "OOD", "LibriSpeech"]
     )
     parser.add_argument(
         "--languages",
@@ -1100,10 +1130,10 @@ if __name__ == "__main__":
 
 # LibriSpeech test set evaluation with HuBERT ASR:
 # python eval.py \
-#   --config-path /home/ec2-user/MelCausalVAE/configs/settings/setting4.yaml \
-#   --checkpoints /home/ec2-user/MelCausalVAE/checkpoints/MelCausalVAE/restored-downsample8X/checkpoint-16000/model.safetensors \
-#   --setting LibriSpeech \
-#   --num-samples 100 --batch-size 4 \
-#   --n-steps 4 --temperature 1.0 --guidance-scale 1.3 \
-#   --exp-name librispeech_eval \
-#   --output-dir /home/ec2-user/MelCausalVAE/evaluation
+#   --config-path /home/ec2-user/MelCausalVAE/configs/settings/libritts-ft.yaml \
+#   --checkpoints /home/ec2-user/MelCausalVAE/checkpoints/MelCausalVAE/libritts-ft-logvar-downsample8X/checkpoint-10000/model.safetensors \
+#   --setting LibriTTS \
+#   --num-samples 250 --batch-size 8 \
+#   --n-steps 12 --temperature 0.8 --guidance-scale 2.3 \
+#   --exp-name libriTTS_eval \
+#   --output-dir /home/ec2-user/MelCausalVAE/evaluation 
