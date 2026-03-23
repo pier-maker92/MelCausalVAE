@@ -13,13 +13,13 @@ from typing import Optional, List
 
 from modules.flash_attn_encoder import FlashTransformerEncoder
 
-#from modules.downsampler import DownSampler
-from modules.downsampler_2d import DownSamplerConfig, DownSampler
+from modules.downsampler import DownSampler
+#from modules.downsampler_2d import DownSamplerConfig, DownSampler
 from modules.resnet import LinearResNet as ResNet
 from modules.similarity import Aligner, SimilarityUpsamplerBatch
 from modules.alignement import AlignmentMatrixBuilder
 from modules.qformer import (
-    AlignmentQFormer,
+    AlignmentQFormer,   
     DurationConditioningProjector,
     compute_relative_positions,
 )
@@ -177,22 +177,22 @@ class ConvformerEncoder(SigmaVAEEncoder):
         latent_dim = config.latent_dim
         n_residual_blocks = config.n_residual_blocks
 
-        downsampler_config = DownSamplerConfig(
-            d_model=d_model,
-            separable=False,
-            n_residual_blocks=n_residual_blocks,
-            compress_factor=compress_factor_C,
-            drop_p=drop_p,
-        )
+        # downsampler_config = DownSamplerConfig(
+        #     d_model=d_model,
+        #     separable=False,
+        #     n_residual_blocks=n_residual_blocks,
+        #     compress_factor=compress_factor_C,
+        #     drop_p=drop_p,
+        # )
 
         if config.force_downsample:
-            self.downsampler = DownSampler(downsampler_config)
-            # self.downsampler = DownSampler(
-            #     d_in = 100,
-            #     d_hidden = 1024,
-            #     d_out = 512,
-            #     compress_factor = compress_factor_C,
-            # )
+            #self.downsampler = DownSampler(downsampler_config)
+            self.downsampler = DownSampler(
+                d_in = 100,
+                d_hidden = int(d_model*4),
+                d_out = d_model,
+                compress_factor = compress_factor_C,
+            )
         else:
             raise ValueError("Deprecated")
             # self.downsampler = ResNet(
