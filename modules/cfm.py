@@ -36,6 +36,7 @@ class DiTConfig:
     learned_prior: bool = False
     use_vp_schedule: bool = False
     is_causal: bool = True
+    use_film_conditioning: bool = False
     use_word_causal_mask: bool = False
     decoder_type: str = "dit"
 
@@ -60,9 +61,11 @@ class DiT(torch.nn.Module):
         self.uncond_prob = config.uncond_prob
         self.learned_prior = config.learned_prior
         self.is_causal = config.is_causal
+        self.use_film_conditioning = config.use_film_conditioning
         print(f"VAE is_causal: {self.is_causal}")
         self.context_vector_proj = nn.Sequential(
-            nn.Linear(self.audio_latent_dim, self.unet_dim), nn.LayerNorm(self.unet_dim)
+            nn.Linear(self.audio_latent_dim, self.unet_dim), 
+            #nn.LayerNorm(self.unet_dim)
         )
         # hubert norm
         self.hubert_norm = nn.LayerNorm(self.audio_latent_dim)
@@ -73,8 +76,12 @@ class DiT(torch.nn.Module):
             ),
             nn.LayerNorm(self.audio_latent_dim),
         )
-        # noise projection
-        if self.learned_prior:
+        if self.use_film_conditioning:
+            self.state_proj = nn.Sequential(
+                nn.Linear(self.mel_channels, self.unet_dim),
+                nn.LayerNorm(self.unet_dim),
+            )
+        elif self.learned_prior:
             self.noise_proj = nn.Sequential(
                 nn.Linear(self.mel_channels, self.unet_dim),
                 nn.LayerNorm(self.unet_dim),
@@ -83,7 +90,6 @@ class DiT(torch.nn.Module):
                 nn.Linear(self.audio_latent_dim, self.mel_channels),
                 nn.LayerNorm(self.mel_channels),
             )
-
         else:
             self.noise_proj = nn.Sequential(
                 nn.Linear(self.unet_dim + self.mel_channels, self.unet_dim),
@@ -98,6 +104,7 @@ class DiT(torch.nn.Module):
             use_conv_layer=self.use_conv_layer,
             audio_latent_dim=self.mel_channels,  # projection to mel
             is_causal=self.is_causal,
+            use_film_conditioning=self.use_film_conditioning,
             attn_flash=True,
         )
         self.transformer.to(dtype=torch.bfloat16)
@@ -136,14 +143,15 @@ class DiT(torch.nn.Module):
         target: torch.FloatTensor,
         context_vector: torch.FloatTensor,
     ):
+        conditioning_context = context_vector
         if random.random() < self.uncond_prob:
-            context_vector = torch.zeros_like(context_vector)
+            conditioning_context = torch.zeros_like(context_vector)
 
         # We need times
         times = torch.rand(
             (target.shape[0],),
-            dtype=context_vector.dtype,
-            device=context_vector.device,
+            dtype=conditioning_context.dtype,
+            device=conditioning_context.device,
         )
         t = rearrange(times, "b -> b 1 1")
         # Now we need noise, x0 sampled from a normal distribution
@@ -153,8 +161,11 @@ class DiT(torch.nn.Module):
         # target is the original signal minus the noise
         target = target - (1 - self.sigma) * x0
 
-        state = self.noise_proj(torch.cat([context_vector, w], dim=-1))
-        return state, times, target
+        if self.use_film_conditioning:
+            state = self.state_proj(w)
+        else:
+            state = self.noise_proj(torch.cat([conditioning_context, w], dim=-1))
+        return state, times, target, conditioning_context
 
     def let_it_flow(
         self,
@@ -162,6 +173,7 @@ class DiT(torch.nn.Module):
         state: torch.FloatTensor,
         target: Optional[torch.FloatTensor] = None,
         flow_mask: Optional[torch.BoolTensor] = None,
+        context_vector: Optional[torch.FloatTensor] = None,
         word_causal_mask: Optional[torch.BoolTensor] = None,
     ):
         mask_to_loss = ~flow_mask
@@ -170,20 +182,14 @@ class DiT(torch.nn.Module):
             times=times,
             attention_mask=mask_to_loss,
             word_causal_mask=word_causal_mask,
+            context_vector=context_vector if self.use_film_conditioning else None,
         )
         loss = None
         if target is not None:
-            v_to_loss      = v[mask_to_loss].view(-1, self.mel_channels).float()
-            target_to_loss = target[mask_to_loss].view(-1, self.mel_channels).float()
-
-            # freq_weights: (mel_channels,) → broadcast su (N, mel_channels)
-            freq_weights = torch.linspace(
-                0.5, 2.0, self.mel_channels, device=v.device
-            )
-            # normalizzazione: la media dei pesi = 1 → loss paragonabile alla MSE
-            freq_weights = freq_weights / freq_weights.mean()
-
-            loss = (((v_to_loss - target_to_loss) ** 2) * freq_weights).mean().to(v.dtype)
+            v_to_loss = v[mask_to_loss].view(-1, self.mel_channels)
+            target_to_loss = target[mask_to_loss].view(-1, self.mel_channels)
+            # Compute loss in fp32 for numerical stability with fp16
+            loss = F.mse_loss(v_to_loss.float(), target_to_loss.float()).to(v.dtype)
 
         return loss
 
@@ -203,7 +209,7 @@ class DiT(torch.nn.Module):
         )
 
         # ---- flow ----
-        state, times, v_target = self.prepare_flow(
+        state, times, v_target, conditioning_context = self.prepare_flow(
             target=target,
             context_vector=context_vector,
         )
@@ -212,6 +218,7 @@ class DiT(torch.nn.Module):
         loss = self.let_it_flow(
             times=times, state=state, target=v_target,
             flow_mask=target_padding_mask,
+            context_vector=conditioning_context,
             word_causal_mask=word_causal_mask,
         )
 
@@ -299,25 +306,33 @@ class DiT(torch.nn.Module):
         word_causal_mask: Optional[torch.BoolTensor] = None,
     ):
         times = times.repeat(state.shape[0])
-        cond_state = self.noise_proj(torch.cat([context_vector, state], dim=-1))
+        if self.use_film_conditioning:
+            cond_state = self.state_proj(state)
+        else:
+            cond_state = self.noise_proj(torch.cat([context_vector, state], dim=-1))
 
         cond_out = self.transformer(
             x=cond_state,
             times=times,
             attention_mask=attention_mask,
             word_causal_mask=word_causal_mask,
+            context_vector=context_vector if self.use_film_conditioning else None,
         )
         if cfg_scale == 1.0:
             return cond_out
-        uncond_state = self.noise_proj(
-            torch.cat([torch.zeros_like(context_vector), state], dim=-1)
-        )
+        if self.use_film_conditioning:
+            uncond_state = self.state_proj(state)
+        else:
+            uncond_state = self.noise_proj(
+                torch.cat([torch.zeros_like(context_vector), state], dim=-1)
+            )
 
         uncond_out = self.transformer(
             x=uncond_state,
             times=times,
             attention_mask=attention_mask,
             word_causal_mask=word_causal_mask,
+            context_vector=torch.zeros_like(context_vector) if self.use_film_conditioning else None,
         )
 
         final = (cfg_scale * cond_out + (1 - cfg_scale) * uncond_out).to(

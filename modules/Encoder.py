@@ -69,6 +69,7 @@ class ConvformerEncoderConfig(SigmaVAEencoderConfig):
     split_route: bool = False
     semantic_dim: Optional[int] = None
     kl_loss_pooler_weight: float = 1e-3
+    source: str = "z"
 
 
 class SigmaVAEEncoder(nn.Module):
@@ -110,14 +111,36 @@ class SigmaVAEEncoder(nn.Module):
         if logvar is None:
             # Compute in fp32 for numerical stability
             mu_valid = mu[~padding_mask].float()
+            if mu_valid.numel() == 0:
+                return torch.zeros((), dtype=mu.dtype, device=mu.device)
             return torch.nn.functional.mse_loss(
                 mu_valid, torch.zeros_like(mu_valid)
             ).to(mu.dtype)
-        # Compute KL divergence in fp32 for numerical stability with fp16
-        mu_valid = mu[~padding_mask].float()
-        logvar_valid = logvar[~padding_mask].float()
-        kl = -0.5 * torch.sum(1 + logvar_valid - mu_valid.pow(2) - logvar_valid.exp())
+        # Average KL over valid timesteps so its scale does not grow with sequence length.
+        valid_mask = ~padding_mask
+        num_valid = valid_mask.sum()
+        if num_valid.item() == 0:
+            return torch.zeros((), dtype=mu.dtype, device=mu.device)
+        mu_fp32 = mu.float()
+        logvar_fp32 = logvar.float()
+        kl_per_dim = -0.5 * (
+            1 + logvar_fp32 - mu_fp32.pow(2) - logvar_fp32.exp()
+        )
+        kl_per_token = kl_per_dim.sum(dim=-1)
+        kl = kl_per_token.masked_fill(~valid_mask, 0.0).sum() / num_valid
         return kl.to(mu.dtype)
+
+    def get_latent_source(
+        self,
+        mu: torch.FloatTensor,
+        z: torch.FloatTensor,
+    ) -> torch.FloatTensor:
+        source_name = getattr(self.config, "source", "z")
+        if source_name == "mu":
+            return mu
+        if source_name == "z":
+            return z
+        raise ValueError(f"Unsupported latent source: {source_name}")
 
     def sample_scalar_std(self, mu: torch.FloatTensor) -> torch.FloatTensor:
         return self.std_activation(
@@ -168,6 +191,8 @@ class CausalTransformerTail(nn.Module):
 class ConvformerEncoder(SigmaVAEEncoder):
     def __init__(self, config: ConvformerEncoderConfig):
         super().__init__(config)
+        if config.source not in {"mu", "z"}:
+            raise ValueError(f"Unsupported encoder source: {config.source}")
 
         compress_factor_C = config.compress_factor_C
         d_model = config.d_model
@@ -298,9 +323,11 @@ class ConvformerEncoder(SigmaVAEEncoder):
                 kwargs["step"], kl_loss_weight=self.kl_loss_weight
             )
 
+        source = self.get_latent_source(mu, z)
+
         if self.config.use_aligner:
             z_upsampled = self.conditioning_proj(
-                pooled=z, durations=durations, rel_pos=pos
+                pooled=source, durations=durations, rel_pos=pos
             )
             z_upsampled = torch.repeat_interleave(
                 z_upsampled, self.config.compress_factor_C, dim=1
@@ -308,7 +335,7 @@ class ConvformerEncoder(SigmaVAEEncoder):
             upsampled_padding_mask = original_padding_mask
         else:
             z_upsampled = torch.repeat_interleave(
-                z, self.config.compress_factor_C, dim=1
+                source, self.config.compress_factor_C, dim=1
             )
             upsampled_padding_mask = original_padding_mask
 
@@ -316,7 +343,7 @@ class ConvformerEncoder(SigmaVAEEncoder):
             z=z,
             kl_loss=kl_loss,
             padding_mask=padding_mask,
-            mu=z,
+            mu=mu,
             durations=durations,
             z_upsampled=z_upsampled,
             align_loss=align_loss,

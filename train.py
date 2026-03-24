@@ -393,8 +393,8 @@ class VAEtrainer(Trainer):
             results = self.model.encode_and_sample(
                 audios_srs=audios_srs,
                 num_steps=8,
-                temperature=1.0,
-                guidance_scale=1.0,
+                temperature=.8,
+                guidance_scale=1.4,
                 hubert_guidance=hubert_guidance,
                 phonemes=phonemes,
                 words=words,

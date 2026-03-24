@@ -27,12 +27,14 @@ class Transformer(Module):
         attn_qk_norm: bool = False,
         use_conv_layer: bool = False,
         is_causal: bool = True,
+        use_film_conditioning: bool = False,
     ):
         super().__init__()
         assert divisible_by(depth, 2)
         self.layers = nn.ModuleList([])
 
         self.use_conv_layer = use_conv_layer
+        self.use_film_conditioning = use_film_conditioning
         self.rotary_emb = RotaryEmbedding(dim=dim_head)
 
         self.num_register_tokens = num_register_tokens
@@ -89,6 +91,14 @@ class Transformer(Module):
                 )
             )
 
+        if self.use_film_conditioning:
+            self.layer_conditioners = nn.ModuleList(
+                [nn.Linear(dim, dim * 6) for _ in range(depth)]
+            )
+            for conditioner in self.layer_conditioners:
+                nn.init.zeros_(conditioner.weight)
+                nn.init.zeros_(conditioner.bias)
+
         self.final_norm = RMSNorm(dim)
         self.out_linear = nn.Linear(dim, audio_latent_dim, bias=False)
         self.is_causal = is_causal  # honor ctor arg
@@ -131,6 +141,7 @@ class Transformer(Module):
         times: torch.FloatTensor,
         attention_mask: Optional[torch.BoolTensor] = None,
         word_causal_mask: Optional[torch.BoolTensor] = None,
+        context_vector: Optional[torch.FloatTensor] = None,
     ):
         batch, seq_len, *_ = x.shape
         t = times
@@ -161,6 +172,15 @@ class Transformer(Module):
         if self.has_register_tokens:
             register_tokens = repeat(self.register_tokens, "n d -> b n d", b=batch)
             x, ps = pack([register_tokens, x], "b * d")
+            if exists(context_vector):
+                register_context = torch.zeros(
+                    batch,
+                    self.num_register_tokens,
+                    context_vector.shape[-1],
+                    device=context_vector.device,
+                    dtype=context_vector.dtype,
+                )
+                context_vector = torch.cat((register_context, context_vector), dim=1)
             if exists(effective_mask):
                 if effective_mask.ndim == 4:
                     # Pad 4D mask: register tokens can attend to everything and be attended to
@@ -192,13 +212,13 @@ class Transformer(Module):
         rmsnorm_kwargs = dict(cond=time_emb)
 
         # layers
-        for (
+        for layer_idx, (
             skip_combiner,
             attn_prenorm,
             attn,
             ff_prenorm,
             ff,
-        ) in self.layers:
+        ) in enumerate(self.layers):
             if not exists(skip_combiner):
                 skip_connects.append(x)
             else:
@@ -207,9 +227,25 @@ class Transformer(Module):
                 x = skip_combiner(x)
 
             attn_input = attn_prenorm(x, **rmsnorm_kwargs)
+            if self.use_film_conditioning and exists(context_vector):
+                (
+                    attn_scale,
+                    attn_shift,
+                    attn_gate,
+                    ff_scale,
+                    ff_shift,
+                    ff_gate,
+                ) = self.layer_conditioners[layer_idx](context_vector).chunk(6, dim=-1)
+                attn_input = attn_input + torch.sigmoid(attn_gate) * (
+                    attn_input * attn_scale + attn_shift
+                )
             x = attn(attn_input, mask=effective_mask, rotary_emb=rotary_emb, causal=use_causal_flag) + x
 
             ff_input = ff_prenorm(x, **rmsnorm_kwargs)
+            if self.use_film_conditioning and exists(context_vector):
+                ff_input = ff_input + torch.sigmoid(ff_gate) * (
+                    ff_input * ff_scale + ff_shift
+                )
             x = ff(ff_input) + x
 
         # remove the register tokens

@@ -1,24 +1,24 @@
 training:
   dataset_name: librispeech-align
   train_only_aligner: false
-  output_dir: checkpoints/MelCausalVAE/1d-compression-8X # variable rate training
-  num_train_epochs: 1
+  output_dir: checkpoints/MelCausalVAE/1d-compression-8X-film-conditioning-dropout-0.2 # variable rate training
+  num_train_epochs: 3
   learning_rate: 1e-4
-  per_device_train_batch_size: 8
+  per_device_train_batch_size: 24
   report_to: wandb
-  wandb_project: flexi-vae-paper
-  wandb_run_name: 1d-compression-8X
+  wandb_project: CaDiT-VAE
+  wandb_run_name: 1d-compression-8X-film-conditioning-dropout-0.2
   fp16: false
   bf16: true
   save_steps: 1000
   eval_strategy: "steps"
-  eval_steps: 1000
+  eval_steps: 250
   save_total_limit: 1
   gradient_accumulation_steps: 1
   dataloader_num_workers: 4
   min_learning_rate: 6e-5
-  #from_pretrained: /workspace/MelCausalVAE/checkpoints/no-aligner/checkpoint-10000/model.safetensors
-  #resume_from_checkpoint: /workspace/MelCausalVAE/checkpoints/MelCausalVAE/logvar/checkpoint-2000
+  #from_pretrained: /home/ec2-user/MelCausalVAE/checkpoints/1d-logvar-compression-8X/model.safetensors
+  resume_from_checkpoint: /home/ec2-user/MelCausalVAE/checkpoints/MelCausalVAE/1d-compression-8X-film-conditioning/checkpoint-6000
   phonemes: true
 
 convformer:
@@ -29,23 +29,25 @@ convformer:
   logvar_layer: false
   use_sofplus: false
   target_std: 1.0
-  kl_loss_warmup_steps: 500
-  kl_loss_weight: 1e-3
+  kl_loss_warmup_steps: 1000
+  kl_loss_weight: 1e-4
   use_aligner: false
   freeze_encoder: false
   threshold: 0.90
   force_downsample: true
   d_model: 512
+  source: z
 
 cfm:
   unet_dim: 768
   unet_depth: 6
-  unet_heads: 8
+  unet_heads: 12
   unet_dropout_rate: 0.1
   use_conv_layer: true
   audio_latent_dim: 64
-  uncond_prob: 0.15
+  uncond_prob: 0.2
   learned_prior: false
   is_causal: true
+  use_film_conditioning: true
   decoder_type: "dit"
   use_word_causal_mask: false

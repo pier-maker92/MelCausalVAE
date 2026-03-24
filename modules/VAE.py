@@ -303,8 +303,8 @@ class VAE(torch.nn.Module):
                 word_causal_mask=word_causal_mask,
             ).loss
 
-        mu_mean = convformer_output.z[~convformer_output.padding_mask].mean()
-        mu_var = convformer_output.z[~convformer_output.padding_mask].var()
+        mu_mean = convformer_output.mu[~convformer_output.padding_mask].mean()
+        mu_var = convformer_output.mu[~convformer_output.padding_mask].var()
         return VAEOutput(
             audio_loss=audio_loss,
             kl_loss=convformer_output.kl_loss,
