@@ -6,6 +6,7 @@ from dataclasses import dataclass, asdict
 from .semantic_module import SeamlessM4Tv2Encoder
 from .semantic_mapper import SemanticMapperConfig, Z2YMapper
 from .Encoder import ConvformerEncoderConfig, ConvformerEncoder
+from .encoder_1d import ConvformerEncoder1d
 from .melspecEncoder import MelSpectrogramEncoder, MelSpectrogramConfig
 from .ConvformerDecoder import ConvformerDecoder, ConvformerDecoderConfig
 
@@ -79,7 +80,10 @@ class VAE(torch.nn.Module):
         else:
             self.decoder = DiT(config.decoder_config)
             self.decoder.expansion_factor = config.encoder_config.compress_factor_C
-        self.encoder = ConvformerEncoder(config.encoder_config)
+        if config.encoder_config.use_1d_encoder:
+            self.encoder = ConvformerEncoder1d(config.encoder_config)
+        else:
+            self.encoder = ConvformerEncoder(config.encoder_config)
         self.wav2mel = MelSpectrogramEncoder(config.mel_spec_config)
         if config.add_semantic_distillation:
             self.semantic_module = SeamlessM4Tv2Encoder(dtype=dtype)

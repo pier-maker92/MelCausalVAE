@@ -12,5 +12,8 @@ cfm:
   mel_channels: 100
   learned_prior: false
   is_causal: false
+  use_window_attention: false
+  window_attention_seconds: 3.0
+  use_group_bidirectional: false
 
 

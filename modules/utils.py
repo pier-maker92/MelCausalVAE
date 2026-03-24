@@ -77,11 +77,12 @@ class Attend(nn.Module):
       - Cross-attention with mask: not implemented here.
     """
 
-    def __init__(self, dropout: float = 0.0, flash: bool = False, scale: Optional[float] = None):
+    def __init__(self, dropout: float = 0.0, flash: bool = False, scale: Optional[float] = None, window_size: Optional[int] = None):
         super().__init__()
         self.dropout = float(dropout)
         self.scale = scale
         self.flash = flash and _HAS_FLASH_ATTN  # keep flag for compatibility
+        self.fa_window_size = (window_size, 0) if window_size is not None else (-1, -1)
 
     @staticmethod
     def _normalize_mask(mask: torch.Tensor, S: int) -> torch.Tensor:
@@ -112,6 +113,45 @@ class Attend(nn.Module):
         max_len = int(lengths.max().item()) if B > 0 else 0
         return cu, max_len
 
+    def _build_group_causal_mask(
+        self,
+        Nq: int,
+        Nk: int,
+        group_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        padding_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """
+        Build a block-causal attention mask: bidirectional within each group
+        of `group_size` frames, causal across groups. Optionally combined with
+        sliding-window and padding constraints.
+
+        Returns float mask [B?, 1, Nq, Nk] with 0 = attend, -inf = masked.
+        """
+        idx_q = torch.arange(Nq, device=device)
+        idx_k = torch.arange(Nk, device=device)
+
+        # Block-causal: key's group <= query's group
+        attn_mask = (idx_k[None, :] // group_size) <= (idx_q[:, None] // group_size)
+
+        # Sliding window constraint (left side only)
+        window_left = self.fa_window_size[0]
+        if window_left > 0:
+            attn_mask = attn_mask & (idx_k[None, :] >= (idx_q[:, None] - window_left))
+
+        # Expand and combine with padding mask
+        if padding_mask is not None:
+            mask_bs = self._normalize_mask(padding_mask, S=Nk)  # [B, Nk] True=valid
+            attn_mask = attn_mask.unsqueeze(0) & mask_bs.unsqueeze(1)  # [B, Nq, Nk]
+            float_mask = torch.zeros(attn_mask.shape[0], 1, Nq, Nk, device=device, dtype=dtype)
+            float_mask.masked_fill_(~attn_mask.unsqueeze(1), float("-inf"))
+        else:
+            float_mask = torch.zeros(1, 1, Nq, Nk, device=device, dtype=dtype)
+            float_mask.masked_fill_(~attn_mask.unsqueeze(0).unsqueeze(0), float("-inf"))
+
+        return float_mask
+
     def forward(
         self,
         q: torch.Tensor,
@@ -119,10 +159,13 @@ class Attend(nn.Module):
         v: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
         causal: bool = False,
+        group_size: Optional[int] = None,
     ):
         """
         q, k, v: [B, H, N, D]
         mask: None or [B,S] / [B,1,1,S] with True=valid
+        group_size: if set, use block-causal attention (bidirectional within
+                    groups of this size, causal across groups) via SDPA.
         returns: [B, H, Nq, D]
         """
         assert q.ndim == 4 and k.ndim == 4 and v.ndim == 4, "q,k,v must be [B,H,N,D]"
@@ -136,17 +179,28 @@ class Attend(nn.Module):
         p = self.dropout if self.training else 0.0
         softmax_scale = self.scale if self.scale is not None else (D**-0.5)
 
+        # Block-causal path: SDPA with explicit mask (Flash Attn can't express this)
+        if group_size is not None:
+            float_mask = self._build_group_causal_mask(
+                Nq, Nk, group_size, q.device, q.dtype, padding_mask=mask,
+            )
+            return F.scaled_dot_product_attention(
+                q, k, v, attn_mask=float_mask, dropout_p=p, scale=softmax_scale,
+            )
+
         # to [B, S, H, D]
         q_ = q.permute(0, 2, 1, 3).contiguous()
         k_ = k.permute(0, 2, 1, 3).contiguous()
         v_ = v.permute(0, 2, 1, 3).contiguous()
 
         # self-attention
+        w = self.fa_window_size
         if Nq == Nk:
             if mask is None:
                 qkv = torch.stack([q_, k_, v_], dim=2)  # [B, S, 3, H, D]
                 out = flash_attn_qkvpacked_func(
-                    qkv, dropout_p=p, softmax_scale=softmax_scale, causal=causal
+                    qkv, dropout_p=p, softmax_scale=softmax_scale, causal=causal,
+                    window_size=w,
                 )  # [B, S, H, D]
                 return out.permute(0, 2, 1, 3).contiguous()
             else:
@@ -163,6 +217,7 @@ class Attend(nn.Module):
                     dropout_p=p,
                     softmax_scale=softmax_scale,
                     causal=causal,
+                    window_size=w,
                 )  # [T, H, D]
                 out_flat = torch.zeros(B * Nk, H, D, device=q.device, dtype=q.dtype)
                 out_flat[keep] = out_packed
@@ -174,7 +229,7 @@ class Attend(nn.Module):
             raise NotImplementedError(
                 "Cross-attention with mask requires separate q and kv masks; use varlen APIs for both."
             )
-        out = flash_attn_func(q_, k_, v_, dropout_p=p, softmax_scale=softmax_scale, causal=causal)  # [B, Nq, H, D]
+        out = flash_attn_func(q_, k_, v_, dropout_p=p, softmax_scale=softmax_scale, causal=causal, window_size=w)  # [B, Nq, H, D]
         return out.permute(0, 2, 1, 3).contiguous()
 
 
@@ -233,8 +288,9 @@ class ConvPositionEmbed(Module):
         super().__init__()
         assert is_odd(kernel_size)
         groups = default(groups, dim)  # full depthwise conv by default
+        self.causal_pad = kernel_size - 1
         self.dw_conv1d = nn.Sequential(
-            nn.Conv1d(dim, dim, kernel_size, groups=groups, padding=kernel_size // 2),
+            nn.Conv1d(dim, dim, kernel_size, groups=groups, padding=0),
             nn.GELU(),
         )
 
@@ -243,6 +299,7 @@ class ConvPositionEmbed(Module):
             mask = mask[..., None]
             x = x.masked_fill(~mask, 0.0)
         x = rearrange(x, "b n c -> b c n")
+        x = F.pad(x, (self.causal_pad, 0))
         x = self.dw_conv1d(x)
         out = rearrange(x, "b c n -> b n c")
         if exists(mask):
@@ -298,12 +355,13 @@ class Attention(Module):
         flash=False,
         qk_norm=False,
         qk_norm_scale=10,
+        window_size=None,
     ):
         super().__init__()
         self.heads = heads
         dim_inner = dim_head * heads
         scale = qk_norm_scale if qk_norm else None
-        self.attend = Attend(dropout, flash=flash, scale=scale)
+        self.attend = Attend(dropout, flash=flash, scale=scale, window_size=window_size)
         self.qk_norm = qk_norm
         # If qk_norm is ever enabled, define simple per-head RMSNorms or raise.
         if qk_norm:
@@ -311,13 +369,13 @@ class Attention(Module):
         self.to_qkv = nn.Linear(dim, dim_inner * 3, bias=False)
         self.to_out = nn.Linear(dim_inner, dim, bias=False)
 
-    def forward(self, x, mask=None, rotary_emb=None, causal: bool = False):
+    def forward(self, x, mask=None, rotary_emb=None, causal: bool = False, group_size: Optional[int] = None):
         h = self.heads
         q, k, v = self.to_qkv(x).chunk(3, dim=-1)
         q, k, v = map(lambda t: rearrange(t, "b n (h d) -> b h n d", h=h), (q, k, v))
         if exists(rotary_emb):
             q, k = map(lambda t: apply_rotary_pos_emb(rotary_emb, t), (q, k))
-        out = self.attend(q, k, v, mask=mask, causal=causal)
+        out = self.attend(q, k, v, mask=mask, causal=causal, group_size=group_size)
         out = rearrange(out, "b h n d -> b n (h d)")
         return self.to_out(out)
 

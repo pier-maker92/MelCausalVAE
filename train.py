@@ -241,7 +241,7 @@ class VAEtrainer(Trainer):
                 results = self.model.encode_and_sample(
                     audios_srs=audios_srs,
                     num_steps=16,
-                    temperature=.7,
+                    temperature=.2,
                     guidance_scale=1.3,
                 )
             # Create visualizations
@@ -450,7 +450,7 @@ def main():
     else:
         raise ValueError(f"Dataset {dataset_name} not supported")
     train_dataset = TrainDatasetWrapper(dataset, "train")
-    test_dataset = TrainDatasetWrapper(dataset, "test")
+    test_dataset = TrainDatasetWrapper(dataset, "train")
 
     # handle wandb - only initialize on main process (rank 0)
     wandb_project = training_cfg.pop("wandb_project", None)

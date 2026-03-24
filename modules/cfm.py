@@ -36,6 +36,9 @@ class DiTConfig:
     learned_prior: bool = False
     use_vp_schedule: bool = False
     is_causal: bool = True
+    use_window_attention: bool = False
+    window_attention_seconds: float = 3.0
+    use_group_bidirectional: bool = False
     # def __init__(
     #     self,
     #     audio_latent_dim: int,
@@ -92,10 +95,19 @@ class DiT(torch.nn.Module):
         self.uncond_prob = config.uncond_prob
         self.learned_prior = config.learned_prior
         self.is_causal = config.is_causal
+        self.use_window_attention = config.use_window_attention
+        self.use_group_bidirectional = config.use_group_bidirectional
+        mel_fps = 93.75  # 24000 / 256
+        self.window_size = int(config.window_attention_seconds * mel_fps) if config.use_window_attention else None
         print(f"VAE is_causal: {self.is_causal}")
+        if self.window_size is not None:
+            print(f"VAE window_attention: {config.window_attention_seconds}s = {self.window_size} mel frames")
+        if self.use_group_bidirectional:
+            print(f"VAE group_bidirectional: enabled (group_size will be set to expansion_factor)")
         # context vector projection
         self.context_vector_proj = nn.Sequential(
-            nn.Linear(self.audio_latent_dim, self.unet_dim), nn.LayerNorm(self.unet_dim)
+            nn.Linear(self.audio_latent_dim, self.unet_dim),
+            #nn.LayerNorm(self.unet_dim)
         )
         # noise projection
         if self.learned_prior:
@@ -118,6 +130,7 @@ class DiT(torch.nn.Module):
             audio_latent_dim=self.mel_channels,  # projection to mel
             is_causal=self.is_causal,
             attn_flash=True,
+            window_size=self.window_size,
         )
         self.transformer.to(dtype=torch.bfloat16)
         
@@ -194,6 +207,12 @@ class DiT(torch.nn.Module):
         state = self.noise_proj(torch.cat([context_vector, w], dim=-1))
         return state, times, target
 
+    @property
+    def _group_size(self) -> Optional[int]:
+        if self.use_group_bidirectional and self.expansion_factor and self.expansion_factor > 1:
+            return self.expansion_factor
+        return None
+
     def let_it_flow(
         self,
         times: torch.FloatTensor,
@@ -206,6 +225,7 @@ class DiT(torch.nn.Module):
             x=state,
             times=times,
             attention_mask=mask_to_loss,
+            group_size=self._group_size,
         )
         loss = None
         if target is not None:
@@ -304,10 +324,12 @@ class DiT(torch.nn.Module):
             if self.learned_prior
             else self.noise_proj(torch.cat([context_vector, state], dim=-1))
         )
+        gs = self._group_size
         cond_out = self.transformer(
             x=cond_state,
             times=times,
             attention_mask=attention_mask,
+            group_size=gs,
         )
         if cfg_scale == 1.0:
             return cond_out
@@ -320,6 +342,7 @@ class DiT(torch.nn.Module):
             x=uncond_state,
             times=times,
             attention_mask=attention_mask,
+            group_size=gs,
         )
 
         final = (cfg_scale * cond_out + (1 - cfg_scale) * uncond_out).to(context_vector.dtype)

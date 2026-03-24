@@ -12,5 +12,6 @@ convformer:
   kl_loss_warmup_steps: 1000
   use_classic_decoder: false
   use_bigvgan_mel: false
+  use_1d_encoder: false
 
 

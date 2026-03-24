@@ -43,6 +43,7 @@ class ConvformerEncoderConfig(SigmaVAEencoderConfig):
     latent_dim: int = 64
     n_residual_blocks: int = 3
     use_bigvgan_mel: bool = False
+    use_1d_encoder: bool = False
 
 
 class SigmaVAEEncoder(nn.Module):

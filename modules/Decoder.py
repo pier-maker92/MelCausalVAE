@@ -27,12 +27,14 @@ class Transformer(Module):
         attn_qk_norm: bool = False,
         use_conv_layer: bool = False,
         is_causal: bool = True,
+        window_size: Optional[int] = None,
     ):
         super().__init__()
         assert divisible_by(depth, 2)
         self.layers = nn.ModuleList([])
 
         self.use_conv_layer = use_conv_layer
+        self.window_size = window_size
         self.rotary_emb = RotaryEmbedding(dim=dim_head)
 
         self.num_register_tokens = num_register_tokens
@@ -82,6 +84,7 @@ class Transformer(Module):
                             dropout=attn_dropout,
                             flash=attn_flash,
                             qk_norm=attn_qk_norm,
+                            window_size=window_size,
                         ),
                         rmsnorm_klass(dim=dim),
                         FeedForward(dim=dim, mult=ff_mult, dropout=ff_dropout),
@@ -130,6 +133,7 @@ class Transformer(Module):
         x: torch.FloatTensor,
         times: torch.FloatTensor,
         attention_mask: Optional[torch.BoolTensor] = None,
+        group_size: Optional[int] = None,
     ):
         batch, seq_len, *_ = x.shape
         t = times
@@ -187,7 +191,7 @@ class Transformer(Module):
                 x = skip_combiner(x)
 
             attn_input = attn_prenorm(x, **rmsnorm_kwargs)
-            x = attn(attn_input, mask=attention_mask, rotary_emb=rotary_emb, causal=self.is_causal) + x
+            x = attn(attn_input, mask=attention_mask, rotary_emb=rotary_emb, causal=self.is_causal, group_size=group_size) + x
 
             ff_input = ff_prenorm(x, **rmsnorm_kwargs)
             x = ff(ff_input) + x
