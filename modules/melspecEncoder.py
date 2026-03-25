@@ -11,15 +11,21 @@ from transformers import PretrainedConfig
 from torchaudio.transforms import MelSpectrogram
 
 sys.path.append("/home/ec2-user/MelCausalVAE/bigvgan/bigvgan_v2_24khz_100band_256x")
-from meldataset import get_mel_spectrogram as get_mel_spectrogram_bigvgan
+
+
+# from meldataset import get_mel_spectrogram as get_mel_spectrogram_bigvgan
 class AttrDict(dict):
     def __init__(self, *args, **kwargs):
         super(AttrDict, self).__init__(*args, **kwargs)
         self.__dict__ = self
+
+
 def load_hparams_from_json(path) -> AttrDict:
     with open(path) as f:
         data = f.read()
     return AttrDict(json.loads(data))
+
+
 @dataclass
 class MelSpectrogramConfig:
     mel_channels: int = 100
@@ -49,16 +55,17 @@ class MelSpectrogramEncoder(torch.nn.Module):
         self.padding = config.padding
         self.normalize = config.normalize
         self.use_bigvgan_mel = config.use_bigvgan_mel
-        
+
         if self.use_bigvgan_mel:
             # BigVGAN uses librosa's mel filterbank (slaney norm, htk=False)
             import librosa
+
             mel_basis = librosa.filters.mel(
                 sr=self.sampling_rate,
                 n_fft=self.n_fft,
                 n_mels=self.n_mels,
                 fmin=0,
-                fmax=None
+                fmax=None,
             )
             self.register_buffer("mel_basis", torch.from_numpy(mel_basis).float())
             self.register_buffer("hann_window", torch.hann_window(self.n_fft))
@@ -73,15 +80,17 @@ class MelSpectrogramEncoder(torch.nn.Module):
                 center=self.padding == "center",
                 power=1,
             )
-        
+
         if self.use_bigvgan_mel:
-            self.std = 2.10 
-            self.mean = -5.0 
-            self.h = load_hparams_from_json("/home/ec2-user/MelCausalVAE/bigvgan/bigvgan_v2_24khz_100band_256x/config.json")
+            self.std = 2.10
+            self.mean = -5.0
+            self.h = load_hparams_from_json(
+                "/home/ec2-user/MelCausalVAE/bigvgan/bigvgan_v2_24khz_100band_256x/config.json"
+            )
         else:
             self.std = 2.080231189727783
             self.mean = -1.0173088312149048
-    
+
     def _update_std_mean_with_momentum(self, mel_spec: torch.Tensor):
         self.std = self.std * 0.99 + mel_spec.std() * 0.01
         self.mean = self.mean * 0.99 + mel_spec.mean() * 0.01
@@ -99,7 +108,10 @@ class MelSpectrogramEncoder(torch.nn.Module):
             )
         sr = unique_sampling_rates.pop()
         if sr != self.sampling_rate:
-            raise ValueError(f"Sampling rate {sr} is not supported by this model. " f"Expected {self.sampling_rate}.")
+            raise ValueError(
+                f"Sampling rate {sr} is not supported by this model. "
+                f"Expected {self.sampling_rate}."
+            )
         dtype = audios[0].dtype
         device = audios[0].device
         # Get max length for padding
@@ -109,7 +121,9 @@ class MelSpectrogramEncoder(torch.nn.Module):
             batch_size = len(audios)
 
             # Create padded tensor using torch.nn.utils.rnn.pad_sequence
-            padded_audios = torch.nn.utils.rnn.pad_sequence(audios, batch_first=True, padding_value=0.0)
+            padded_audios = torch.nn.utils.rnn.pad_sequence(
+                audios, batch_first=True, padding_value=0.0
+            )
             # Create padding mask
             padding_mask = torch.ones(
                 (batch_size, max_length),
@@ -128,7 +142,9 @@ class MelSpectrogramEncoder(torch.nn.Module):
             )
         if self.use_bigvgan_mel:
             # BigVGAN logic: manual reflection padding + stft(center=False)
-            mel_spec = get_mel_spectrogram_bigvgan(padded_audios.to(torch.float32), self.h).to(dtype=dtype)
+            mel_spec = get_mel_spectrogram_bigvgan(
+                padded_audios.to(torch.float32), self.h
+            ).to(dtype=dtype)
         else:
             self.mel_transform.to(device=device, dtype=torch.float32)
             mel_spec = self.mel_transform(padded_audios.to(torch.float32))
@@ -159,9 +175,10 @@ class MelSpectrogramEncoder(torch.nn.Module):
         #     stds.append(std)
         # print(f"means: {torch.tensor(means).mean()}")
         # print(f"stds: {torch.tensor(stds).mean()}")
-        
+
         assert padding_mask.shape[1] == mel_spec.shape[1], (
-            f"Temporal dimensions mismatch: padding_mask {padding_mask.shape[1]} vs " f"mel_spec {mel_spec.shape[1]}"
+            f"Temporal dimensions mismatch: padding_mask {padding_mask.shape[1]} vs "
+            f"mel_spec {mel_spec.shape[1]}"
         )
 
         if self.normalize:

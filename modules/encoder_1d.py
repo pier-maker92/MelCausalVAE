@@ -64,7 +64,9 @@ class CausalDownsamplingBlock1d(nn.Module):
                 for dilation in dilations[:n_residual_blocks]
             ]
         )
-        self.downsampling = PreNormResCausalBlock1d(c_in, c_out, k=5, d=1, s=2, drop_p=drop_p)
+        self.downsampling = PreNormResCausalBlock1d(
+            c_in, c_out, k=5, d=1, s=2, drop_p=drop_p
+        )
 
     def forward(self, x):  # x: [B, C, T]
         for block in self.residual_blocks:
@@ -91,18 +93,22 @@ class ConvformerEncoder1d(SigmaVAEEncoder):
         drop_p = config.drop_p
         latent_dim = config.latent_dim
         n_residual_blocks = config.n_residual_blocks
+        d_model = config.d_model
 
-        assert compress_factor_C >= 1 and (compress_factor_C & (compress_factor_C - 1)) == 0, "C must be power of 2"
+        assert (
+            compress_factor_C >= 1
+            and (compress_factor_C & (compress_factor_C - 1)) == 0
+        ), "C must be power of 2"
         self.C = compress_factor_C
 
         # Input projection: [B, 100, T] -> [B, 256, T]
-        self.in_proj = TimeCausalConv1d(100, 256, k=7)
+        self.in_proj = TimeCausalConv1d(100, d_model // 2, k=7)
 
         # Mixer: dilated causal blocks with increasing channels
         self.mixer = nn.Sequential(
-            PreNormResCausalBlock1d(256, 256, k=7, d=1, drop_p=drop_p),
-            PreNormResCausalBlock1d(256, 512, k=5, d=2, drop_p=drop_p),
-            PreNormResCausalBlock1d(512, 512, k=3, d=4, drop_p=drop_p),
+            PreNormResCausalBlock1d(d_model // 2, d_model, k=7, d=1, drop_p=drop_p),
+            PreNormResCausalBlock1d(d_model, d_model, k=5, d=2, drop_p=drop_p),
+            PreNormResCausalBlock1d(d_model, d_model, k=3, d=4, drop_p=drop_p),
         )
 
         # Temporal downsampling: log2(C) stages of stride-2
@@ -111,24 +117,31 @@ class ConvformerEncoder1d(SigmaVAEEncoder):
         for i in range(num_stages):
             factor = 2 ** (i + 1)
             self.downsampling[f"downsample@{factor}"] = CausalDownsamplingBlock1d(
-                512, 512, n_residual_blocks=n_residual_blocks, drop_p=drop_p
+                d_model, d_model, n_residual_blocks=n_residual_blocks, drop_p=drop_p
             )
 
         # Causal Transformer tail
-        self.transformer = CausalTransformerTail(d_model=512, nheads=tf_heads, nlayers=tf_layers, drop_p=drop_p)
+        self.transformer = CausalTransformerTail(
+            d_model=d_model, nheads=tf_heads, nlayers=tf_layers, drop_p=drop_p
+        )
 
-        self.mu = nn.Linear(512, latent_dim)
+        self.mu = nn.Linear(d_model, latent_dim)
         if config.logvar_layer:
-            self.logvar = nn.Linear(512, latent_dim)
+            self.logvar = nn.Linear(d_model, latent_dim)
 
-    def forward(self, x: torch.FloatTensor, padding_mask: Optional[torch.BoolTensor] = None, **kwargs):
+    def forward(
+        self,
+        x: torch.FloatTensor,
+        padding_mask: Optional[torch.BoolTensor] = None,
+        **kwargs,
+    ):
         # x: [B, T, 100]
         x = x.transpose(1, 2)  # [B, 100, T]
-        x = self.in_proj(x)  # [B, 256, T]
-        x = self.mixer(x)  # [B, 512, T]
+        x = self.in_proj(x)  # [B, d_model//2, T]
+        x = self.mixer(x)  # [B, d_model, T]
 
         for layer in self.downsampling.values():
-            x = layer(x)  # [B, 512, T/C]
+            x = layer(x)  # [B, d_model, T/C]
 
         hiddens = x.transpose(1, 2)  # [B, T/C, 512]
         z = self.transformer(hiddens)  # [B, T/C, 512]
@@ -146,13 +159,18 @@ class ConvformerEncoder1d(SigmaVAEEncoder):
         kl_loss = None
         if kwargs.get("step", None) is not None:
             kl_loss = self.kl_divergence(
-                mu, logvar, self._resize_padding_mask(padding_mask, mu.shape[1], dtype=z.dtype), dtype=z.dtype
+                mu,
+                logvar,
+                self._resize_padding_mask(padding_mask, mu.shape[1], dtype=z.dtype),
+                dtype=z.dtype,
             ) * self.get_kl_cosine_schedule(kwargs["step"])
 
         return ConvformerOutput(
             z=z,
             kl_loss=kl_loss,
-            padding_mask=self._resize_padding_mask(padding_mask, mu.shape[1], dtype=z.dtype),
+            padding_mask=self._resize_padding_mask(
+                padding_mask, mu.shape[1], dtype=z.dtype
+            ),
             mu=mu,
             semantic_loss=semantic_loss,
         )
@@ -181,7 +199,9 @@ def test_time_causality_invariance_1d(model):
             x_pert[:, t_max:, :] = torch.randn_like(x_pert[:, t_max:, :]) * 5.0
         y_pert = forward_latent_1d(model, x_pert)
 
-        ok = torch.allclose(y_pert.z[:, j - 1, :], y_ref.z[:, j - 1, :], atol=1e-7, rtol=0)
+        ok = torch.allclose(
+            y_pert.z[:, j - 1, :], y_ref.z[:, j - 1, :], atol=1e-7, rtol=0
+        )
         assert ok, f"Causality violated at output index {j}"
     print("Causality test passed!")
 

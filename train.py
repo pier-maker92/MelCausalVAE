@@ -27,8 +27,8 @@ from data.libri_tts import LibriTTS
 from data.audio_dataset import DataCollator
 from data.audio_dataset import TrainDatasetWrapper
 from data.librispeech_align import LibriSpeechAlignDataset
+from torch.optim.lr_scheduler import CosineAnnealingLR
 import torch.distributed as dist
-
 
 
 # Set up logging
@@ -38,6 +38,7 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
+
 
 class AddGranularLossesToTrainerState(TrainerCallback):
     """Callback to add granular losses to trainer state"""
@@ -52,15 +53,18 @@ class AddGranularLossesToTrainerState(TrainerCallback):
         control: TrainerControl,
         **kwargs,
     ):
-        control.granular_losses = {k: torch.tensor(0.0).to(args.device) for k in self.granular_losses}
+        control.granular_losses = {
+            k: torch.tensor(0.0).to(args.device) for k in self.granular_losses
+        }
         return control
 
 
 class VAEtrainer(Trainer):
     """Custom trainer for VAE"""
 
-    def __init__(self, **kwargs):
+    def __init__(self, min_learning_rate: float = 0.0, **kwargs):
         super().__init__(**kwargs)
+        self.min_learning_rate = min_learning_rate
         # Register granular losses
         granular_losses = ["audio_loss", "kl_loss", "mu_mean", "mu_var"]
         try:
@@ -69,6 +73,16 @@ class VAEtrainer(Trainer):
         except Exception:
             pass
         self.add_callback(AddGranularLossesToTrainerState(granular_losses))
+
+    def create_scheduler(self, num_training_steps: int, optimizer=None):
+        if optimizer is None:
+            optimizer = self.optimizer
+        self.lr_scheduler = CosineAnnealingLR(
+            optimizer,
+            T_max=num_training_steps,
+            eta_min=self.min_learning_rate,
+        )
+        return self.lr_scheduler
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         """Compute the loss for the VAE"""
@@ -86,15 +100,23 @@ class VAEtrainer(Trainer):
             semantic_loss = outputs.get("semantic_loss", None)
             mu_mean = outputs.get("mu_mean")
             mu_var = outputs.get("mu_var")
-            loss = audio_loss + kl_loss + (semantic_loss if semantic_loss is not None else 0.0)
+            loss = (
+                audio_loss
+                + kl_loss
+                + (semantic_loss if semantic_loss is not None else 0.0)
+            )
 
             # Accumulate granular losses
             if self.args.n_gpu > 1:
                 audio_loss = audio_loss.mean()
                 kl_loss = kl_loss.mean()
 
-            self.control.granular_losses["audio_loss"] += audio_loss.detach() / self.args.gradient_accumulation_steps
-            self.control.granular_losses["kl_loss"] += kl_loss.detach() / self.args.gradient_accumulation_steps
+            self.control.granular_losses["audio_loss"] += (
+                audio_loss.detach() / self.args.gradient_accumulation_steps
+            )
+            self.control.granular_losses["kl_loss"] += (
+                kl_loss.detach() / self.args.gradient_accumulation_steps
+            )
             if semantic_loss is not None:
                 if self.args.n_gpu > 1:
                     semantic_loss = semantic_loss.mean()
@@ -106,14 +128,16 @@ class VAEtrainer(Trainer):
                 if val.dim() > 0:
                     val = val.mean()
                 self.control.granular_losses["mu_mean"] += (
-                    val.to(self.control.granular_losses["mu_mean"].dtype) / self.args.gradient_accumulation_steps
+                    val.to(self.control.granular_losses["mu_mean"].dtype)
+                    / self.args.gradient_accumulation_steps
                 )
             if mu_var is not None:
                 val = mu_var.detach().float()
                 if val.dim() > 0:
                     val = val.mean()
                 self.control.granular_losses["mu_var"] += (
-                    val.to(self.control.granular_losses["mu_var"].dtype) / self.args.gradient_accumulation_steps
+                    val.to(self.control.granular_losses["mu_var"].dtype)
+                    / self.args.gradient_accumulation_steps
                 )
 
             return (loss, outputs) if return_outputs else loss
@@ -127,7 +151,11 @@ class VAEtrainer(Trainer):
             audio_loss = outputs.audio_loss
             kl_loss = outputs.kl_loss
             semantic_loss = getattr(outputs, "semantic_loss", None)
-            loss = audio_loss + kl_loss + (semantic_loss if semantic_loss is not None else 0.0)
+            loss = (
+                audio_loss
+                + kl_loss
+                + (semantic_loss if semantic_loss is not None else 0.0)
+            )
             return (loss, outputs) if return_outputs else loss
 
     def _maybe_log_save_evaluate(self, *args, **kwargs):
@@ -137,7 +165,10 @@ class VAEtrainer(Trainer):
         trial = args[3]
         epoch = args[4]
         ignore_keys_for_eval = args[5]
-        if self.control.should_log and self.state.global_step > self._globalstep_last_logged:
+        if (
+            self.control.should_log
+            and self.state.global_step > self._globalstep_last_logged
+        ):
 
             logs: Dict[str, float] = {}
 
@@ -148,7 +179,8 @@ class VAEtrainer(Trainer):
             tr_loss -= tr_loss
 
             logs["loss"] = round(
-                tr_loss_scalar / (self.state.global_step - self._globalstep_last_logged),
+                tr_loss_scalar
+                / (self.state.global_step - self._globalstep_last_logged),
                 4,
             )
 
@@ -159,7 +191,9 @@ class VAEtrainer(Trainer):
                     # reset the loss
                     self.control.granular_losses[k] -= self.control.granular_losses[k]
 
-                    avg_val = logs[k] / (self.state.global_step - self._globalstep_last_logged)
+                    avg_val = logs[k] / (
+                        self.state.global_step - self._globalstep_last_logged
+                    )
                     if k in ("mu_mean", "mu_var"):
                         logs[k] = round(avg_val, 8)
                     else:
@@ -168,7 +202,9 @@ class VAEtrainer(Trainer):
             logs["learning_rate"] = self._get_learning_rate()
 
             if grad_norm is not None:
-                logs["grad_norm"] = grad_norm if isinstance(grad_norm, float) else grad_norm.item()
+                logs["grad_norm"] = (
+                    grad_norm if isinstance(grad_norm, float) else grad_norm.item()
+                )
 
             self._total_loss_scalar += tr_loss_scalar
             self._globalstep_last_logged = self.state.global_step
@@ -182,8 +218,10 @@ class VAEtrainer(Trainer):
             self._report_to_hp_search(trial, self.state.global_step, metrics)
 
         if self.control.should_save:
-            self._save_checkpoint(model, trial ) #metrics=metrics
-            self.control = self.callback_handler.on_save(self.args, self.state, self.control)
+            self._save_checkpoint(model, trial)  # metrics=metrics
+            self.control = self.callback_handler.on_save(
+                self.args, self.state, self.control
+            )
 
     def evaluate(
         self,
@@ -211,20 +249,28 @@ class VAEtrainer(Trainer):
             try:
                 import sys
                 import os
-                bigvgan_path = "/home/ec2-user/MelCausalVAE/bigvgan/bigvgan_v2_24khz_100band_256x"
+
+                bigvgan_path = (
+                    "/home/ec2-user/MelCausalVAE/bigvgan/bigvgan_v2_24khz_100band_256x"
+                )
                 if bigvgan_path not in sys.path:
                     sys.path.append(bigvgan_path)
                 import bigvgan
-                vocoder = bigvgan.BigVGAN.from_pretrained(bigvgan_path, use_cuda_kernel=False)
+
+                vocoder = bigvgan.BigVGAN.from_pretrained(
+                    bigvgan_path, use_cuda_kernel=False
+                )
                 vocoder_type = "bigvgan"
             except Exception as e:
-                logger.error(f"Failed to load BigVGAN vocoder: {e}. Falling back to Vocos.")
+                logger.error(
+                    f"Failed to load BigVGAN vocoder: {e}. Falling back to Vocos."
+                )
                 vocoder = Vocos.from_pretrained("charactr/vocos-mel-24khz")
                 vocoder_type = "vocos"
         else:
             vocoder = Vocos.from_pretrained("charactr/vocos-mel-24khz")
             vocoder_type = "vocos"
-            
+
         vocoder.to(self.args.device)
 
         # Get some samples from the eval dataset using its dataloader
@@ -233,7 +279,10 @@ class VAEtrainer(Trainer):
         for i, batch in enumerate(eval_dataloader):
             if "output_audios_srs" in batch:
                 audios_srs = batch["output_audios_srs"]
-                audios_srs = [(audio.to(self.args.device).to(torch.bfloat16), sr) for audio, sr in audios_srs]
+                audios_srs = [
+                    (audio.to(self.args.device).to(torch.bfloat16), sr)
+                    for audio, sr in audios_srs
+                ]
                 break
         # Generate reconstructions
         try:
@@ -241,7 +290,7 @@ class VAEtrainer(Trainer):
                 results = self.model.encode_and_sample(
                     audios_srs=audios_srs,
                     num_steps=16,
-                    temperature=.2,
+                    temperature=0.2,
                     guidance_scale=1.3,
                 )
             # Create visualizations
@@ -265,7 +314,10 @@ class VAEtrainer(Trainer):
 
                 # Convert matplotlib figure to wandb Image
                 images.append(
-                    wandb.Image(fig, caption=f"Sample {idx} - Step {self.state.global_step} - Device {device_id}")
+                    wandb.Image(
+                        fig,
+                        caption=f"Sample {idx} - Step {self.state.global_step} - Device {device_id}",
+                    )
                 )
                 plt.close(fig)
 
@@ -275,15 +327,20 @@ class VAEtrainer(Trainer):
                 valid_mel = mel[: (~pad_mask).sum()]
 
                 # Shape for Vocos/BigVGAN: [B, F, T]
-                features = valid_mel.unsqueeze(0).permute(0, 2, 1).to(torch.bfloat16).to(self.args.device)
-                
+                features = (
+                    valid_mel.unsqueeze(0)
+                    .permute(0, 2, 1)
+                    .to(torch.bfloat16)
+                    .to(self.args.device)
+                )
+
                 if vocoder_type == "bigvgan":
                     # BigVGAN expects exp(mel)
-                    #features = torch.exp(features.float())
+                    # features = torch.exp(features.float())
                     waveform = vocoder(features)
                 else:
                     waveform = vocoder.decode(features)  # [1, samples]
-                
+
                 waveform = waveform.float().squeeze().detach().cpu()
                 # normalize waveform to -1 to 1
                 waveform = waveform / (waveform.abs().max() + 1e-8)
@@ -307,7 +364,9 @@ class VAEtrainer(Trainer):
                         "step": self.state.global_step,
                     }
                 )
-                logger.info(f"Successfully logged {len(images)} reconstruction samples to wandb")
+                logger.info(
+                    f"Successfully logged {len(images)} reconstruction samples to wandb"
+                )
 
         except Exception as e:
             logger.error(f"Failed to generate samples: {e}", exc_info=True)
@@ -350,15 +409,31 @@ class VAEtrainer(Trainer):
         fig, axes = plt.subplots(2, 1, figsize=(12, 8))
 
         # Plot original
-        im1 = axes[0].imshow(original.T, aspect="auto", origin="lower", interpolation="nearest", cmap="viridis")
-        axes[0].set_title(f"Original Mel Spectrogram - Sample {sample_idx} - Device {device_id}")
+        im1 = axes[0].imshow(
+            original.T,
+            aspect="auto",
+            origin="lower",
+            interpolation="nearest",
+            cmap="viridis",
+        )
+        axes[0].set_title(
+            f"Original Mel Spectrogram - Sample {sample_idx} - Device {device_id}"
+        )
         axes[0].set_xlabel("Time")
         axes[0].set_ylabel("Mel Frequency")
         plt.colorbar(im1, ax=axes[0])
 
         # Plot reconstructed
-        im2 = axes[1].imshow(reconstructed.T, aspect="auto", origin="lower", interpolation="nearest", cmap="viridis")
-        axes[1].set_title(f"Reconstructed Mel Spectrogram - Sample {sample_idx} - Device {device_id}")
+        im2 = axes[1].imshow(
+            reconstructed.T,
+            aspect="auto",
+            origin="lower",
+            interpolation="nearest",
+            cmap="viridis",
+        )
+        axes[1].set_title(
+            f"Reconstructed Mel Spectrogram - Sample {sample_idx} - Device {device_id}"
+        )
         axes[1].set_xlabel("Time")
         axes[1].set_ylabel("Mel Frequency")
         plt.colorbar(im2, ax=axes[1])
@@ -412,7 +487,9 @@ def main():
     cfg_root = Path(__file__).resolve().parent / "configs"
     defaults = {
         "training": load_yaml(cfg_root / "defaults" / "train.yaml").get("training", {}),
-        "convformer": load_yaml(cfg_root / "defaults" / "convformer.yaml").get("convformer", {}),
+        "convformer": load_yaml(cfg_root / "defaults" / "convformer.yaml").get(
+            "convformer", {}
+        ),
         "cfm": load_yaml(cfg_root / "defaults" / "cfm.yaml").get("cfm", {}),
     }
     custom = load_yaml(args.exp_config_path)
@@ -456,7 +533,9 @@ def main():
     wandb_project = training_cfg.pop("wandb_project", None)
     wandb_run_name = training_cfg.pop("wandb_run_name", None)
     local_rank = int(os.environ.get("LOCAL_RANK", -1))
-    if training_cfg.get("report_to", "none") == "wandb" and (local_rank == -1 or local_rank == 0):
+    if training_cfg.get("report_to", "none") == "wandb" and (
+        local_rank == -1 or local_rank == 0
+    ):
         wandb.init(
             project=wandb_project,
             name=wandb_run_name,
@@ -475,7 +554,7 @@ def main():
     )
     if mel_spec_config.use_bigvgan_mel:
         logger.info("Using BigVGAN-compatible mel spectrogram")
-        
+
     model = VAE(
         config=VAEConfig(
             encoder_config=encoder_config,
@@ -487,6 +566,7 @@ def main():
     )
 
     training_cfg["learning_rate"] = float(training_cfg.get("learning_rate"))
+    min_learning_rate = float(training_cfg.pop("min_learning_rate", 0.0))
 
     # Add DeepSpeed config if provided
     if args.deepspeed:
@@ -512,6 +592,7 @@ def main():
         train_dataset=train_dataset,
         eval_dataset=test_dataset,
         data_collator=data_collator,
+        min_learning_rate=min_learning_rate,
     )
 
     # Start training

@@ -82,7 +82,7 @@ class Attend(nn.Module):
         self.dropout = float(dropout)
         self.scale = scale
         self.flash = flash and _HAS_FLASH_ATTN  # keep flag for compatibility
-        self.fa_window_size = (window_size, 0) if window_size is not None else (-1, -1)
+        self._window_size = window_size
 
     @staticmethod
     def _normalize_mask(mask: torch.Tensor, S: int) -> torch.Tensor:
@@ -193,8 +193,11 @@ class Attend(nn.Module):
         k_ = k.permute(0, 2, 1, 3).contiguous()
         v_ = v.permute(0, 2, 1, 3).contiguous()
 
-        # self-attention
-        w = self.fa_window_size
+        # Window size: (left, right). Causal → right=0; bidirectional → symmetric.
+        if self._window_size is not None:
+            w = (self._window_size, 0) if causal else (self._window_size, self._window_size)
+        else:
+            w = (-1, -1)
         if Nq == Nk:
             if mask is None:
                 qkv = torch.stack([q_, k_, v_], dim=2)  # [B, S, 3, H, D]
@@ -288,9 +291,8 @@ class ConvPositionEmbed(Module):
         super().__init__()
         assert is_odd(kernel_size)
         groups = default(groups, dim)  # full depthwise conv by default
-        self.causal_pad = kernel_size - 1
         self.dw_conv1d = nn.Sequential(
-            nn.Conv1d(dim, dim, kernel_size, groups=groups, padding=0),
+            nn.Conv1d(dim, dim, kernel_size, groups=groups, padding=kernel_size // 2),
             nn.GELU(),
         )
 
@@ -299,7 +301,6 @@ class ConvPositionEmbed(Module):
             mask = mask[..., None]
             x = x.masked_fill(~mask, 0.0)
         x = rearrange(x, "b n c -> b c n")
-        x = F.pad(x, (self.causal_pad, 0))
         x = self.dw_conv1d(x)
         out = rearrange(x, "b c n -> b n c")
         if exists(mask):
