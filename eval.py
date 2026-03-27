@@ -49,14 +49,15 @@ class UTMOSPredictor:
     def __init__(self, device):
         logger.info("Initializing UTMOSv2 model")
         try:
-            # utmosv2 handles device internally or via torch.device if needed.
-            # We force the model to float32 to avoid issues with global bfloat16 settings.
-            self.model = utmosv2.create_model(pretrained=True)
+            # Force UTMOS model creation on the worker-assigned device.
+            # This avoids multi-GPU workers contending on default cuda:0.
+            self.model = utmosv2.create_model(pretrained=True, device=str(device))
             if hasattr(self.model, "to"):
                 self.model.to(device)
             if hasattr(self.model, "float"):
                 self.model.float()
             self.device = device
+            self.device_str = str(device)
             self.has_utmos = True
             logger.info("UTMOSv2 model loaded successfully.")
         except Exception as e:
@@ -70,7 +71,13 @@ class UTMOSPredictor:
         try:
             # Force float32 context and disable any potential autocast to bfloat16
             with torch.cuda.amp.autocast(enabled=False):
-                mos = self.model.predict(input_path=str(wav_path))
+                # Disable utmosv2 multiprocessing to avoid pickling issues
+                # when running inside our own ProcessPoolExecutor workers.
+                mos = self.model.predict(
+                    input_path=str(wav_path),
+                    device=self.device_str,
+                    num_workers=0,
+                )
                 return float(mos)
         except Exception as e:
             logger.warning(f"UTMOSv2 prediction failed for {wav_path}: {e}")
@@ -83,7 +90,13 @@ class UTMOSPredictor:
         try:
             logger.info(f"Running batch UTMOSv2 prediction on {input_dir}")
             with torch.cuda.amp.autocast(enabled=False):
-                results = self.model.predict(input_dir=str(input_dir))
+                # Disable utmosv2 multiprocessing to avoid pickling issues
+                # when running inside our own ProcessPoolExecutor workers.
+                results = self.model.predict(
+                    input_dir=str(input_dir),
+                    device=self.device_str,
+                    num_workers=0,
+                )
                 # Map basename to MOS score
                 mos_map = {
                     Path(r["file_path"]).name: float(r["predicted_mos"])
@@ -187,7 +200,13 @@ def build_model_from_config(
 def mel_to_audio(
     vocoder: torch.nn.Module, mel: torch.Tensor, device: torch.device, vocoder_type: str = "vocos"
 ) -> torch.Tensor:
-    features = mel.permute(0, 2, 1).to(device)
+    # Keep vocoder input dtype aligned with vocoder parameters to avoid
+    # conv dtype mismatches (e.g., bf16 input vs fp32 bias).
+    if vocoder_type == "bigvgan":
+        target_dtype = next(vocoder.parameters()).dtype
+    else:
+        target_dtype = next(vocoder.backbone.parameters()).dtype
+    features = mel.permute(0, 2, 1).to(device=device, dtype=target_dtype)
     if vocoder_type == "bigvgan":
         waveform = vocoder(features)
     else:
@@ -540,27 +559,28 @@ def evaluate_dataset(
     for sample in results["samples"]:
         orig_wav_name = sample.pop("orig_wav_name", None)
         recon_wav_name = sample.pop("recon_wav_name", None)
+        key = sample["language"] if setting == "OOD" else "all"
 
         if mos_map:
             if original_audio_only:
                 orig_mos = mos_map.get(orig_wav_name)
                 if orig_mos is not None:
                     sample["ref"]["UTMOS"] = round(float(orig_mos), 2)
-                    key = sample["language"] if setting == "OOD" else "all"
-                    per_language[key].setdefault("ref_UTMOS", []).append(float(orig_mos))
             else:
                 orig_mos = mos_map.get(orig_wav_name)
                 recon_mos = mos_map.get(recon_wav_name)
                 if orig_mos is not None and not skip_ref_metrics:
                     sample["ref"]["UTMOS"] = round(float(orig_mos), 2)
-                    # Add to aggregates
-                    key = sample["language"] if setting == "OOD" else "all"
-                    per_language[key].setdefault("ref_UTMOS", []).append(float(orig_mos))
                 if recon_mos is not None:
                     sample["reconstructed"]["UTMOS"] = round(float(recon_mos), 2)
-                    # Add to aggregates
-                    key = sample["language"] if setting == "OOD" else "all"
-                    per_language[key].setdefault("recon_UTMOS", []).append(float(recon_mos))
+        # Always aggregate UTMOS from the final per-sample values.
+        # This covers both computed scores and reference scores loaded from GT.
+        ref_utmos = sample.get("ref", {}).get("UTMOS")
+        recon_utmos = sample.get("reconstructed", {}).get("UTMOS")
+        if ref_utmos is not None:
+            per_language[key].setdefault("ref_UTMOS", []).append(float(ref_utmos))
+        if recon_utmos is not None:
+            per_language[key].setdefault("recon_UTMOS", []).append(float(recon_utmos))
 
     # Calculate final delta for all samples
     for sample in results["samples"]:
@@ -672,8 +692,11 @@ def run_single_eval(
     timeout: int,
     run,
 ) -> Dict[str, Any]:
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_index)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if torch.cuda.is_available():
+        torch.cuda.set_device(gpu_index)
+        device = torch.device(f"cuda:{gpu_index}")
+    else:
+        device = torch.device("cpu")
     set_seed(base_args.get("seed", 42))
 
     baseline_model_name = base_args.get("baseline_model")
@@ -1080,11 +1103,6 @@ def main():
         multi_gpu=args.multi_gpu,
     )
 
-    # summary file
-    if args.baseline_model is None:
-        summary_path = Path(args.output_dir) / args.exp_name / "summary_results.json"
-        save_json(results, summary_path)
-
     # # wandb: upload json metrics, and optionally images
     # if args.report_to == "wandb":
     #     try:
@@ -1130,10 +1148,10 @@ if __name__ == "__main__":
 
 # LibriSpeech test set evaluation with HuBERT ASR:
 # python eval.py \
-#   --config-path /home/ec2-user/MelCausalVAE/configs/settings/libritts-ft.yaml \
-#   --checkpoints /home/ec2-user/MelCausalVAE/checkpoints/MelCausalVAE/libritts-ft-logvar-downsample8X/checkpoint-10000/model.safetensors \
-#   --setting LibriTTS \
+#   --config-path /home/ec2-user/MelCausalVAE/configs/settings/exps/1d.yaml \
+#   --checkpoints /home/ec2-user/MelCausalVAE/checkpoints/exps/1d-8x-NAR-AE/model.safetensors \
+#   --setting LibriSpeech \
 #   --num-samples 250 --batch-size 8 \
-#   --n-steps 12 --temperature 0.8 --guidance-scale 2.3 \
-#   --exp-name libriTTS_eval \
+#   --n-steps 6 --temperature 0.4 --guidance-scale 1.3 \
+#   --exp-name LibriSpeech-exps \
 #   --output-dir /home/ec2-user/MelCausalVAE/evaluation 
