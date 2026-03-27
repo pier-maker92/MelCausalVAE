@@ -12,6 +12,7 @@ from modules.cfm import DiTConfig
 from modules.VAE import VAE, VAEConfig
 from modules.Encoder import ConvformerEncoderConfig
 from modules.melspecEncoder import MelSpectrogramConfig
+from modules.similarity import plot_durations_on_mel
 from transformers import (
     Trainer,
     TrainingArguments,
@@ -66,7 +67,13 @@ class VAEtrainer(Trainer):
         super().__init__(**kwargs)
         self.min_learning_rate = min_learning_rate
         # Register granular losses
-        granular_losses = ["audio_loss", "kl_loss", "mu_mean", "mu_var"]
+        granular_losses = [
+            "audio_loss",
+            "kl_loss",
+            "mu_mean",
+            "mu_var",
+            "z_pooled_fps",
+        ]
         try:
             if getattr(self.model.encoder.config, "semantic_regulation", False):
                 granular_losses.append("semantic_loss")
@@ -100,6 +107,7 @@ class VAEtrainer(Trainer):
             semantic_loss = outputs.get("semantic_loss", None)
             mu_mean = outputs.get("mu_mean")
             mu_var = outputs.get("mu_var")
+            z_pooled_fps = outputs.get("z_pooled_fps")
             loss = (
                 audio_loss
                 + kl_loss
@@ -137,6 +145,14 @@ class VAEtrainer(Trainer):
                     val = val.mean()
                 self.control.granular_losses["mu_var"] += (
                     val.to(self.control.granular_losses["mu_var"].dtype)
+                    / self.args.gradient_accumulation_steps
+                )
+            if z_pooled_fps is not None:
+                val = z_pooled_fps.detach().float()
+                if val.dim() > 0:
+                    val = val.mean()
+                self.control.granular_losses["z_pooled_fps"] += (
+                    val.to(self.control.granular_losses["z_pooled_fps"].dtype)
                     / self.args.gradient_accumulation_steps
                 )
 
@@ -303,6 +319,7 @@ class VAEtrainer(Trainer):
 
             audios = []
             audio_paths = []
+            segmentation_plots = []
             for idx in range(len(audios_srs)):
                 fig = self._create_mel_comparison_plot(
                     original=results["original_mel"][idx],
@@ -320,6 +337,34 @@ class VAEtrainer(Trainer):
                     )
                 )
                 plt.close(fig)
+
+                # Plot durations on mel if available
+                if results.get("durations") is not None and results["durations"][idx] is not None:
+                    durations = results["durations"][idx]
+                    
+                    # Use original_padding_mask for the original mel (before upsampling)
+                    mel_mask = results.get("original_padding_mask", results["padding_mask"])[idx].unsqueeze(0)
+                    
+                    # Get compress_factor_C from model config
+                    compress_factor_C = self.model.config.encoder_config.compress_factor_C
+                    
+                    seg_fig = plot_durations_on_mel(
+                        mels=results["original_mel"][idx].unsqueeze(0),
+                        durations=durations.unsqueeze(0),
+                        mel_mask=mel_mask,
+                        compress_factor_C=compress_factor_C,
+                        batch_idx=0,
+                        step=self.state.global_step,
+                        labels=None,
+                        device_id=device_id,
+                    )
+                    segmentation_plots.append(
+                        wandb.Image(
+                            seg_fig,
+                            caption=f"Segmentation Sample {idx} - Step {self.state.global_step} - Device {device_id}",
+                        )
+                    )
+                    plt.close(seg_fig)
 
                 # Decode reconstructed mel to audio
                 mel = results["reconstructed_mel"][idx]  # [T, F]
@@ -356,14 +401,15 @@ class VAEtrainer(Trainer):
 
             # Log to wandb as a gallery
             if wandb.run is not None:
-                wandb.log(
-                    {
-                        "reconstructions": images,
-                        "reconstructions_audio": audios,
-                        "reconstructions_audio_paths": audio_paths,
-                        "step": self.state.global_step,
-                    }
-                )
+                log_dict = {
+                    "reconstructions": images,
+                    "reconstructions_audio": audios,
+                    "reconstructions_audio_paths": audio_paths,
+                    "step": self.state.global_step,
+                }
+                if segmentation_plots:
+                    log_dict["segmentation_plots"] = segmentation_plots
+                wandb.log(log_dict)
                 logger.info(
                     f"Successfully logged {len(images)} reconstruction samples to wandb"
                 )

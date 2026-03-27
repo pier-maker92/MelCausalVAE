@@ -135,6 +135,7 @@ class VAE(torch.nn.Module):
             target=encoded_audios.audio_features,
             target_padding_mask=encoded_audios.padding_mask,
             context_vector=convformer_output.z,
+            durations=convformer_output.durations,
         ).loss
         mu_mean = convformer_output.mu[~convformer_output.padding_mask].mean()
         mu_var = convformer_output.mu[~convformer_output.padding_mask].var()
@@ -144,6 +145,7 @@ class VAE(torch.nn.Module):
             "semantic_loss": None,  # convformer_output.semantic_loss * 0.1,
             "mu_mean": mu_mean,
             "mu_var": mu_var,
+            "z_pooled_fps": convformer_output.z_pooled_fps,
         }
 
     @torch.no_grad()
@@ -184,6 +186,7 @@ class VAE(torch.nn.Module):
         guidance_scale: float = 1.0,
         z: Optional[torch.Tensor] = None,
         mu: Optional[torch.Tensor] = None,
+        durations: Optional[torch.LongTensor] = None,
         generator: Optional[torch.Generator] = None,
         padding_mask: Optional[torch.BoolTensor] = None,
         std: float = 1.0,
@@ -204,6 +207,7 @@ class VAE(torch.nn.Module):
             temperature=temperature,
             padding_mask=padding_mask,
             context_vector=z,
+            durations=durations,
             guidance_scale=guidance_scale,
             std=std,
         )
@@ -239,6 +243,7 @@ class VAE(torch.nn.Module):
         reconstructed_mel = self.decoder.generate(
             num_steps=num_steps,
             context_vector=convformer_output.z,  # z
+            durations=convformer_output.durations,
             temperature=temperature,
             guidance_scale=guidance_scale,
             generator=generator,
@@ -248,9 +253,30 @@ class VAE(torch.nn.Module):
             original_mel = self.denormalize_mel(original_mel)
             reconstructed_mel = self.denormalize_mel(reconstructed_mel)
 
+        # Build reconstructed padding mask from pooled durations.
+        # Durations are in latent-frame units, so convert with expansion factor.
+        reconstructed_padding_mask = torch.zeros(
+            (reconstructed_mel.shape[0], reconstructed_mel.shape[1]),
+            device=reconstructed_mel.device,
+            dtype=torch.bool,
+        )
+        if convformer_output.durations is not None:
+            expanded_durations = (
+                convformer_output.durations.long()
+                * self.decoder.expansion_factor
+            )
+            valid_lengths = expanded_durations.sum(dim=1).long()
+            for b in range(reconstructed_padding_mask.shape[0]):
+                valid_len = min(
+                    int(valid_lengths[b].item()), reconstructed_padding_mask.shape[1]
+                )
+                reconstructed_padding_mask[b, valid_len:] = True
+
         return {
             "original_mel": original_mel,
             "reconstructed_mel": reconstructed_mel,
             "context_vector": convformer_output.z,
-            "padding_mask": encoded_audios.padding_mask,
+            "padding_mask": reconstructed_padding_mask,
+            "original_padding_mask": encoded_audios.padding_mask,
+            "durations": convformer_output.durations,
         }

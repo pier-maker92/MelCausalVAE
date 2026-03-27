@@ -1,0 +1,52 @@
+# Only specify values that override defaults in configs/defaults/*.yaml
+training:
+  num_train_epochs: 1
+  dataset_name: librispeech_aligned
+  output_dir: checkpoints/exps/1d-8x-NAR-AE-sim-th080
+  learning_rate: 2e-4
+  min_learning_rate: 5e-5
+  per_device_train_batch_size: 24
+  per_device_eval_batch_size: 2
+  report_to: wandb
+  wandb_project: CaDiT-VAE-exps
+  wandb_run_name: 1d-8x-NAR-AE-sim-th080
+  fp16: false
+  bf16: true
+  save_steps: 1000
+  eval_steps: 100
+  save_total_limit: 1
+  gradient_accumulation_steps: 1
+  dataloader_num_workers: 4
+  from_pretrained: /home/ec2-user/MelCausalVAE/checkpoints/exps/1d-8x-NAR-AE/model.safetensors
+
+convformer:
+  compress_factor_C: 8
+  tf_heads: 8
+  tf_layers: 4
+  latent_dim: 64
+  n_residual_blocks: 3
+  logvar_layer: false
+  use_sofplus: false
+  target_std: 0.3
+  kl_loss_warmup_steps: 1
+  kl_loss_weight: 5e-4
+  use_bigvgan_mel: false
+  d_model: 1024
+  use_1d_encoder: true
+  use_similarity: true
+  similarity_threshold: 0.8
+  similarity_threshold_in_01: true
+  freeze_encoder_before_latent_heads: true
+
+cfm:
+  unet_dim: 768
+  unet_depth: 6
+  unet_heads: 12
+  unet_dropout_rate: 0.1
+  use_conv_layer: true
+  audio_latent_dim: 64
+  uncond_prob: 0.15
+  learned_prior: false
+  is_causal: false
+  use_window_attention: true
+  window_attention_seconds: 3.0

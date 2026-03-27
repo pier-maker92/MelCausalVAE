@@ -14,6 +14,7 @@ from modules.Encoder import (
     ConvformerOutput,
     CausalTransformerTail,
 )
+from modules.similarity import SimilarityPoolingBatch
 
 
 # ---------- 1D building blocks ----------
@@ -128,6 +129,25 @@ class ConvformerEncoder1d(SigmaVAEEncoder):
         self.mu = nn.Linear(d_model, latent_dim)
         if config.logvar_layer:
             self.logvar = nn.Linear(d_model, latent_dim)
+        self.similarity_pooler = (
+            SimilarityPoolingBatch(
+                threshold=config.similarity_threshold,
+                threshold_in_01=config.similarity_threshold_in_01,
+            )
+            if config.use_similarity
+            else None
+        )
+        if config.freeze_encoder_before_latent_heads:
+            self._freeze_encoder_before_latent_heads()
+
+    def _freeze_encoder_before_latent_heads(self):
+        for param in self.parameters():
+            param.requires_grad = False
+        for param in self.mu.parameters():
+            param.requires_grad = True
+        if hasattr(self, "logvar"):
+            for param in self.logvar.parameters():
+                param.requires_grad = True
 
     def forward(
         self,
@@ -145,6 +165,24 @@ class ConvformerEncoder1d(SigmaVAEEncoder):
 
         hiddens = x.transpose(1, 2)  # [B, T/C, 512]
         z = self.transformer(hiddens)  # [B, T/C, 512]
+        latent_padding_mask = (
+            self._resize_padding_mask(padding_mask, z.shape[1], dtype=z.dtype)
+            if padding_mask is not None
+            else torch.zeros(
+                (z.shape[0], z.shape[1]), device=z.device, dtype=torch.bool
+            )
+        )
+        durations = None
+        z_pooled_fps = None
+        if self.similarity_pooler is not None:
+            z, durations, pooled_mask = self.similarity_pooler(z, latent_padding_mask.long())
+            latent_padding_mask = pooled_mask.bool()
+            valid_durs = durations[durations > 0].float()
+            if valid_durs.numel() > 0:
+                latent_fps = 93.75 / float(self.C)
+                z_pooled_fps = torch.tensor(
+                    latent_fps, device=z.device, dtype=z.dtype
+                ) / valid_durs.mean()
 
         mu = self.mu(z)
         logvar = None
@@ -161,18 +199,18 @@ class ConvformerEncoder1d(SigmaVAEEncoder):
             kl_loss = self.kl_divergence(
                 mu,
                 logvar,
-                self._resize_padding_mask(padding_mask, mu.shape[1], dtype=z.dtype),
+                latent_padding_mask,
                 dtype=z.dtype,
             ) * self.get_kl_cosine_schedule(kwargs["step"])
 
         return ConvformerOutput(
             z=z,
             kl_loss=kl_loss,
-            padding_mask=self._resize_padding_mask(
-                padding_mask, mu.shape[1], dtype=z.dtype
-            ),
+            padding_mask=latent_padding_mask,
             mu=mu,
             semantic_loss=semantic_loss,
+            durations=durations,
+            z_pooled_fps=z_pooled_fps,
         )
 
 

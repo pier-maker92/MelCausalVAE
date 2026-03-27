@@ -13,5 +13,9 @@ convformer:
   use_classic_decoder: false
   use_bigvgan_mel: false
   use_1d_encoder: false
+  use_similarity: false
+  similarity_threshold: 0.9
+  similarity_threshold_in_01: false
+  freeze_encoder_before_latent_heads: false
 
 

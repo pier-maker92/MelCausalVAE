@@ -13,6 +13,7 @@ from torchdiffeq import odeint
 from dataclasses import dataclass
 from torch.nn import functional as F
 from modules.Decoder import Transformer
+from modules.similarity import SimilarityUpsamplerBatch
 
 
 @dataclass
@@ -133,6 +134,7 @@ class DiT(torch.nn.Module):
             window_size=self.window_size,
         )
         self.transformer.to(dtype=torch.bfloat16)
+        self.upsampler = SimilarityUpsamplerBatch()
         
 
     def reparameterize(self, mu: torch.FloatTensor, std: Optional[float] = None) -> torch.FloatTensor:
@@ -151,17 +153,47 @@ class DiT(torch.nn.Module):
     def handle_context_vector(
         self,
         context_vector: torch.FloatTensor,
+        durations: Optional[torch.LongTensor] = None,
         target: Optional[torch.FloatTensor] = None,
         temperature: Optional[float] = None,
         generator: Optional[torch.Generator] = None,
         std: Optional[float] = None,
     ):
-        #context_vector = self.reparameterize(context_vector, std=std)
-        context_vector = context_vector.repeat_interleave(self.expansion_factor, dim=1)
-        if target is not None:
-            min_length = min(context_vector.shape[1], target.shape[1])
-            context_vector = context_vector[:, :min_length, :]
-            target = target[:, :min_length, :]
+        # Use durations if provided (similarity pooling case)
+        upsampled_padding_mask = None
+        if durations is not None:
+            # Durations from similarity pooling are in latent-frame units.
+            # Convert them to mel-frame units for CFM timeline restoration.
+            expanded_durations = (durations * self.expansion_factor).long()
+            # Compute target length from target or from durations
+            if target is not None:
+                target_T = torch.tensor(
+                    [target.shape[1]] * target.shape[0],
+                    device=context_vector.device,
+                    dtype=torch.long,
+                )
+            else:
+                target_T = expanded_durations.sum(dim=1)
+            
+            context_vector, upsampled_mask = self.upsampler(
+                context_vector, expanded_durations, target_T=target_T
+            )
+            # Convert mask from 0/1 to bool (0=valid, 1=padding -> False=valid, True=padding)
+            upsampled_padding_mask = upsampled_mask.bool()
+            
+            # Truncate to match target if needed
+            if target is not None:
+                min_length = min(context_vector.shape[1], target.shape[1])
+                context_vector = context_vector[:, :min_length, :]
+                target = target[:, :min_length, :]
+                upsampled_padding_mask = upsampled_padding_mask[:, :min_length]
+        else:
+            # Original behavior: uniform repeat_interleave
+            context_vector = context_vector.repeat_interleave(self.expansion_factor, dim=1)
+            if target is not None:
+                min_length = min(context_vector.shape[1], target.shape[1])
+                context_vector = context_vector[:, :min_length, :]
+                target = target[:, :min_length, :]
 
         if self.learned_prior:
             raise ValueError("Learned prior is not supported")
@@ -178,7 +210,7 @@ class DiT(torch.nn.Module):
                 )
                 * temperature
             )
-        return self.context_vector_proj(context_vector), prior
+        return self.context_vector_proj(context_vector), prior, upsampled_padding_mask
 
     def prepare_flow(
         self,
@@ -241,9 +273,12 @@ class DiT(torch.nn.Module):
         target: torch.FloatTensor,
         target_padding_mask: torch.BoolTensor,
         context_vector: torch.FloatTensor,
+        durations: Optional[torch.LongTensor] = None,
         **kwargs,
     ):
-        context_vector, prior = self.handle_context_vector(context_vector, target)
+        context_vector, prior, _ = self.handle_context_vector(
+            context_vector, durations=durations, target=target
+        )
 
         # ---- flow ----
         state, times, v_target = self.prepare_flow(
@@ -263,6 +298,7 @@ class DiT(torch.nn.Module):
         self,
         num_steps: int,
         context_vector: torch.FloatTensor,
+        durations: Optional[torch.LongTensor] = None,
         padding_mask: Optional[torch.BoolTensor] = None,
         temperature: float = 1.0,
         guidance_scale: float = 1.0,
@@ -271,11 +307,15 @@ class DiT(torch.nn.Module):
     ):
         cfg_scale = guidance_scale
         # ---- context vector z ----
-        context_vector, y0 = self.handle_context_vector(
-            context_vector, temperature=temperature, generator=generator, std=std
+        context_vector, y0, upsampled_padding_mask = self.handle_context_vector(
+            context_vector, durations=durations, temperature=temperature, generator=generator, std=std
         )
         B, T = context_vector.shape[:2]
-        if padding_mask is None:
+        
+        # Use upsampled padding mask if durations were provided
+        if upsampled_padding_mask is not None:
+            padding_mask = upsampled_padding_mask
+        elif padding_mask is None:
             if B == 1:
                 padding_mask = torch.zeros(
                     (1, T),
@@ -285,7 +325,25 @@ class DiT(torch.nn.Module):
             else:
                 raise ValueError("Padding mask is required for batch size > 1")
         else:
-            padding_mask = padding_mask.repeat_interleave(self.expansion_factor, dim=1)
+            # Only repeat_interleave if we didn't use durations
+            if durations is None:
+                padding_mask = padding_mask.repeat_interleave(self.expansion_factor, dim=1)
+        
+        # Ensure padding_mask matches the temporal dimension of y0 and context_vector
+        if padding_mask.shape[1] != y0.shape[1]:
+            # Adjust mask to match y0 length
+            if padding_mask.shape[1] < y0.shape[1]:
+                # Pad mask with False (valid)
+                padding_extension = torch.zeros(
+                    (B, y0.shape[1] - padding_mask.shape[1]),
+                    device=padding_mask.device,
+                    dtype=padding_mask.dtype,
+                )
+                padding_mask = torch.cat([padding_mask, padding_extension], dim=1)
+            else:
+                # Truncate mask
+                padding_mask = padding_mask[:, :y0.shape[1]]
+                
         self.transformer.to(device=context_vector.device, dtype=context_vector.dtype)
 
         # ---- time span ----
