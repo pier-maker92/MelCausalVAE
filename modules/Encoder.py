@@ -52,6 +52,88 @@ class ConvformerEncoderConfig(SigmaVAEencoderConfig):
     similarity_threshold_in_01: bool = False
     freeze_encoder_before_latent_heads: bool = False
     d_model: int = 512
+    # Latent ablations (independent toggles): chunk size 2, linear schedule along chunk index.
+    latent_chunk_ablate_dropout: bool = False
+    latent_chunk_ablate_kl: bool = False
+    latent_chunk_size: int = 2
+    latent_chunk_dropout_start: float = 0.0
+    latent_chunk_dropout_end: float = 0.8
+    latent_chunk_kl_weight_start: float = 1e-10
+    latent_chunk_kl_weight_end: float = 1e-2
+
+
+def _assert_latent_chunks_divisible(latent_dim: int, chunk_size: int) -> None:
+    assert latent_dim % chunk_size == 0, (
+        f"latent_dim ({latent_dim}) must be divisible by latent_chunk_size ({chunk_size})"
+    )
+
+
+def latent_chunk_dropout_probs(
+    *,
+    num_chunks: int,
+    start_p: float,
+    end_p: float,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """Per-chunk dropout probability (drop whole chunk), linear from start to end."""
+    if num_chunks <= 0:
+        raise ValueError("num_chunks must be positive")
+    if num_chunks == 1:
+        return torch.tensor([start_p], device=device, dtype=dtype)
+    return torch.linspace(start_p, end_p, num_chunks, device=device, dtype=dtype)
+
+
+def apply_latent_chunk_dropout(
+    z: torch.Tensor,
+    *,
+    chunk_size: int,
+    dropout_start: float,
+    dropout_end: float,
+    training: bool,
+) -> torch.Tensor:
+    """
+    Zero out entire channel chunks with a per-chunk probability linear in chunk index.
+    z: [B, T, latent_dim]
+    """
+    if not training:
+        return z
+    B, T, D = z.shape
+    _assert_latent_chunks_divisible(D, chunk_size)
+    n_chunks = D // chunk_size
+    probs = latent_chunk_dropout_probs(
+        num_chunks=n_chunks,
+        start_p=dropout_start,
+        end_p=dropout_end,
+        device=z.device,
+        dtype=z.dtype,
+    )
+    zv = z.view(B, T, n_chunks, chunk_size)
+    # keep with probability (1 - p_i) per batch row and chunk (shared across T)
+    u = torch.rand(B, 1, n_chunks, 1, device=z.device, dtype=z.dtype)
+    keep = u >= probs.view(1, 1, n_chunks, 1)
+    return (zv * keep).view(B, T, D)
+
+
+def latent_chunk_kl_channel_weights(
+    *,
+    latent_dim: int,
+    chunk_size: int,
+    weight_start: float,
+    weight_end: float,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """[latent_dim] weights (same for both channels in each chunk), linear across chunks."""
+    _assert_latent_chunks_divisible(latent_dim, chunk_size)
+    n_chunks = latent_dim // chunk_size
+    if n_chunks == 1:
+        chunk_w = torch.tensor([weight_start], device=device, dtype=dtype)
+    else:
+        chunk_w = torch.linspace(
+            weight_start, weight_end, n_chunks, device=device, dtype=dtype
+        )
+    return chunk_w.repeat_interleave(chunk_size)
 
 
 class SigmaVAEEncoder(nn.Module):
@@ -98,6 +180,29 @@ class SigmaVAEEncoder(nn.Module):
         logvar_valid = logvar[~padding_mask].to(dtype)
         kl = -0.5 * torch.sum(1 + logvar_valid - mu_valid.pow(2) - logvar_valid.exp())
         return kl.to(mu.dtype)
+
+    def kl_divergence_weighted(
+        self,
+        mu: torch.FloatTensor,
+        logvar: Optional[torch.FloatTensor],
+        padding_mask: torch.BoolTensor,
+        dtype: torch.dtype,
+        channel_weights: torch.Tensor,
+    ) -> torch.FloatTensor:
+        """
+        Same KL as kl_divergence but each latent dimension is scaled by channel_weights [latent_dim].
+        When weights are all 1.0, matches kl_divergence (up to dtype handling).
+        """
+        w = channel_weights.to(device=mu.device, dtype=dtype).view(1, 1, -1)
+        valid = (~padding_mask).unsqueeze(-1).to(dtype=dtype)
+        if logvar is None:
+            mu_f = mu.to(dtype)
+            denom = (valid.sum() * mu.shape[-1]).clamp(min=1.0)
+            return (mu_f.pow(2) * w * valid).sum() / denom
+        mu_f = mu.to(dtype)
+        logvar_f = logvar.to(dtype)
+        kl_elem = -0.5 * (1 + logvar_f - mu_f.pow(2) - logvar_f.exp())
+        return (kl_elem * w * valid).sum().to(mu.dtype)
 
     def sample_scalar_std(self, mu: torch.FloatTensor) -> torch.FloatTensor:
         return self.std_activation(
@@ -360,6 +465,8 @@ class ConvformerEncoder(SigmaVAEEncoder):
             if config.use_similarity
             else None
         )
+        if config.latent_chunk_ablate_dropout or config.latent_chunk_ablate_kl:
+            _assert_latent_chunks_divisible(config.latent_dim, config.latent_chunk_size)
         if config.freeze_encoder_before_latent_heads:
             self._freeze_encoder_before_latent_heads()
 
@@ -419,6 +526,15 @@ class ConvformerEncoder(SigmaVAEEncoder):
 
         z = self.reparameterize(mu, logvar)
 
+        if self.config.latent_chunk_ablate_dropout:
+            z = apply_latent_chunk_dropout(
+                z,
+                chunk_size=self.config.latent_chunk_size,
+                dropout_start=self.config.latent_chunk_dropout_start,
+                dropout_end=self.config.latent_chunk_dropout_end,
+                training=self.training,
+            )
+
         semantic_loss = None
         if kwargs.get("semantic_guidance", None) is not None:
             raise NotImplementedError("Semantic guidance is not implemented yet")
@@ -431,12 +547,30 @@ class ConvformerEncoder(SigmaVAEEncoder):
 
         kl_loss = None
         if kwargs.get("step", None) is not None:
-            kl_loss = self.kl_divergence(
-                mu,
-                logvar,
-                latent_padding_mask,
-                dtype=z.dtype,
-            ) * self.get_kl_cosine_schedule(kwargs["step"])
+            if self.config.latent_chunk_ablate_kl:
+                ch_w = latent_chunk_kl_channel_weights(
+                    latent_dim=self.config.latent_dim,
+                    chunk_size=self.config.latent_chunk_size,
+                    weight_start=self.config.latent_chunk_kl_weight_start,
+                    weight_end=self.config.latent_chunk_kl_weight_end,
+                    device=z.device,
+                    dtype=torch.float32,
+                )
+                kl_term = self.kl_divergence_weighted(
+                    mu,
+                    logvar,
+                    latent_padding_mask,
+                    dtype=torch.float32,
+                    channel_weights=ch_w,
+                )
+            else:
+                kl_term = self.kl_divergence(
+                    mu,
+                    logvar,
+                    latent_padding_mask,
+                    dtype=z.dtype,
+                )
+            kl_loss = kl_term * self.get_kl_cosine_schedule(kwargs["step"])
 
         return ConvformerOutput(
             z=z,

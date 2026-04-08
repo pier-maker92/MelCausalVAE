@@ -13,6 +13,9 @@ from modules.Encoder import (
     ConvformerEncoderConfig,
     ConvformerOutput,
     CausalTransformerTail,
+    _assert_latent_chunks_divisible,
+    apply_latent_chunk_dropout,
+    latent_chunk_kl_channel_weights,
 )
 from modules.similarity import SimilarityPoolingBatch
 
@@ -137,6 +140,8 @@ class ConvformerEncoder1d(SigmaVAEEncoder):
             if config.use_similarity
             else None
         )
+        if config.latent_chunk_ablate_dropout or config.latent_chunk_ablate_kl:
+            _assert_latent_chunks_divisible(config.latent_dim, config.latent_chunk_size)
         if config.freeze_encoder_before_latent_heads:
             self._freeze_encoder_before_latent_heads()
 
@@ -190,18 +195,45 @@ class ConvformerEncoder1d(SigmaVAEEncoder):
             logvar = self.logvar(z)
         z = self.reparameterize(mu, logvar)
 
+        if self.config.latent_chunk_ablate_dropout:
+            z = apply_latent_chunk_dropout(
+                z,
+                chunk_size=self.config.latent_chunk_size,
+                dropout_start=self.config.latent_chunk_dropout_start,
+                dropout_end=self.config.latent_chunk_dropout_end,
+                training=self.training,
+            )
+
         semantic_loss = None
         if kwargs.get("semantic_guidance", None) is not None:
             raise NotImplementedError("Semantic guidance is not implemented yet")
 
         kl_loss = None
         if kwargs.get("step", None) is not None:
-            kl_loss = self.kl_divergence(
-                mu,
-                logvar,
-                latent_padding_mask,
-                dtype=z.dtype,
-            ) * self.get_kl_cosine_schedule(kwargs["step"])
+            if self.config.latent_chunk_ablate_kl:
+                ch_w = latent_chunk_kl_channel_weights(
+                    latent_dim=self.config.latent_dim,
+                    chunk_size=self.config.latent_chunk_size,
+                    weight_start=self.config.latent_chunk_kl_weight_start,
+                    weight_end=self.config.latent_chunk_kl_weight_end,
+                    device=z.device,
+                    dtype=torch.float32,
+                )
+                kl_term = self.kl_divergence_weighted(
+                    mu,
+                    logvar,
+                    latent_padding_mask,
+                    dtype=torch.float32,
+                    channel_weights=ch_w,
+                )
+            else:
+                kl_term = self.kl_divergence(
+                    mu,
+                    logvar,
+                    latent_padding_mask,
+                    dtype=z.dtype,
+                )
+            kl_loss = kl_term * self.get_kl_cosine_schedule(kwargs["step"])
 
         return ConvformerOutput(
             z=z,

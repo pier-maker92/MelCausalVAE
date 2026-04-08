@@ -113,6 +113,12 @@ class VAE(torch.nn.Module):
         if self.config.add_semantic_mapper:
             self.semantic_mapper.to(device=device)
 
+    def _encoder_temporal_upsample_factor(self) -> int:
+        """Mel time steps per latent time step (matches DiT.generate / classic decoder)."""
+        if self.config.use_classic_decoder:
+            return int(self.config.encoder_config.compress_factor_C)
+        return int(self.decoder.expansion_factor)
+
     def from_pretrained(self, checkpoint_path: str):
         state_dict = safetensors.torch.load_file(checkpoint_path)
         self.load_state_dict(state_dict, strict=False)
@@ -253,24 +259,31 @@ class VAE(torch.nn.Module):
             original_mel = self.denormalize_mel(original_mel)
             reconstructed_mel = self.denormalize_mel(reconstructed_mel)
 
-        # Build reconstructed padding mask from pooled durations.
-        # Durations are in latent-frame units, so convert with expansion factor.
+        # Padding mask for reconstructed mel: must match decoder.generate / logging.
+        # With similarity pooling, use expanded durations; otherwise upsample latent mask
+        # (same repeat_interleave as DiT.generate when durations is None).
+        B, Tm, _ = reconstructed_mel.shape
+        device = reconstructed_mel.device
+        ef = self._encoder_temporal_upsample_factor()
         reconstructed_padding_mask = torch.zeros(
-            (reconstructed_mel.shape[0], reconstructed_mel.shape[1]),
-            device=reconstructed_mel.device,
-            dtype=torch.bool,
+            (B, Tm), device=device, dtype=torch.bool
         )
         if convformer_output.durations is not None:
-            expanded_durations = (
-                convformer_output.durations.long()
-                * self.decoder.expansion_factor
-            )
+            expanded_durations = convformer_output.durations.long() * ef
             valid_lengths = expanded_durations.sum(dim=1).long()
-            for b in range(reconstructed_padding_mask.shape[0]):
-                valid_len = min(
-                    int(valid_lengths[b].item()), reconstructed_padding_mask.shape[1]
-                )
+            for b in range(B):
+                valid_len = min(int(valid_lengths[b].item()), Tm)
                 reconstructed_padding_mask[b, valid_len:] = True
+        else:
+            pm = convformer_output.padding_mask.repeat_interleave(ef, dim=1)
+            if pm.shape[1] < Tm:
+                extension = torch.zeros(
+                    B, Tm - pm.shape[1], device=device, dtype=torch.bool
+                )
+                pm = torch.cat([pm, extension], dim=1)
+            else:
+                pm = pm[:, :Tm]
+            reconstructed_padding_mask = pm
 
         return {
             "original_mel": original_mel,

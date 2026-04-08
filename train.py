@@ -324,7 +324,8 @@ class VAEtrainer(Trainer):
                 fig = self._create_mel_comparison_plot(
                     original=results["original_mel"][idx],
                     reconstructed=results["reconstructed_mel"][idx],
-                    padding_mask=results["padding_mask"][idx],
+                    original_padding_mask=results["original_padding_mask"][idx],
+                    reconstructed_padding_mask=results["padding_mask"][idx],
                     sample_idx=idx,
                     device_id=device_id,
                 )
@@ -368,8 +369,11 @@ class VAEtrainer(Trainer):
 
                 # Decode reconstructed mel to audio
                 mel = results["reconstructed_mel"][idx]  # [T, F]
-                pad_mask = results["padding_mask"][idx]  # [T]
-                valid_mel = mel[: (~pad_mask).sum()]
+                pad_mask = results["padding_mask"][idx]  # [T] True = padded
+                T = min(mel.shape[0], pad_mask.shape[0])
+                mel = mel[:T]
+                pad_mask = pad_mask[:T]
+                valid_mel = mel[~pad_mask]
 
                 # Shape for Vocos/BigVGAN: [B, F, T]
                 features = (
@@ -421,7 +425,8 @@ class VAEtrainer(Trainer):
         self,
         original: torch.Tensor,
         reconstructed: torch.Tensor,
-        padding_mask: torch.Tensor,
+        original_padding_mask: torch.Tensor,
+        reconstructed_padding_mask: torch.Tensor,
         sample_idx: int,
         device_id: int,
     ):
@@ -431,7 +436,8 @@ class VAEtrainer(Trainer):
         Args:
             original: Original mel spectrogram [T, F]
             reconstructed: Reconstructed mel spectrogram [T, F]
-            padding_mask: Padding mask [T]
+            original_padding_mask: True where original mel is padded [T_orig]
+            reconstructed_padding_mask: True where reconstructed mel is padded [T_recon]
             sample_idx: Index of the sample
 
         Returns:
@@ -440,16 +446,16 @@ class VAEtrainer(Trainer):
         # Move to CPU and convert to numpy
         original = original.float().detach().cpu().numpy()
         reconstructed = reconstructed.float().detach().cpu().numpy()
-        padding_mask = padding_mask.detach().cpu().numpy()
+        om = original_padding_mask.detach().cpu().numpy().astype(bool)
+        rm = reconstructed_padding_mask.detach().cpu().numpy().astype(bool)
 
-        min_length = min(original.shape[0], reconstructed.shape[0])
-        original = original[:min_length]
-        reconstructed = reconstructed[:min_length]
-        padding_mask = padding_mask[:min_length]
-
-        # Mask padded regions
-        original = original.copy()[~padding_mask]
-        reconstructed = reconstructed.copy()[~padding_mask]
+        # Each spectrogram uses its own mask (lengths may differ after pooling / decoder).
+        To, Fo = original.shape[0], original.shape[1]
+        Tr, Fr = reconstructed.shape[0], reconstructed.shape[1]
+        om = om[:To]
+        rm = rm[:Tr]
+        original = original[~om]
+        reconstructed = reconstructed[~rm]
 
         # Create figure with 2 subplots
         fig, axes = plt.subplots(2, 1, figsize=(12, 8))

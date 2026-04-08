@@ -17,5 +17,14 @@ convformer:
   similarity_threshold: 0.9
   similarity_threshold_in_01: false
   freeze_encoder_before_latent_heads: false
+  # Latent ablations (toggle independently or together). Chunks are contiguous
+  # channel groups of size latent_chunk_size (default 2 for dims [0:2), [2:4), ...).
+  latent_chunk_ablate_dropout: false
+  latent_chunk_ablate_kl: false
+  latent_chunk_size: 2
+  latent_chunk_dropout_start: 0.0
+  latent_chunk_dropout_end: 0.8
+  latent_chunk_kl_weight_start: 1.0e-10
+  latent_chunk_kl_weight_end: 1.0e-2
 
 
