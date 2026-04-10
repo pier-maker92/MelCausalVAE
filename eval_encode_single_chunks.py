@@ -21,6 +21,11 @@ Con ``--mean`` e ``--target-audio``: media temporale dei chunk del target e
 ``repeat_interleave`` su tutti i frame del latent dell'input; **nessun** crop
 al più corto tra le due tracce (comanda la lunghezza dell'input).
 
+Per default il decode usa ``mu`` (latente deterministico), non il campione ``z``
+da reparameterize: con ``logvar_layer: false`` il vecchio comportamento aggiunge
+rumore casuale e può degradare molto la qualità. Usa ``--stochastic-latent``
+per forzare ``z`` come in training.
+
 Example:
   python eval_encode_single_chunks.py \\
     --config-path path/to/exp.yaml \\
@@ -293,15 +298,21 @@ class _LatentPaddingView:
 
 
 def _encode_audio_to_latent(
-    model: VAE, audio_tensor: torch.Tensor, target_sr: int
+    model: VAE, audio_tensor: torch.Tensor, target_sr: int, *, use_sample_z: bool
 ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
-    """Returns ``z``, ``padding_mask``, ``durations`` (or None)."""
+    """
+    Returns ``latent``, ``padding_mask``, ``durations``.
+
+    ``latent`` is ``conv_out.z`` (stochastic) if ``use_sample_z`` else ``mu``
+    (deterministic; migliore per reconstruction in eval).
+    """
     audios_srs = [(audio_tensor, target_sr)]
     encoded = model.wav2mel(audios_srs)
     mel = encoded.audio_features.to(model.dtype)
     pad = encoded.padding_mask
     conv_out = model.encoder(x=mel, padding_mask=pad, step=None)
-    return conv_out.z, conv_out.padding_mask, conv_out.durations
+    latent = conv_out.z if use_sample_z else conv_out.mu
+    return latent, conv_out.padding_mask, conv_out.durations
 
 
 def reconstructed_mel_padding_mask(
@@ -346,6 +357,7 @@ def run(
     device: torch.device,
     target_audio_tensor: Optional[torch.Tensor] = None,
     mean_fill: bool = False,
+    stochastic_latent: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Returns (full_mel_bf16 [1,T,F], trimmed_mel for vocoder [1,T_valid,F]).
@@ -358,14 +370,20 @@ def run(
     If ``mean_fill`` (con swap): media del target sui chunk selezionati lungo ``T``,
     poi ``repeat_interleave`` su tutti i frame del latent di input; maschere/durate
     restano quelle dell'input (lunghezza comandata dall'input).
+
+    Se ``stochastic_latent`` è False (default), usa ``mu`` invece di ``z`` dopo
+    l'encoder (reconstruction più pulita).
     """
     latent_dim = model.config.encoder_config.latent_dim
+    use_z = stochastic_latent
 
     if target_audio_tensor is not None:
         z_src, pad_src, dur_src = _encode_audio_to_latent(
-            model, audio_tensor, target_sr
+            model, audio_tensor, target_sr, use_sample_z=use_z
         )
-        z_tgt, _, _ = _encode_audio_to_latent(model, target_audio_tensor, target_sr)
+        z_tgt, _, _ = _encode_audio_to_latent(
+            model, target_audio_tensor, target_sr, use_sample_z=use_z
+        )
 
         if mean_fill:
             z = mean_interleave_chunk_swap(
@@ -403,7 +421,7 @@ def run(
             conv_for_recon = _LatentPaddingView(pad_src, dur_src)
     else:
         z_src, pad_src, dur_src = _encode_audio_to_latent(
-            model, audio_tensor, target_sr
+            model, audio_tensor, target_sr, use_sample_z=use_z
         )
         z = mask_latent_chunk_range(
             z_src,
@@ -422,8 +440,7 @@ def run(
         temperature=temperature,
         guidance_scale=guidance_scale,
     )
-    if model.config.mel_spec_config.normalize:
-        recon = model.denormalize_mel(recon)
+    # ``VAE.sample`` denormalizza già se ``mel_spec_config.normalize`` (non ripetere qui).
 
     rmask = reconstructed_mel_padding_mask(model, conv_for_recon, recon)
     T = min(recon.shape[1], rmask.shape[1])
@@ -519,6 +536,12 @@ def parse_args() -> argparse.Namespace:
         "lungo il tempo, poi repeat_interleave su tutti i frame del latent dell'input. "
         "La lunghezza temporale segue solo l'input (nessun crop source/target al minimo).",
     )
+    p.add_argument(
+        "--stochastic-latent",
+        action="store_true",
+        help="Usa il campione z (reparameterize) invece di mu. Default: mu, per "
+        "reconstruction più stabile (importante con logvar_layer false / Sigma-VAE).",
+    )
     return p.parse_args()
 
 
@@ -607,6 +630,7 @@ def main() -> None:
         device=device,
         target_audio_tensor=wav_tgt,
         mean_fill=args.mean,
+        stochastic_latent=args.stochastic_latent,
     )
 
     waveform = mel_to_audio(vocoder, mel_valid, device, vocoder_type)
@@ -618,6 +642,8 @@ def main() -> None:
         mode_parts.append("swap")
     if args.mean:
         mode_parts.append("mean")
+    if args.stochastic_latent:
+        mode_parts.append("stochz")
     mode_tag = ("_" + "_".join(mode_parts)) if mode_parts else ""
     out_name = (
         f"{stem}{mode_tag}_chunks{start_c}-{end_c}_of{max_chunks}_"
@@ -626,10 +652,11 @@ def main() -> None:
     out_path = out_dir / out_name
     save_wav(out_path, waveform, sr=encoder_sr)
     logger.info(
-        "Saved %s (swap=%s, mean_fill=%s, chunks [%s, %s] / %s, chunk_size=%s, latent_dim=%s)",
+        "Saved %s (swap=%s, mean_fill=%s, stochastic_latent=%s, chunks [%s, %s] / %s, chunk_size=%s, latent_dim=%s)",
         out_path,
         args.target_audio is not None,
         args.mean,
+        args.stochastic_latent,
         start_c,
         end_c,
         max_chunks,
@@ -640,3 +667,21 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+# single audio
+
+# python eval_encode_single_chunks.py \
+#     --config-path configs/settings/bottleneck-ablations/dropout_eval.yaml \
+#     --checkpoint checkpoints/ablations/dropout-5-epochs/model.safetensors \
+#     --input-audio cond_male.wav \
+#     --start-chunk 0 --end-chunk 31 \
+#     --n-steps 16 --temperature 0.2 --guidance-scale 1.3
+
+# swap with target audio
+# python eval_encode_single_chunks.py \
+#     --config-path configs/settings/bottleneck-ablations/dropout.yaml \
+#     --checkpoint checkpoints/ablations/dropout-5-epochs/model.safetensors \
+#     --input-audio cond_male.wav \
+#     --target-audio female.wav \
+#     --start-chunk 6 --end-chunk 31 \
+#     --n-steps 16 --temperature 0.3 --guidance-scale 1.9

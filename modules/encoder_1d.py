@@ -202,6 +202,7 @@ class ConvformerEncoder1d(SigmaVAEEncoder):
                 dropout_start=self.config.latent_chunk_dropout_start,
                 dropout_end=self.config.latent_chunk_dropout_end,
                 training=self.training,
+                hierarchical=self.config.latent_chunk_dropout_hierarchical,
             )
 
         semantic_loss = None

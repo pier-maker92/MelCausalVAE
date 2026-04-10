@@ -33,7 +33,7 @@ convformer:
   use_bigvgan_mel: false
   d_model: 1024
   use_1d_encoder: true
-  latent_chunk_ablate_dropout: true
+  latent_chunk_ablate_dropout: false
   latent_chunk_ablate_kl: false
   latent_chunk_dropout_hierarchical: false
 
