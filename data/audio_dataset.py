@@ -259,12 +259,13 @@ class TestDatasetWrapper(SimpleAudioDataset):
         transcription = (
             data.get("text_normalized")
             or data.get("transcript")
+            or data.get("text")
             or "transcript"
         )
         self._process_transcription(data_dict, transcription)
 
         data_dict["language"] = data.get("language", "en")
-        data_dict["ids"] = data.get("id")
+        data_dict["ids"] = data.get("id", idx)
         return data_dict
 
     def _process_transcription(self, data_dict, transcription):

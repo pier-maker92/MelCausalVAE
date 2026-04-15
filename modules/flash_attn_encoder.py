@@ -6,14 +6,24 @@ import torch.nn.functional as F
 
 # public API functions per README:
 # flash_attn_qkvpacked_func(qkv, dropout_p=0.0, softmax_scale=None, causal=False, ...)
-# flash_attn_func(q, k, v, dropout_p=0.0, softmax_scale=None, causal=False, ...)
-from flash_attn import flash_attn_qkvpacked_func, flash_attn_func
 
-_HAS_FLASH = True
-# except Exception:
-#     flash_attn_qkvpacked_func = None
-#     flash_attn_func = None
-#     _HAS_FLASH = False
+
+def _mps_is_available() -> bool:
+    mps = getattr(torch.backends, "mps", None)
+    return mps is not None and bool(mps.is_available())
+
+
+_HAS_FLASH = False
+flash_attn_qkvpacked_func = None  # type: ignore[assignment]
+flash_attn_func = None  # type: ignore[assignment]
+
+if not _mps_is_available():
+    try:
+        from flash_attn import flash_attn_qkvpacked_func, flash_attn_func
+
+        _HAS_FLASH = True
+    except ImportError:
+        pass
 
 
 class FlashMultiheadAttention(nn.Module):
@@ -43,7 +53,12 @@ class FlashMultiheadAttention(nn.Module):
         self.v_proj = nn.Linear(embed_dim, embed_dim, bias=True)
         self.out_proj = nn.Linear(embed_dim, embed_dim, bias=True)
 
-    def forward(self, x: torch.Tensor, key_padding_mask: torch.Tensor = None, causal: bool = False):
+    def forward(
+        self,
+        x: torch.Tensor,
+        key_padding_mask: torch.Tensor = None,
+        causal: bool = False,
+    ):
         """
         x: [B, T, E]
         key_padding_mask: optional [B, T] bool tensor where True indicates padding positions (will be masked)
@@ -70,7 +85,9 @@ class FlashMultiheadAttention(nn.Module):
             # Ensure inputs to flash-attn are in a supported dtype (fp16/bf16)
             if q.dtype not in (torch.float16, torch.bfloat16):
                 target_dtype = (
-                    torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float16
+                    torch.bfloat16
+                    if torch.cuda.is_available() and torch.cuda.is_bf16_supported()
+                    else torch.float16
                 )
                 q = q.to(target_dtype)
                 k = k.to(target_dtype)
@@ -105,7 +122,9 @@ class FlashMultiheadAttention(nn.Module):
                 pad_mask = key_padding_mask.to(device=x.device)  # True = pad
                 # invert so keep_mask = 1 on valid tokens
                 keep_mask = (~pad_mask).to(k.dtype)  # [B, T], 1.0 for valid
-                keep_mask = keep_mask.view(B, T, 1, 1)  # broadcast over heads & head_dim
+                keep_mask = keep_mask.view(
+                    B, T, 1, 1
+                )  # broadcast over heads & head_dim
                 k = k * keep_mask
                 v = v * keep_mask
                 qkv = torch.stack([q, k, v], dim=2).contiguous()
@@ -136,7 +155,9 @@ class FlashMultiheadAttention(nn.Module):
             qk = qk.masked_fill(mask, float("-inf"))
 
         if causal:
-            causal_mask = torch.triu(torch.ones((T, T), device=x.device, dtype=torch.bool), diagonal=1)
+            causal_mask = torch.triu(
+                torch.ones((T, T), device=x.device, dtype=torch.bool), diagonal=1
+            )
             qk = qk.masked_fill(causal_mask.unsqueeze(0).unsqueeze(0), float("-inf"))
 
         w = F.softmax(qk, dim=-1)
@@ -151,7 +172,9 @@ class FlashMultiheadAttention(nn.Module):
 class FlashTransformerEncoderLayer(nn.Module):
     """Transformer Encoder Layer using FlashMultiheadAttention."""
 
-    def __init__(self, d_model=512, nhead=8, dim_feedforward=None, dropout=0.1, norm_first=True):
+    def __init__(
+        self, d_model=512, nhead=8, dim_feedforward=None, dropout=0.1, norm_first=True
+    ):
         super().__init__()
         if dim_feedforward is None:
             dim_feedforward = d_model * 4
@@ -165,7 +188,12 @@ class FlashTransformerEncoderLayer(nn.Module):
         self.dropout2 = nn.Dropout(dropout)
         self.activation = F.gelu
 
-    def forward(self, src: torch.Tensor, src_key_padding_mask: torch.Tensor = None, causal: bool = False):
+    def forward(
+        self,
+        src: torch.Tensor,
+        src_key_padding_mask: torch.Tensor = None,
+        causal: bool = False,
+    ):
         """
         src: [B, T, d_model]
         src_key_padding_mask: [B, T] bool (True means pad)
@@ -195,12 +223,19 @@ class FlashTransformerEncoder(nn.Module):
         super().__init__()
         self.layers = nn.ModuleList(
             [
-                FlashTransformerEncoderLayer(d_model=d_model, nhead=nhead, dropout=drop_p, norm_first=True)
+                FlashTransformerEncoderLayer(
+                    d_model=d_model, nhead=nhead, dropout=drop_p, norm_first=True
+                )
                 for _ in range(nlayers)
             ]
         )
 
-    def forward(self, tokens: torch.Tensor, src_key_padding_mask: torch.Tensor = None, causal: bool = False):
+    def forward(
+        self,
+        tokens: torch.Tensor,
+        src_key_padding_mask: torch.Tensor = None,
+        causal: bool = False,
+    ):
         """
         tokens: [B, T, d_model]
         src_key_padding_mask: optional [B, T] (True for pad)
@@ -223,7 +258,11 @@ if __name__ == "__main__":
     pad_mask = torch.zeros((B, T), dtype=torch.bool, device=device)
     pad_mask[:, -5:] = True  # last 5 tokens are padding
 
-    model = FlashTransformerEncoder(d_model=E, nhead=8, nlayers=2, drop_p=0.1).to(device).to(torch.bfloat16)
+    model = (
+        FlashTransformerEncoder(d_model=E, nhead=8, nlayers=2, drop_p=0.1)
+        .to(device)
+        .to(torch.bfloat16)
+    )
     model.train()
     # use autocast for best performance on GPUs
     if device.startswith("cuda"):

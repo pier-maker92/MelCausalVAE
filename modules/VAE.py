@@ -221,6 +221,30 @@ class VAE(torch.nn.Module):
             reconstructed_mel = self.denormalize_mel(reconstructed_mel)
         return reconstructed_mel
 
+    @staticmethod
+    def _mask_latent_keep_first_n_chunks(
+        z: torch.Tensor,
+        *,
+        num_chunks: int,
+        chunk_size: int,
+        latent_dim: int,
+    ) -> torch.Tensor:
+        """Keep latent channels for chunk indices ``0 .. num_chunks-1``; zero the rest."""
+        if latent_dim % chunk_size != 0:
+            raise ValueError(
+                f"latent_dim ({latent_dim}) must be divisible by chunk_size ({chunk_size})"
+            )
+        max_chunks = latent_dim // chunk_size
+        if num_chunks < 1 or num_chunks > max_chunks:
+            raise ValueError(
+                f"num_chunks must be in [1, {max_chunks}], got {num_chunks}"
+            )
+        hi = num_chunks * chunk_size
+        out = z.clone()
+        if hi < latent_dim:
+            out[:, :, hi:] = 0
+        return out
+
     @torch.no_grad()
     def encode_and_sample(
         self,
@@ -229,9 +253,16 @@ class VAE(torch.nn.Module):
         temperature: float = 1.0,
         guidance_scale: float = 1.0,
         generator: Optional[torch.Generator] = None,
+        latent_num_chunks: Optional[int] = None,
+        latent_chunk_size: Optional[int] = None,
     ):
         """
         Encode audio to latent space and generate mel spectrogram.
+
+        If ``latent_num_chunks`` is set, decode uses masked **mu** (deterministic): only
+        the first ``latent_num_chunks`` channel chunks are kept; the rest are zeroed
+        (same idea as ``eval_encode_single_chunks.py`` ``--num-chunks``). Otherwise
+        the stochastic latent ``z`` is used.
         """
 
         # Encode audio to mel spectrogram
@@ -245,10 +276,26 @@ class VAE(torch.nn.Module):
             step=None,
         )
 
+        context_vector = convformer_output.z
+        if latent_num_chunks is not None:
+            enc_cfg = self.config.encoder_config
+            ld = enc_cfg.latent_dim
+            cs = (
+                latent_chunk_size
+                if latent_chunk_size is not None
+                else getattr(enc_cfg, "latent_chunk_size", 2)
+            )
+            context_vector = self._mask_latent_keep_first_n_chunks(
+                convformer_output.mu,
+                num_chunks=latent_num_chunks,
+                chunk_size=cs,
+                latent_dim=ld,
+            )
+
         # Generate mel spectrogram from latent
         reconstructed_mel = self.decoder.generate(
             num_steps=num_steps,
-            context_vector=convformer_output.z,  # z
+            context_vector=context_vector,
             durations=convformer_output.durations,
             temperature=temperature,
             guidance_scale=guidance_scale,
@@ -288,7 +335,7 @@ class VAE(torch.nn.Module):
         return {
             "original_mel": original_mel,
             "reconstructed_mel": reconstructed_mel,
-            "context_vector": convformer_output.z,
+            "context_vector": context_vector,
             "padding_mask": reconstructed_padding_mask,
             "original_padding_mask": encoded_audios.padding_mask,
             "durations": convformer_output.durations,

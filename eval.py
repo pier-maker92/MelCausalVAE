@@ -13,6 +13,7 @@ import random
 import logging
 import argparse
 import tempfile
+from contextlib import nullcontext
 from tqdm import tqdm
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -33,6 +34,7 @@ from MelCausalVAE.modules.melspecEncoder import MelSpectrogramConfig
 from MelCausalVAE.data.libri_tts import LibriTTS
 from MelCausalVAE.data.mls import MLSDataset
 from MelCausalVAE.data.librispeech_align_test import LibriSpeechAlignTestDataset
+from MelCausalVAE.data.librispeech100 import LibriSpeech100h
 from MelCausalVAE.data.audio_dataset import DataCollator, TestDatasetWrapper
 from MelCausalVAE.baseline_models import BaselineAudioCodec
 
@@ -44,74 +46,167 @@ from datasets import load_dataset, concatenate_datasets
 import utmosv2
 
 
+def _no_amp_autocast():
+    """Disable autocast on CUDA; no-op context elsewhere (MPS/CPU)."""
+    if torch.cuda.is_available():
+        return torch.cuda.amp.autocast(enabled=False)
+    return nullcontext()
+
+
+def _scalar_to_float(x: Any) -> Optional[float]:
+    """utmosv2 may return float, numpy scalar, or torch tensor."""
+    if x is None:
+        return None
+    try:
+        if hasattr(x, "item") and callable(getattr(x, "item")):
+            return float(x.item())
+        return float(x)
+    except (TypeError, ValueError):
+        return None
+
+
+def _utmos_results_to_records(results: Any) -> List[Dict[str, Any]]:
+    """Normalize utmosv2 ``predict`` return value (list / DataFrame / single dict)."""
+    if results is None:
+        return []
+    if hasattr(results, "to_dict") and callable(getattr(results, "to_dict")):
+        try:
+            rec = results.to_dict("records")  # pandas DataFrame
+            return list(rec) if rec is not None else []
+        except Exception:
+            pass
+    if isinstance(results, dict):
+        return [results]
+    try:
+        return list(results)
+    except TypeError:
+        return []
+
+
+def _record_to_basename_mos(r: Dict[str, Any]) -> Optional[Tuple[str, float]]:
+    fp = r.get("file_path", r.get("filepath", r.get("path")))
+    if fp is None:
+        return None
+    mos = _scalar_to_float(
+        r.get("predicted_mos", r.get("mos", r.get("predicted_MOS")))
+    )
+    if mos is None:
+        return None
+    return Path(str(fp)).name, mos
+
+
 # Standalone UTMOS predictor using utmosv2
 class UTMOSPredictor:
-    def __init__(self, device):
-        logger.info("Initializing UTMOSv2 model")
+    """
+    utmosv2 is always run on **CPU** for compatibility: directory batch mode and
+    several torch back-ends (notably MPS) often fail or return empty otherwise.
+    VAE / HuBERT stay on the eval device passed into ``evaluate_dataset``.
+    """
+
+    def __init__(self, _eval_device: torch.device):
+        logger.info("Initializing UTMOSv2 model (inference on CPU)")
+        self.device_str = "cpu"
         try:
-            # Force UTMOS model creation on the worker-assigned device.
-            # This avoids multi-GPU workers contending on default cuda:0.
-            self.model = utmosv2.create_model(pretrained=True, device=str(device))
+            self.model = utmosv2.create_model(pretrained=True, device=self.device_str)
             if hasattr(self.model, "to"):
-                self.model.to(device)
+                self.model.to(torch.device("cpu"))
             if hasattr(self.model, "float"):
                 self.model.float()
-            self.device = device
-            self.device_str = str(device)
             self.has_utmos = True
-            logger.info("UTMOSv2 model loaded successfully.")
+            logger.info("UTMOSv2 model loaded successfully on CPU.")
         except Exception as e:
-            logger.warning(f"Failed to load UTMOSv2 model: {e}")
+            logger.warning("Failed to load UTMOSv2 model: %s", e)
             self.has_utmos = False
 
     @torch.no_grad()
-    def predict(self, wav_path):
+    def predict(self, wav_path: Path | str) -> Optional[float]:
         if not self.has_utmos:
             return None
         try:
-            # Force float32 context and disable any potential autocast to bfloat16
-            with torch.cuda.amp.autocast(enabled=False):
-                # Disable utmosv2 multiprocessing to avoid pickling issues
-                # when running inside our own ProcessPoolExecutor workers.
+            with _no_amp_autocast():
                 mos = self.model.predict(
                     input_path=str(wav_path),
                     device=self.device_str,
                     num_workers=0,
                 )
-                return float(mos)
+            out = _scalar_to_float(mos)
+            if out is None:
+                logger.warning(
+                    "UTMOSv2 returned non-numeric score for %s: %r", wav_path, mos
+                )
+            return out
         except Exception as e:
-            logger.warning(f"UTMOSv2 prediction failed for {wav_path}: {e}")
+            logger.warning("UTMOSv2 prediction failed for %s: %s", wav_path, e)
             return None
 
     @torch.no_grad()
-    def predict_batch(self, input_dir):
+    def _predict_dir_per_wav(self, input_dir: Path) -> Dict[str, float]:
+        """Slow fallback: one file at a time (reliable when batch API fails)."""
+        out: Dict[str, float] = {}
+        paths = sorted(input_dir.glob("*.wav"))
+        if not paths:
+            return out
+        logger.info("UTMOSv2 per-file fallback on %s wav(s) under %s", len(paths), input_dir)
+        for p in paths:
+            s = self.predict(p)
+            if s is not None:
+                out[p.name] = s
+        return out
+
+    @torch.no_grad()
+    def predict_batch(self, input_dir: Path | str) -> Dict[str, float]:
         if not self.has_utmos:
             return {}
+        input_dir = Path(input_dir)
         try:
-            logger.info(f"Running batch UTMOSv2 prediction on {input_dir}")
-            with torch.cuda.amp.autocast(enabled=False):
-                # Disable utmosv2 multiprocessing to avoid pickling issues
-                # when running inside our own ProcessPoolExecutor workers.
+            logger.info("Running batch UTMOSv2 prediction on %s", input_dir)
+            with _no_amp_autocast():
                 results = self.model.predict(
                     input_dir=str(input_dir),
                     device=self.device_str,
                     num_workers=0,
                 )
-                # Map basename to MOS score
-                mos_map = {
-                    Path(r["file_path"]).name: float(r["predicted_mos"])
-                    for r in results
-                }
-                return mos_map
+            records = _utmos_results_to_records(results)
+            mos_map: Dict[str, float] = {}
+            for r in records:
+                pair = _record_to_basename_mos(r)
+                if pair is not None:
+                    bn, score = pair
+                    mos_map[bn] = score
+                    fp = r.get("file_path", r.get("filepath", r.get("path")))
+                    if fp is not None:
+                        p = Path(str(fp))
+                        mos_map[str(p)] = score
+                        mos_map[str(p.resolve())] = score
+            logger.info("UTMOSv2 batch parsed %s wav file(s)", len(mos_map))
+            if not mos_map:
+                mos_map = self._predict_dir_per_wav(input_dir)
+            return mos_map
         except Exception as e:
-            logger.warning(f"Batch UTMOSv2 prediction failed: {e}")
-            return {}
+            logger.warning("Batch UTMOSv2 prediction failed: %s; trying per-file.", e)
+            return self._predict_dir_per_wav(input_dir)
 
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+# Pre-computed reference metrics (HuBERT ref transcriptions, ref WER/CER/UTMOS) for --skip ref path.
+_REPO_ROOT = Path(__file__).resolve().parent
+_GT_DIR_DEFAULT = _REPO_ROOT / "evaluation" / "GT"
+_GT_DIR_LEGACY = Path("/home/ec2-user/MelCausalVAE/evaluation/GT")
+
+
+def resolve_gt_metrics_path(gt_filename: str) -> Path:
+    """Prefer repo-local ``evaluation/GT``; fall back to legacy EC2 path if present."""
+    p = _GT_DIR_DEFAULT / gt_filename
+    if p.is_file():
+        return p
+    legacy = _GT_DIR_LEGACY / gt_filename
+    if legacy.is_file():
+        return legacy
+    return p
 
 
 class HuBERTASR:
@@ -144,10 +239,119 @@ class HuBERTASR:
         return transcription.lower()
 
 
+class ECAPASpeakerSimilarity:
+    """
+    ECAPA-TDNN speaker embeddings (SpeechBrain ``spkrec-ecapa-voxceleb``) on **CPU** for
+    stable inference alongside CUDA/MPS eval. Cosine similarity between GT and reconstructed
+    waveforms (higher = more similar speaker identity / timbre).
+    """
+
+    TARGET_SR = 16000
+
+    def __init__(self):
+        self.device = torch.device("cpu")
+        self.classifier = None
+        self.available = False
+        self._savedir = _REPO_ROOT / ".cache" / "speechbrain_spkrec-ecapa-voxceleb"
+        try:
+            from speechbrain.inference.speaker import EncoderClassifier
+
+            logger.info(
+                "Loading ECAPA-TDNN speaker encoder (SpeechBrain, CPU, %s Hz)",
+                self.TARGET_SR,
+            )
+            self.classifier = EncoderClassifier.from_hparams(
+                source="speechbrain/spkrec-ecapa-voxceleb",
+                savedir=str(self._savedir),
+                run_opts={"device": "cpu"},
+            )
+            self.classifier.eval()
+            # Global ``torch.set_default_dtype(bfloat16)`` (eval) would leave this model in bf16
+            # while waveforms are float32; force fp32 for stable ECAPA inference.
+            if hasattr(self.classifier, "float"):
+                self.classifier.float()
+            self.available = True
+            logger.info("ECAPA speaker encoder ready.")
+        except Exception as e:
+            logger.warning("Failed to load ECAPA speaker encoder: %s", e)
+
+    def _to_mono_2d(self, wave: torch.Tensor) -> torch.Tensor:
+        x = wave.detach().float()
+        if x.ndim == 2:
+            x = x.mean(dim=0)
+        else:
+            x = x.flatten()
+        if x.numel() == 0:
+            raise ValueError("empty waveform")
+        return x.view(1, -1)
+
+    def _resample(self, wave_2d: torch.Tensor, sr: int) -> torch.Tensor:
+        if sr == self.TARGET_SR:
+            return wave_2d
+        return torchaudio.functional.resample(
+            wave_2d, orig_freq=sr, new_freq=self.TARGET_SR
+        )
+
+    @staticmethod
+    def _flatten_embedding(t: torch.Tensor) -> torch.Tensor:
+        return t.detach().float().reshape(-1)
+
+    @torch.inference_mode()
+    def cosine_similarity(
+        self,
+        wav_gt: torch.Tensor,
+        sr_gt: int,
+        wav_recon: torch.Tensor,
+        sr_recon: int,
+    ) -> Optional[float]:
+        if not self.available or self.classifier is None:
+            return None
+        try:
+            a = self._resample(self._to_mono_2d(wav_gt), int(sr_gt)).to(
+                self.device, dtype=torch.float32
+            )
+            b = self._resample(self._to_mono_2d(wav_recon), int(sr_recon)).to(
+                self.device, dtype=torch.float32
+            )
+            if a.shape[-1] < 320 or b.shape[-1] < 320:
+                logger.warning(
+                    "ECAPA: waveform too short (%s / %s samples at 16 kHz); skipping",
+                    a.shape[-1],
+                    b.shape[-1],
+                )
+                return None
+            # SpeechBrain forward may still allocate bf16 internals if default dtype is bf16.
+            _prev_dt = torch.get_default_dtype()
+            torch.set_default_dtype(torch.float32)
+            try:
+                ea = self.classifier.encode_batch(a)
+                eb = self.classifier.encode_batch(b)
+            finally:
+                torch.set_default_dtype(_prev_dt)
+            ea = self._flatten_embedding(ea).to(torch.float32)
+            eb = self._flatten_embedding(eb).to(torch.float32)
+            denom = ea.norm() * eb.norm() + 1e-8
+            return float((ea @ eb) / denom)
+        except Exception as e:
+            logger.warning("ECAPA cosine similarity failed: %s", e)
+            return None
+
+
 def set_seed(seed: int):
     random.seed(seed)
     torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def pick_eval_device(gpu_index: int = 0) -> torch.device:
+    """Prefer CUDA, then Apple MPS, then CPU (matches training-side GPU when possible)."""
+    if torch.cuda.is_available():
+        return torch.device(f"cuda:{int(gpu_index)}")
+    mps = getattr(torch.backends, "mps", None)
+    if mps is not None and mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
 
 
 def load_config(config_path: str) -> Dict[str, Any]:
@@ -167,7 +371,9 @@ def build_model_from_config(
     )  # type: ignore
     use_classic_decoder = config_dict.get("use_classic_decoder", False)
     vae_cfg = VAEConfig(
-        encoder_config=encoder_cfg, decoder_config=decoder_cfg, mel_spec_config=mel_cfg,
+        encoder_config=encoder_cfg,
+        decoder_config=decoder_cfg,
+        mel_spec_config=mel_cfg,
         use_classic_decoder=use_classic_decoder,
     )
 
@@ -179,11 +385,16 @@ def build_model_from_config(
 
     if mel_cfg.use_bigvgan_mel:
         try:
-            bigvgan_path = "/home/ec2-user/MelCausalVAE/bigvgan/bigvgan_v2_24khz_100band_256x"
+            bigvgan_path = (
+                "/home/ec2-user/MelCausalVAE/bigvgan/bigvgan_v2_24khz_100band_256x"
+            )
             if bigvgan_path not in sys.path:
                 sys.path.append(bigvgan_path)
             import bigvgan
-            vocoder = bigvgan.BigVGAN.from_pretrained(bigvgan_path, use_cuda_kernel=False)
+
+            vocoder = bigvgan.BigVGAN.from_pretrained(
+                bigvgan_path, use_cuda_kernel=False
+            )
             vocoder_type = "bigvgan"
         except Exception as e:
             logger.error(f"Failed to load BigVGAN vocoder: {e}. Falling back to Vocos.")
@@ -198,7 +409,10 @@ def build_model_from_config(
 
 
 def mel_to_audio(
-    vocoder: torch.nn.Module, mel: torch.Tensor, device: torch.device, vocoder_type: str = "vocos"
+    vocoder: torch.nn.Module,
+    mel: torch.Tensor,
+    device: torch.device,
+    vocoder_type: str = "vocos",
 ) -> torch.Tensor:
     # Keep vocoder input dtype aligned with vocoder parameters to avoid
     # conv dtype mismatches (e.g., bf16 input vs fp32 bias).
@@ -211,7 +425,7 @@ def mel_to_audio(
         waveform = vocoder(features)
     else:
         waveform = vocoder.decode(features)  # [1, samples]
-    
+
     waveform = waveform.float().squeeze().detach().cpu()
     # normalize to prevent clipping
     waveform = waveform / (waveform.abs().max() + 1e-8)
@@ -282,6 +496,9 @@ def evaluate_dataset(
     original_audio_only: bool,
     skip_ref_metrics: bool,
     run,
+    latent_num_chunks: Optional[int] = None,
+    latent_chunk_size: Optional[int] = None,
+    spk_embedder: Optional[ECAPASpeakerSimilarity] = None,
 ) -> Dict[str, Any]:
     results: Dict[str, Any] = {"samples": [], "aggregates": {}}
 
@@ -291,9 +508,11 @@ def evaluate_dataset(
         gt_filename = "librispeech.json"
     elif setting == "LibriTTS":
         gt_filename = "libritts.json"
-        
-    gt_filepath = Path("/home/ec2-user/MelCausalVAE/evaluation/GT") / gt_filename
-    gt_metrics_map = {}
+    elif setting == "LibriSpeech100":
+        gt_filename = "librispeech100.json"
+
+    gt_filepath = resolve_gt_metrics_path(gt_filename)
+    gt_metrics_map: Dict[str, Dict[str, Any]] = {}
     if skip_ref_metrics:
         try:
             with open(gt_filepath, "r") as f:
@@ -303,10 +522,32 @@ def evaluate_dataset(
                     if map_id is not None:
                         gt_metrics_map[str(map_id)] = {
                             "ref": sample.get("ref", {}),
-                            "ref_transcription": sample.get("ref_transcription", "")
+                            "ref_transcription": sample.get("ref_transcription", ""),
                         }
+            logger.info(
+                "Loaded %s pre-computed GT ref entries from %s",
+                len(gt_metrics_map),
+                gt_filepath,
+            )
+            if not gt_metrics_map:
+                logger.warning(
+                    "GT file %s loaded but contains no samples with ids; "
+                    "ref metrics from cache will be empty.",
+                    gt_filepath,
+                )
         except Exception as e:
-            logger.warning(f"Could not load pre-computed GT metrics from {gt_filepath}: {e}")
+            logger.warning(
+                "Could not load pre-computed GT metrics from %s: %s",
+                gt_filepath,
+                e,
+            )
+        if not gt_metrics_map:
+            logger.warning(
+                "Reference metrics are skipped (--compute-ref-metrics off) but the GT "
+                "cache is empty or missing. Ref WER/CER/consistency will be nan. "
+                "Expected file: %s",
+                gt_filepath,
+            )
 
     if setting == "LibriSpeech":
         ds = TestDatasetWrapper(
@@ -314,6 +555,8 @@ def evaluate_dataset(
         )
     elif setting == "LibriTTS":
         ds = TestDatasetWrapper(LibriTTS(), "test")
+    elif setting == "LibriSpeech100":
+        ds = TestDatasetWrapper(LibriSpeech100h(for_evaluation=True), "test")
     else:
         raise NotImplementedError(f"{setting} not implemented")
 
@@ -346,7 +589,7 @@ def evaluate_dataset(
         sr = audios_srs[0][1]
         lang = batch["language"]
         gt_text = batch["transcription"]
-        batch_ids = batch.get("ids") # NO FALLBACK
+        batch_ids = batch.get("ids")  # NO FALLBACK
         audios_srs = [(audio.to(device, dtype=dtype), sr) for audio, sr in audios_srs]
 
         if original_audio_only:
@@ -360,16 +603,19 @@ def evaluate_dataset(
                     temperature=temperature,
                     guidance_scale=guidance_scale,
                     generator=None,
+                    latent_num_chunks=latent_num_chunks,
+                    latent_chunk_size=latent_chunk_size,
                 )
             original_mel = out["original_mel"].detach().cpu()
             reconstructed_mel = out["reconstructed_mel"].detach().cpu()
-            padding_mask = out["padding_mask"].detach().cpu()
+            recon_padding_mask = out["padding_mask"].detach().cpu()
+            original_padding_mask = out["original_padding_mask"].detach().cpu()
 
         # save wavs, prompts, compute metrics
         for idx in range(len(audios_srs)):
             global_idx = processed + idx
             sample_id = batch_ids[idx]
-            
+
             orig_wav = tmp_audio_dir / f"sample_{sample_id}_orig.wav"
             recon_wav = tmp_audio_dir / f"sample_{sample_id}_recon.wav"
             prompt_txt = tmp_audio_dir / f"sample_{sample_id}_prompt.txt"
@@ -381,6 +627,7 @@ def evaluate_dataset(
                 save_wav(orig_wav, original_audio, original_sr)
                 prompt_txt.write_text(gt_text[idx])
                 reconstructed_audio = original_audio
+                ref_sr = recon_sr = int(original_sr)
                 cur_original_mel = None
                 cur_reconstructed_mel = None
             elif baseline_model is not None:
@@ -401,29 +648,39 @@ def evaluate_dataset(
                     save_wav(orig_wav, original_audio, original_sr)
                 save_wav(recon_wav, reconstructed_audio, out_sr)
                 prompt_txt.write_text(gt_text[idx])
+                ref_sr = int(original_sr)
+                recon_sr = int(out_sr)
                 cur_original_mel = None
                 cur_reconstructed_mel = None
             else:
-                min_length = min(
-                    original_mel[idx].size(0), reconstructed_mel[idx].size(0)
-                )
-                cur_original_mel = original_mel[idx][:min_length]
-                cur_reconstructed_mel = reconstructed_mel[idx][:min_length]
-                cur_padding_mask = padding_mask[idx][:min_length]
-                cur_original_mel = cur_original_mel[~cur_padding_mask]
-                cur_reconstructed_mel = cur_reconstructed_mel[~cur_padding_mask]
+                # Keep per-sample lengths independent. Using a shared min_length can
+                # force equal durations for ref/recon and bias metric evaluation.
+                cur_original_mel = original_mel[idx]
+                cur_reconstructed_mel = reconstructed_mel[idx]
+                opm = original_padding_mask[idx]
+                rpm = recon_padding_mask[idx]
 
-                original_audio = mel_to_audio(
-                    vocoder, cur_original_mel.unsqueeze(0), device, vocoder_type
-                )
+                to = min(cur_original_mel.size(0), opm.size(0))
+                cur_original_mel = cur_original_mel[:to][~opm[:to]]
+
+                tr = min(cur_reconstructed_mel.size(0), rpm.size(0))
+                cur_reconstructed_mel = cur_reconstructed_mel[:tr][~rpm[:tr]]
+
+                # Reference metrics should use the true dataset waveform (not vocoded mel).
+                source_audio, source_sr = audios_srs[idx]
+                original_audio = source_audio.squeeze().float().cpu()
+                original_audio = original_audio / (original_audio.abs().max() + 1e-8)
+
                 reconstructed_audio = mel_to_audio(
                     vocoder, cur_reconstructed_mel.unsqueeze(0), device, vocoder_type
                 )
 
                 if not skip_ref_metrics:
-                    save_wav(orig_wav, original_audio, sr)
+                    save_wav(orig_wav, original_audio, source_sr)
                 save_wav(recon_wav, reconstructed_audio, sr)
                 prompt_txt.write_text(gt_text[idx])
+                ref_sr = int(source_sr)
+                recon_sr = int(sr)
 
             # --- Compute WER and CER using HuBERT-Large ASR ---
             ref_text_normalized = gt_text[idx].lower().strip()
@@ -434,7 +691,7 @@ def evaluate_dataset(
                 if not skip_ref_metrics:
                     ref_hyp = hubert_asr.transcribe(str(orig_wav))
                 else:
-                    ref_info = gt_metrics_map.get(str(sample_id))
+                    ref_info = gt_metrics_map.get(str(sample_id)) or {}
                     ref_hyp = ref_info.get("ref_transcription", "")
                 recon_hyp = hubert_asr.transcribe(str(recon_wav))
 
@@ -444,7 +701,7 @@ def evaluate_dataset(
                 ref_cer_val = float(compute_cer(ref_text_normalized, ref_hyp))
             else:
                 ref_wer_val = ref_cer_val = float("nan")
-                
+
             if ref_text_normalized and not original_audio_only:
                 recon_wer_val = float(compute_wer(ref_text_normalized, recon_hyp))
                 recon_cer_val = float(compute_cer(ref_text_normalized, recon_hyp))
@@ -472,6 +729,19 @@ def evaluate_dataset(
                 "WER": to_pct(consistent_wer_val),
                 "CER": to_pct(consistent_cer_val),
             }
+
+            if spk_embedder is not None and spk_embedder.available:
+                if original_audio_only:
+                    recon_scores["ECAPA_cosine"] = 1.0
+                else:
+                    sim = spk_embedder.cosine_similarity(
+                        original_audio,
+                        ref_sr,
+                        reconstructed_audio,
+                        recon_sr,
+                    )
+                    if sim is not None:
+                        recon_scores["ECAPA_cosine"] = round(float(sim), 4)
 
             results["samples"].append(
                 {
@@ -521,7 +791,9 @@ def evaluate_dataset(
                     wandb.Audio(original_audio.numpy(), sample_rate=sr)
                 )
                 if not original_audio_only:
-                    reconstructed_audios.append(wandb.Audio(reconstructed_audio.numpy(), sample_rate=sr))
+                    reconstructed_audios.append(
+                        wandb.Audio(reconstructed_audio.numpy(), sample_rate=sr)
+                    )
 
             # aggregate per language (partial)
             if setting == "OOD":
@@ -537,6 +809,10 @@ def evaluate_dataset(
                 if m in recon_scores and recon_scores[m] is not None:
                     per_language[key].setdefault(f"recon_{m}", [])
                     per_language[key][f"recon_{m}"].append(float(recon_scores[m]))
+
+            ec = recon_scores.get("ECAPA_cosine")
+            if ec is not None:
+                per_language[key].setdefault("recon_ECAPA_cosine", []).append(float(ec))
 
             for m in ["WER", "CER"]:
                 if consistency_scores[m] is not None:
@@ -555,24 +831,76 @@ def evaluate_dataset(
     mos_map = {}
     if evaluator is not None and evaluator.has_utmos:
         mos_map = evaluator.predict_batch(tmp_audio_dir)
+        if not mos_map:
+            logger.warning(
+                "UTMOSv2 batch returned no scores under %s; reconstructed UTMOS will be "
+                "missing in metrics (check model.predict / file paths).",
+                tmp_audio_dir,
+            )
+
+    def _lookup_mos_map(name: Optional[str]) -> Optional[float]:
+        if not name or not mos_map:
+            return None
+        if name in mos_map:
+            return float(mos_map[name])
+        p = tmp_audio_dir / name
+        for k in (str(p), str(p.resolve())):
+            if k in mos_map:
+                return float(mos_map[k])
+        return None
 
     for sample in results["samples"]:
         orig_wav_name = sample.pop("orig_wav_name", None)
         recon_wav_name = sample.pop("recon_wav_name", None)
         key = sample["language"] if setting == "OOD" else "all"
+        sid = sample["id"]
+        recon_path = tmp_audio_dir / f"sample_{sid}_recon.wav"
+        orig_path = tmp_audio_dir / f"sample_{sid}_orig.wav"
 
         if mos_map:
             if original_audio_only:
-                orig_mos = mos_map.get(orig_wav_name)
+                orig_mos = _lookup_mos_map(orig_wav_name)
                 if orig_mos is not None:
-                    sample["ref"]["UTMOS"] = round(float(orig_mos), 2)
+                    sample["ref"]["UTMOS"] = round(orig_mos, 2)
             else:
-                orig_mos = mos_map.get(orig_wav_name)
-                recon_mos = mos_map.get(recon_wav_name)
+                orig_mos = _lookup_mos_map(orig_wav_name)
+                recon_mos = _lookup_mos_map(recon_wav_name)
+                # Ref UTMOS from utmos only when we run ref HuBERT/wavs; otherwise ref
+                # UTMOS (if any) already came from evaluation/GT/*.json via ref_scores.
                 if orig_mos is not None and not skip_ref_metrics:
-                    sample["ref"]["UTMOS"] = round(float(orig_mos), 2)
+                    sample["ref"]["UTMOS"] = round(orig_mos, 2)
                 if recon_mos is not None:
-                    sample["reconstructed"]["UTMOS"] = round(float(recon_mos), 2)
+                    sample["reconstructed"]["UTMOS"] = round(recon_mos, 2)
+
+        # Batch map can be empty or keys may not match; always score recon wav directly.
+        if (
+            evaluator is not None
+            and evaluator.has_utmos
+            and not original_audio_only
+            and recon_path.is_file()
+            and sample["reconstructed"].get("UTMOS") is None
+        ):
+            fv = evaluator.predict(recon_path)
+            if fv is not None:
+                sample["reconstructed"]["UTMOS"] = round(float(fv), 2)
+            else:
+                logger.warning(
+                    "UTMOSv2 per-file recon failed for %s (basename %s)",
+                    recon_path,
+                    recon_wav_name,
+                )
+
+        if (
+            evaluator is not None
+            and evaluator.has_utmos
+            and not skip_ref_metrics
+            and orig_path.is_file()
+            and sample["ref"].get("UTMOS") is None
+        ):
+            fv = evaluator.predict(orig_path)
+            if fv is not None:
+                sample["ref"]["UTMOS"] = round(float(fv), 2)
+
         # Always aggregate UTMOS from the final per-sample values.
         # This covers both computed scores and reference scores loaded from GT.
         ref_utmos = sample.get("ref", {}).get("UTMOS")
@@ -612,7 +940,7 @@ def evaluate_dataset(
         log_payload["original_audios"] = original_audios
     if reconstructed_audios:
         log_payload["reconstructed_audios"] = reconstructed_audios
-    
+
     if run is not None and log_payload:
         run.log(log_payload)
 
@@ -629,6 +957,7 @@ def evaluate_dataset(
         recon_cer = _mean(agg.get("recon_CER", []))
         ref_utmos = _mean(agg.get("ref_UTMOS", []))
         recon_utmos = _mean(agg.get("recon_UTMOS", []))
+        recon_ecapa = _mean(agg.get("recon_ECAPA_cosine", []))
         consist_wer = _mean(agg.get("consistent_WER", []))
         consist_cer = _mean(agg.get("consistent_CER", []))
 
@@ -636,6 +965,11 @@ def evaluate_dataset(
             if v is None or math.isnan(v):
                 return None
             return round(float(v), 2)
+
+        def ecapa_report(v: Optional[float]) -> Optional[float]:
+            if v is None or math.isnan(v):
+                return None
+            return round(float(v), 4)
 
         agg_ref = {
             "WER": to_report(ref_wer),
@@ -646,6 +980,7 @@ def evaluate_dataset(
             "WER": to_report(recon_wer),
             "CER": to_report(recon_cer),
             "UTMOS": to_report(recon_utmos, True),
+            "ECAPA_cosine": ecapa_report(recon_ecapa),
         }
         agg_consist = {"WER": to_report(consist_wer), "CER": to_report(consist_cer)}
 
@@ -669,12 +1004,6 @@ def evaluate_dataset(
             "delta": discrepancy,
         }
 
-    # cleanup temp wavs
-    try:
-        shutil.rmtree(tmp_audio_dir)
-    except Exception:
-        pass
-
     return results
 
 
@@ -692,11 +1021,10 @@ def run_single_eval(
     timeout: int,
     run,
 ) -> Dict[str, Any]:
-    if torch.cuda.is_available():
-        torch.cuda.set_device(gpu_index)
-        device = torch.device(f"cuda:{gpu_index}")
-    else:
-        device = torch.device("cpu")
+    device = pick_eval_device(gpu_index)
+    if device.type == "cuda":
+        torch.cuda.set_device(device.index if device.index is not None else 0)
+    logger.info("Using eval compute device: %s", device)
     set_seed(base_args.get("seed", 42))
 
     baseline_model_name = base_args.get("baseline_model")
@@ -707,7 +1035,7 @@ def run_single_eval(
     baseline_model = None
 
     if original_audio_only:
-        pass # Skip loading everything
+        pass  # Skip loading everything
     elif baseline_model_name:
         baseline_hz = base_args.get("baseline_hz")
         baseline_tau = base_args.get("baseline_tau")
@@ -731,6 +1059,20 @@ def run_single_eval(
     evaluator = None
     if base_args.get("UTMOS"):
         evaluator = UTMOSPredictor(device)
+        if not evaluator.has_utmos:
+            logger.error(
+                "--utmos was set but utmosv2 did not load; reconstructed UTMOS will be absent. "
+                "See warning above for the exception."
+            )
+
+    spk_embedder: Optional[ECAPASpeakerSimilarity] = None
+    if base_args.get("ecapa_speaker_similarity"):
+        spk_embedder = ECAPASpeakerSimilarity()
+        if not spk_embedder.available:
+            logger.error(
+                "--ecapa-speaker-similarity was set but the ECAPA model did not load; "
+                "ECAPA_cosine will be absent. See warning above."
+            )
 
     # resolve args
     setting = base_args["setting"]
@@ -746,7 +1088,9 @@ def run_single_eval(
     wandb_max_images = int(base_args.get("wandb_max_images", 10))
 
     if original_audio_only:
-        work_dir = Path(base_args["output_dir"]) / base_args["exp_name"] / "original_audio"
+        work_dir = (
+            Path(base_args["output_dir"]) / base_args["exp_name"] / "original_audio"
+        )
     elif baseline_model_name:
         # Reorganized baseline structure: evaluation/baseline_run/<exp_name>/[param_disambiguation]
         work_dir = (
@@ -772,6 +1116,9 @@ def run_single_eval(
             / ckpt_dir_name
             / f"gpu{gpu_index}_n{n_steps}_t{temperature}_g{guidance_scale}"
         )
+        ln = base_args.get("latent_num_chunks")
+        if ln is not None:
+            work_dir = work_dir / f"latent_nchunks{int(ln)}"
     work_dir.mkdir(parents=True, exist_ok=True)
 
     start = time.time()
@@ -797,8 +1144,12 @@ def run_single_eval(
             keep_wavs=base_args.get("keep_wavs", False),
             filter_librispeech=base_args.get("filter_librispeech", False),
             original_audio_only=original_audio_only,
-            skip_ref_metrics=(not base_args.get("compute_ref_metrics", False)) and (not original_audio_only),
+            skip_ref_metrics=(not base_args.get("compute_ref_metrics", False))
+            and (not original_audio_only),
             run=run,
+            latent_num_chunks=base_args.get("latent_num_chunks"),
+            latent_chunk_size=base_args.get("latent_chunk_size"),
+            spk_embedder=spk_embedder,
         )
         status = "success"
         error = None
@@ -821,6 +1172,9 @@ def run_single_eval(
             "n_steps": n_steps,
             "temperature": temperature,
             "guidance_scale": guidance_scale,
+            "latent_num_chunks": base_args.get("latent_num_chunks"),
+            "latent_chunk_size": base_args.get("latent_chunk_size"),
+            "ecapa_speaker_similarity": base_args.get("ecapa_speaker_similarity", False),
         },
         "status": status,
         "duration": duration,
@@ -828,6 +1182,160 @@ def run_single_eval(
         "work_dir": str(work_dir),
         "error": error,
     }
+
+
+def _log_wandb_latent_chunk_audio_table(
+    *,
+    run: Any,
+    checkpoint: str,
+    combo: Dict[str, Any],
+    base_args: Dict[str, Any],
+    gpu_index: int,
+) -> None:
+    """
+    Log a list of ``wandb.Audio`` (with captions) under ``latent_chunk_audio_gallery`` so
+    the W&B **Media** panel shows playable players. Tables with audio cells often surface
+    only as JSON downloads instead of an in-app gallery.
+    """
+    if run is None:
+        return
+    chunk_counts: List[int] = base_args["wandb_latent_chunk_counts"]
+    if not chunk_counts:
+        return
+
+    config_dict = base_args["config_dict"]
+    assert config_dict is not None
+    cf = config_dict["convformer"]
+    latent_dim = int(cf["latent_dim"])
+    chunk_sz = (
+        int(base_args["latent_chunk_size"])
+        if base_args.get("latent_chunk_size") is not None
+        else int(cf.get("latent_chunk_size", 2))
+    )
+    if latent_dim % chunk_sz != 0:
+        raise ValueError(
+            f"latent_dim {latent_dim} must be divisible by latent_chunk_size {chunk_sz}"
+        )
+    max_chunks = latent_dim // chunk_sz
+    for n in chunk_counts:
+        if n < 1 or n > max_chunks:
+            raise ValueError(
+                f"--wandb-latent-chunk-counts must be within [1, {max_chunks}] "
+                f"for this config; got {n}"
+            )
+
+    n_steps = int(combo.get("n_steps", base_args["n_steps"]))
+    temperature = float(combo.get("temperature", base_args["temperature"]))
+    guidance_scale = float(combo.get("guidance_scale", base_args["guidance_scale"]))
+    latent_chunk_size_opt: Optional[int] = base_args.get("latent_chunk_size")
+
+    device = pick_eval_device(gpu_index)
+    if device.type == "cuda":
+        torch.cuda.set_device(device.index if device.index is not None else 0)
+    set_seed(base_args.get("seed", 42))
+
+    model, vocoder, vocoder_type, _ = build_model_from_config(
+        config_dict, checkpoint, device
+    )
+    dtype = torch.bfloat16
+
+    setting = base_args["setting"]
+    filter_ls = base_args.get("filter_librispeech", False)
+    if setting == "LibriSpeech":
+        ds = TestDatasetWrapper(
+            LibriSpeechAlignTestDataset(do_filter=filter_ls), "test"
+        )
+    elif setting == "LibriTTS":
+        ds = TestDatasetWrapper(LibriTTS(), "test")
+    elif setting == "LibriSpeech100":
+        ds = TestDatasetWrapper(LibriSpeech100h(for_evaluation=True), "test")
+    else:
+        raise NotImplementedError(
+            f"--wandb-latent-chunk-audio-table: setting {setting} not implemented"
+        )
+
+    num_samples_cfg = int(base_args.get("num_samples", 0))
+    cap = int(base_args.get("wandb_latent_chunk_table_max_samples", 24))
+    if num_samples_cfg > 0:
+        total_samples = min(num_samples_cfg, len(ds))
+    else:
+        total_samples = min(cap, len(ds))
+
+    batch_size = min(int(base_args.get("batch_size", 4)), max(total_samples, 1))
+    loader = DataLoader(
+        ds, batch_size=batch_size, shuffle=False, collate_fn=DataCollator()
+    )
+
+    gallery: List[wandb.Audio] = []
+
+    processed = 0
+    logger.info(
+        "Building W&B latent-chunk audio gallery (%s samples × %s chunk settings)",
+        total_samples,
+        len(chunk_counts),
+    )
+    for batch in loader:
+        audios_srs = batch["output_audios_srs"]
+        sr = int(audios_srs[0][1])
+        batch_ids = batch.get("ids")
+        audios_srs_bf16 = [
+            (audio.to(device, dtype=dtype), s_r) for audio, s_r in audios_srs
+        ]
+        bsz = len(audios_srs_bf16)
+        for idx in range(bsz):
+            if processed >= total_samples:
+                break
+            sample_id = batch_ids[idx] if batch_ids is not None else processed
+            one = [(audios_srs_bf16[idx][0], audios_srs_bf16[idx][1])]
+
+            source_audio = one[0][0].squeeze().float().cpu()
+            source_audio = source_audio / (source_audio.abs().max() + 1e-8)
+            sid = str(sample_id)
+            gt_np = source_audio.numpy().astype("float32", copy=False)
+            gallery.append(
+                wandb.Audio(
+                    gt_np,
+                    sample_rate=sr,
+                    caption=f"{sid} · ground truth",
+                )
+            )
+
+            for n_chunks in chunk_counts:
+                with torch.no_grad():
+                    out = model.encode_and_sample(
+                        audios_srs=one,
+                        num_steps=n_steps,
+                        temperature=temperature,
+                        guidance_scale=guidance_scale,
+                        generator=None,
+                        latent_num_chunks=n_chunks,
+                        latent_chunk_size=latent_chunk_size_opt,
+                    )
+                rec_mel = out["reconstructed_mel"][0]
+                rpm = out["padding_mask"][0]
+                tr = min(rec_mel.size(0), rpm.size(0))
+                cur_rec = rec_mel[:tr][~rpm[:tr]]
+                wav = mel_to_audio(
+                    vocoder, cur_rec.unsqueeze(0), device, vocoder_type
+                )
+                w_np = wav.numpy().astype("float32", copy=False)
+                gallery.append(
+                    wandb.Audio(
+                        w_np,
+                        sample_rate=sr,
+                        caption=f"{sid} · encoded {n_chunks} chunk(s)",
+                    )
+                )
+            processed += 1
+        if processed >= total_samples:
+            break
+
+    # Single log: Media panel → pick ``latent_chunk_audio_gallery`` for playable clips.
+    run.log({"latent_chunk_audio_gallery": gallery})
+    logger.info(
+        "Logged %s wandb.Audio clip(s) as latent_chunk_audio_gallery (see W&B Media tab)",
+        len(gallery),
+    )
 
 
 def orchestrate(
@@ -854,13 +1362,18 @@ def orchestrate(
     use_wandb = base_args.get("report_to") == "wandb"
     run = None
     if use_wandb:
+        wb_config: Dict[str, Any] = {
+            "setting": base_args["setting"],
+            "languages": base_args["languages"],
+        }
+        if base_args.get("wandb_latent_chunk_audio_table"):
+            wb_config["wandb_latent_chunk_counts"] = base_args.get(
+                "wandb_latent_chunk_counts", []
+            )
         run = wandb.init(
             project="MelCausalVAE-eval",
             name=base_args["exp_name"],
-            config={
-                "setting": base_args["setting"],
-                "languages": base_args["languages"],
-            },
+            config=wb_config,
         )
 
     # Single-process path (default): run sequentially on first GPU (or CPU if none)
@@ -868,11 +1381,11 @@ def orchestrate(
         if gpus:
             gpu_index = gpus[0]
         else:
-            gpu_index = (
-                0  # will run on CPU inside run_single_eval if CUDA not available
-            )
+            gpu_index = 0  # CUDA index only; run_single_eval may still use MPS or CPU
+        dev = pick_eval_device(gpu_index)
         logger.info(
-            f"Running in single-process mode on gpu_index={gpu_index} (available_gpus={gpus}) with {len(tasks)} task(s)"
+            f"Running in single-process mode on gpu_index={gpu_index} "
+            f"(cuda_gpus={gpus}, resolved_device={dev}) with {len(tasks)} task(s)"
         )
         results: List[Dict[str, Any]] = []
         for i, (ckpt, combo) in enumerate(tasks):
@@ -882,9 +1395,36 @@ def orchestrate(
                 f"Task completed: {res.get('checkpoint')} on GPU {res.get('gpu_index')} status={res.get('status')}"
             )
             results.append(res)
+        if (
+            run is not None
+            and base_args.get("wandb_latent_chunk_audio_table")
+            and not base_args.get("baseline_model")
+            and not base_args.get("original_audio_only")
+        ):
+            if len(tasks) > 1:
+                logger.warning(
+                    "--wandb-latent-chunk-audio-table: multiple eval tasks; "
+                    "table uses the first checkpoint and first hyperparam combo only."
+                )
+            try:
+                ck0, combo0 = tasks[0]
+                _log_wandb_latent_chunk_audio_table(
+                    run=run,
+                    checkpoint=ck0,
+                    combo=combo0,
+                    base_args=base_args,
+                    gpu_index=gpu_index,
+                )
+            except Exception:
+                logger.exception("Failed to log W&B latent-chunk audio table")
         return results
 
     # Multi-GPU parallel path
+    if base_args.get("wandb_latent_chunk_audio_table"):
+        logger.warning(
+            "--wandb-latent-chunk-audio-table is ignored in --multi-gpu mode "
+            "(omit --multi-gpu to log the table)."
+        )
     if not gpus:
         raise RuntimeError("No available GPUs found for --multi-gpu mode")
     max_workers = max_workers or len(gpus)
@@ -933,7 +1473,10 @@ def main():
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--guidance-scale", type=float, default=1.3)
     parser.add_argument(
-        "--setting", type=str, default="LibriSpeech", choices=["LibriTTS", "OOD", "LibriSpeech"]
+        "--setting",
+        type=str,
+        default="LibriSpeech",
+        choices=["LibriTTS", "OOD", "LibriSpeech", "LibriSpeech100"],
     )
     parser.add_argument(
         "--languages",
@@ -980,16 +1523,16 @@ def main():
     parser.add_argument(
         "--checkpoints-file", type=str, help="File with one checkpoint path per line"
     )
-    
+
     parser.add_argument(
         "--original-audio-only",
         action="store_true",
         help="Bypass model entirely and only evaluate original audio metrics.",
     )
     parser.add_argument(
-        "--skip-ref-metrics",
+        "--compute-ref-metrics",
         action="store_true",
-        help="Skip evaluating reference metrics to save time during model evaluation.",
+        help="Compute reference metrics (off by default to speed up evaluation).",
     )
     parser.add_argument(
         "--hyperparam-sweep",
@@ -1006,7 +1549,22 @@ def main():
     parser.add_argument(
         "--multi-gpu", action="store_true", help="Enable multi-GPU parallel inference"
     )
-    parser.add_argument("--UTMOS", action="store_true", help="Enable UTMOS computation")
+    parser.add_argument(
+        "--utmos",
+        "--UTMOS",
+        action="store_true",
+        dest="utmos",
+        help="Run utmosv2 on temp wavs to score **reconstructed** audio (and reference wavs "
+        "when --compute-ref-metrics is set). Without this flag, ref UTMOS may still appear "
+        "from evaluation/GT/*.json when ref metrics are skipped.",
+    )
+    parser.add_argument(
+        "--ecapa-speaker-similarity",
+        action="store_true",
+        help="Cosine similarity between ECAPA-TDNN embeddings (SpeechBrain spkrec-ecapa-voxceleb) "
+        "of ground-truth vs reconstructed audio (CPU, resampled to 16 kHz). Stored as "
+        "reconstructed.ECAPA_cosine per sample and in aggregates (1.0 for --original-audio-only).",
+    )
     parser.add_argument(
         "--keep-wavs",
         action="store_true",
@@ -1017,8 +1575,51 @@ def main():
         action="store_true",
         help="If set, filters the LibriSpeech test set using the E2TTS JSON keys",
     )
+    parser.add_argument(
+        "--latent-num-chunks",
+        type=int,
+        default=None,
+        help="Bottleneck ablation: decode using only the first N latent channel chunks "
+        "(1 .. latent_dim/chunk_size); other channels zeroed (mu). Omit for full z.",
+    )
+    parser.add_argument(
+        "--latent-chunk-size",
+        type=int,
+        default=None,
+        help="Channels per chunk for --latent-num-chunks (default: convformer latent_chunk_size).",
+    )
+    parser.add_argument(
+        "--wandb-latent-chunk-audio-table",
+        action="store_true",
+        help="Log latent_chunk_audio_gallery: a list of wandb.Audio (with captions) for the W&B "
+        "**Media** panel — GT plus one clip per N in --wandb-latent-chunk-counts (first N latent "
+        "chunks at decode). Requires --report-to wandb. Runs after eval in single-process mode; "
+        "uses the first checkpoint and first hyperparam combo if several tasks are queued.",
+    )
+    parser.add_argument(
+        "--wandb-latent-chunk-counts",
+        type=int,
+        nargs="+",
+        default=[1, 2, 4, 8, 16, 32],
+        help="Latent chunk counts for extra encoded clips in --wandb-latent-chunk-audio-table gallery.",
+    )
+    parser.add_argument(
+        "--wandb-latent-chunk-table-max-samples",
+        type=int,
+        default=24,
+        help="Max samples in the W&B chunk gallery per run when --num-samples is 0.",
+    )
 
     args = parser.parse_args()
+
+    if args.utmos:
+        logger.info(
+            "Neural MOS (utmosv2) requested: will score wavs under each run's tmp_wavs/."
+        )
+    if args.ecapa_speaker_similarity:
+        logger.info(
+            "ECAPA speaker similarity requested: install speechbrain if missing; runs on CPU."
+        )
 
     # set default dtype to bfloat16
     torch.set_default_dtype(torch.bfloat16)
@@ -1036,7 +1637,9 @@ def main():
             "No checkpoints provided. Use --checkpoints or --checkpoints-file"
         )
 
-    if (args.baseline_model is not None or args.original_audio_only) and not checkpoints:
+    if (
+        args.baseline_model is not None or args.original_audio_only
+    ) and not checkpoints:
         # Dummy checkpoint for iteration
         checkpoints = ["baseline_run" if args.baseline_model else "original_audio"]
 
@@ -1046,6 +1649,60 @@ def main():
         config_dict = load_config(args.config_path)
     elif args.baseline_model is None and not args.original_audio_only:
         raise ValueError("Internal model evaluation requires --config-path")
+
+    if args.latent_num_chunks is not None:
+        if args.baseline_model is not None or args.original_audio_only:
+            raise ValueError(
+                "--latent-num-chunks applies only to internal VAE evaluation."
+            )
+        assert config_dict is not None
+        cf = config_dict["convformer"]
+        latent_dim = int(cf["latent_dim"])
+        chunk_sz = (
+            int(args.latent_chunk_size)
+            if args.latent_chunk_size is not None
+            else int(cf.get("latent_chunk_size", 2))
+        )
+        if latent_dim % chunk_sz != 0:
+            raise ValueError(
+                f"latent_dim {latent_dim} must be divisible by latent_chunk_size {chunk_sz}"
+            )
+        max_chunks = latent_dim // chunk_sz
+        if args.latent_num_chunks < 1 or args.latent_num_chunks > max_chunks:
+            raise ValueError(
+                f"--latent-num-chunks must be in [1, {max_chunks}] for this config, "
+                f"got {args.latent_num_chunks}"
+            )
+
+    wandb_latent_chunk_counts = list(dict.fromkeys(args.wandb_latent_chunk_counts))
+    if args.wandb_latent_chunk_audio_table:
+        if args.report_to != "wandb":
+            raise ValueError(
+                "--wandb-latent-chunk-audio-table requires --report-to wandb"
+            )
+        if args.baseline_model is not None or args.original_audio_only:
+            raise ValueError(
+                "--wandb-latent-chunk-audio-table applies only to internal VAE evaluation."
+            )
+        assert config_dict is not None
+        cf = config_dict["convformer"]
+        latent_dim = int(cf["latent_dim"])
+        chunk_sz = (
+            int(args.latent_chunk_size)
+            if args.latent_chunk_size is not None
+            else int(cf.get("latent_chunk_size", 2))
+        )
+        if latent_dim % chunk_sz != 0:
+            raise ValueError(
+                f"latent_dim {latent_dim} must be divisible by latent_chunk_size {chunk_sz}"
+            )
+        max_chunks = latent_dim // chunk_sz
+        for n in wandb_latent_chunk_counts:
+            if n < 1 or n > max_chunks:
+                raise ValueError(
+                    f"--wandb-latent-chunk-counts must be within [1, {max_chunks}] "
+                    f"for this config; got {n}"
+                )
 
     # hyperparam combinations
     if args.hyperparam_sweep:
@@ -1086,11 +1743,17 @@ def main():
         "baseline_model": args.baseline_model,
         "baseline_hz": args.baseline_hz,
         "baseline_tau": args.baseline_tau,
-        "UTMOS": args.UTMOS,
+        "UTMOS": args.utmos,
+        "ecapa_speaker_similarity": args.ecapa_speaker_similarity,
         "keep_wavs": args.keep_wavs,
         "filter_librispeech": args.filter_librispeech,
         "original_audio_only": args.original_audio_only,
-        "skip_ref_metrics": args.skip_ref_metrics,
+        "compute_ref_metrics": args.compute_ref_metrics,
+        "latent_num_chunks": args.latent_num_chunks,
+        "latent_chunk_size": args.latent_chunk_size,
+        "wandb_latent_chunk_audio_table": args.wandb_latent_chunk_audio_table,
+        "wandb_latent_chunk_counts": wandb_latent_chunk_counts,
+        "wandb_latent_chunk_table_max_samples": args.wandb_latent_chunk_table_max_samples,
     }
 
     # orchestrate one job per GPU
@@ -1148,10 +1811,25 @@ if __name__ == "__main__":
 
 # LibriSpeech test set evaluation with HuBERT ASR:
 # python eval.py \
-#   --config-path /home/ec2-user/MelCausalVAE/configs/settings/exps/1d.yaml \
-#   --checkpoints /home/ec2-user/MelCausalVAE/checkpoints/exps/1d-8x-NAR-AE/model.safetensors \
-#   --setting LibriSpeech \
+#   --config-path configs/settings/exps/1d.yaml \
+#   --checkpoints checkpoints/exps/1d-8x-NAR-AE/model.safetensors \
+#   --setting LibriSpeech100-eval \
 #   --num-samples 250 --batch-size 8 \
 #   --n-steps 6 --temperature 0.4 --guidance-scale 1.3 \
-#   --exp-name LibriSpeech-exps \
-#   --output-dir /home/ec2-user/MelCausalVAE/evaluation 
+#   --exp-name LibriSpeech100-eval \
+#   --output-dir evaluation
+
+# latent factorized eval
+
+# latent factorized eval
+# python eval.py \
+#   --config-path configs/settings/bottleneck-ablations/dropout_eval.yaml \
+#   --checkpoints checkpoints/ablations/dropout-5-epochs/model.safetensors \
+#   --setting LibriSpeech \
+#   --filter-librispeech \
+#   --num-samples 10 --batch-size 8 \
+#   --n-steps 6 --temperature 0.4 --guidance-scale 1.3 \
+#   --exp-name dropout_eval \
+#   --output-dir evaluation/bottleneck-ablations/LibriSpeech \
+#   --UTMOS \
+#   --latent-num-chunks 1

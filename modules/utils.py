@@ -54,27 +54,46 @@ def once(fn):
 
 print_once = once(print)
 
-# FlashAttention v2 APIs (only)
-# Requires CUDA; dtype must be fp16/bf16; head_dim <= 256 and divisible by 8.
-from flash_attn import (
-    flash_attn_qkvpacked_func,
-    flash_attn_func,
-    flash_attn_varlen_qkvpacked_func,
-)
 
-_HAS_FLASH_ATTN = True
+def _mps_is_available() -> bool:
+    mps = getattr(torch.backends, "mps", None)
+    return mps is not None and bool(mps.is_available())
+
+
+# FlashAttention v2: CUDA-only. When MPS is available, skip importing flash_attn
+# (no suitable wheel) and use PyTorch SDPA on MPS/CPU instead.
+_HAS_FLASH_ATTN = False
+flash_attn_qkvpacked_func = None  # type: ignore[assignment]
+flash_attn_func = None  # type: ignore[assignment]
+flash_attn_varlen_qkvpacked_func = None  # type: ignore[assignment]
+
+if not _mps_is_available():
+    try:
+        from flash_attn import (
+            flash_attn_qkvpacked_func,
+            flash_attn_func,
+            flash_attn_varlen_qkvpacked_func,
+        )
+
+        _HAS_FLASH_ATTN = True
+    except ImportError:
+        pass
 
 
 class Attend(nn.Module):
     """
-    FlashAttention-only attend core operating on [B, H, N, D].
+    Attention core on [B, H, N, D]: FlashAttention on CUDA when available,
+    otherwise PyTorch scaled_dot_product_attention (CPU / MPS / CUDA without flash).
 
-    Rules:
-      - CUDA tensors only; dtype must be float16/bfloat16; D % 8 == 0 and D <= 256.
+    Flash path rules:
+      - CUDA only; dtype float16/bfloat16; D % 8 == 0 and D <= 256.
       - Self-attention with no mask: packed kernel.
       - Self-attention with padding mask [B,S] or [B,1,1,S]: varlen packed kernel.
       - Cross-attention without mask: non-packed kernel.
       - Cross-attention with mask: not implemented here.
+
+    When MPS is available at import time, flash_attn is not loaded (no macOS wheel);
+    forward uses SDPA instead.
     """
 
     def __init__(self, dropout: float = 0.0, flash: bool = False, scale: Optional[float] = None, window_size: Optional[int] = None):
@@ -136,7 +155,10 @@ class Attend(nn.Module):
         attn_mask = (idx_k[None, :] // group_size) <= (idx_q[:, None] // group_size)
 
         # Sliding window constraint (left side only)
-        window_left = self.fa_window_size[0]
+        window_left = 0
+        if self._window_size is not None:
+            ws = self._window_size
+            window_left = int(ws[0]) if isinstance(ws, (tuple, list)) else int(ws)
         if window_left > 0:
             attn_mask = attn_mask & (idx_k[None, :] >= (idx_q[:, None] - window_left))
 
@@ -172,9 +194,16 @@ class Attend(nn.Module):
         B, H, Nq, D = q.shape
         _, Hk, Nk, Dk = k.shape
         assert H == Hk and D == Dk, "Mismatched heads or head_dim between q and k/v"
-        assert q.is_cuda and k.is_cuda and v.is_cuda, "FlashAttention requires CUDA"
-        assert q.dtype in (torch.float16, torch.bfloat16), "Use fp16 or bf16 for FlashAttention"
-        assert D % 8 == 0 and D <= 256, "head_dim must be divisible by 8 and <= 256"
+
+        use_flash = _HAS_FLASH_ATTN and q.is_cuda
+        if use_flash:
+            assert q.dtype in (torch.float16, torch.bfloat16), (
+                "Use fp16 or bf16 for FlashAttention"
+            )
+            assert D % 8 == 0 and D <= 256, "head_dim must be divisible by 8 and <= 256"
+        else:
+            if q.device.type not in ("cuda", "cpu", "mps"):
+                raise ValueError(f"Unsupported attention device: {q.device}")
 
         p = self.dropout if self.training else 0.0
         softmax_scale = self.scale if self.scale is not None else (D**-0.5)
@@ -188,6 +217,21 @@ class Attend(nn.Module):
                 q, k, v, attn_mask=float_mask, dropout_p=p, scale=softmax_scale,
             )
 
+        if not use_flash:
+            if Nq == Nk:
+                return self._sdpa_self_attention(
+                    q, k, v, mask=mask, causal=causal, dropout_p=p, scale=softmax_scale
+                )
+            if mask is not None:
+                raise NotImplementedError(
+                    "Cross-attention with mask requires separate q and kv masks; use varlen APIs for both."
+                )
+            return F.scaled_dot_product_attention(
+                q, k, v, dropout_p=p, scale=softmax_scale, is_causal=causal
+            )
+
+        # --- FlashAttention (CUDA fp16/bf16) ---
+        assert k.is_cuda and v.is_cuda
         # to [B, S, H, D]
         q_ = q.permute(0, 2, 1, 3).contiguous()
         k_ = k.permute(0, 2, 1, 3).contiguous()
@@ -195,14 +239,21 @@ class Attend(nn.Module):
 
         # Window size: (left, right). Causal → right=0; bidirectional → symmetric.
         if self._window_size is not None:
-            w = (self._window_size, 0) if causal else (self._window_size, self._window_size)
+            w = (
+                (self._window_size, 0)
+                if causal
+                else (self._window_size, self._window_size)
+            )
         else:
             w = (-1, -1)
         if Nq == Nk:
             if mask is None:
                 qkv = torch.stack([q_, k_, v_], dim=2)  # [B, S, 3, H, D]
                 out = flash_attn_qkvpacked_func(
-                    qkv, dropout_p=p, softmax_scale=softmax_scale, causal=causal,
+                    qkv,
+                    dropout_p=p,
+                    softmax_scale=softmax_scale,
+                    causal=causal,
                     window_size=w,
                 )  # [B, S, H, D]
                 return out.permute(0, 2, 1, 3).contiguous()
@@ -232,8 +283,41 @@ class Attend(nn.Module):
             raise NotImplementedError(
                 "Cross-attention with mask requires separate q and kv masks; use varlen APIs for both."
             )
-        out = flash_attn_func(q_, k_, v_, dropout_p=p, softmax_scale=softmax_scale, causal=causal, window_size=w)  # [B, Nq, H, D]
+        out = flash_attn_func(
+            q_, k_, v_, dropout_p=p, softmax_scale=softmax_scale, causal=causal, window_size=w
+        )  # [B, Nq, H, D]
         return out.permute(0, 2, 1, 3).contiguous()
+
+    def _sdpa_self_attention(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        mask: Optional[torch.Tensor],
+        causal: bool,
+        dropout_p: float,
+        scale: float,
+    ) -> torch.Tensor:
+        """PyTorch SDPA fallback for non-CUDA (e.g. MPS) or when flash_attn is off."""
+        B, H, N, _D = q.shape
+        if mask is None:
+            return F.scaled_dot_product_attention(
+                q, k, v, dropout_p=dropout_p, scale=scale, is_causal=causal
+            )
+        mask_bs = self._normalize_mask(mask, S=N)
+        key_m = mask_bs[:, None, None, :]  # [B,1,1,N]
+        q_m = mask_bs[:, None, :, None]  # [B,1,N,1]
+        valid = key_m & q_m
+        attn_mask = torch.zeros(B, 1, N, N, device=q.device, dtype=q.dtype)
+        attn_mask.masked_fill_(~valid, float("-inf"))
+        if causal:
+            causal_block = torch.triu(
+                torch.ones(N, N, device=q.device, dtype=torch.bool), diagonal=1
+            )
+            attn_mask = attn_mask.masked_fill(causal_block, float("-inf"))
+        return F.scaled_dot_product_attention(
+            q, k, v, attn_mask=attn_mask, dropout_p=dropout_p, scale=scale
+        )
 
 
 class LearnedSinusoidalPosEmb(Module):

@@ -18,6 +18,7 @@ from modules.Encoder import (
     latent_chunk_kl_channel_weights,
 )
 from modules.similarity import SimilarityPoolingBatch
+from modules.seamless_distillation import SeamlessEncoder
 
 
 # ---------- 1D building blocks ----------
@@ -180,14 +181,17 @@ class ConvformerEncoder1d(SigmaVAEEncoder):
         durations = None
         z_pooled_fps = None
         if self.similarity_pooler is not None:
-            z, durations, pooled_mask = self.similarity_pooler(z, latent_padding_mask.long())
+            z, durations, pooled_mask = self.similarity_pooler(
+                z, latent_padding_mask.long()
+            )
             latent_padding_mask = pooled_mask.bool()
             valid_durs = durations[durations > 0].float()
             if valid_durs.numel() > 0:
                 latent_fps = 93.75 / float(self.C)
-                z_pooled_fps = torch.tensor(
-                    latent_fps, device=z.device, dtype=z.dtype
-                ) / valid_durs.mean()
+                z_pooled_fps = (
+                    torch.tensor(latent_fps, device=z.device, dtype=z.dtype)
+                    / valid_durs.mean()
+                )
 
         mu = self.mu(z)
         logvar = None

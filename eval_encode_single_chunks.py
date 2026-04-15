@@ -10,6 +10,8 @@ Encode one audio file through the VAE, keep a range of latent channel chunks
 * ``--target-audio`` — enables **swap**: latent channels for chunks ``S..E`` (or
   ``0..N-1`` with ``--num-chunks``) are taken from the target encoding and
   written into the same positions; remaining channels stay from the input.
+  ``--swap-alpha`` (default ``1.0``) linearly blends that slice with the source
+  latent: ``0`` = no swap, ``1`` = full target in the chunk range.
   Without ``--mean``, source and target are cropped to the **shorter** length
   (samples). ``--mean`` uses full lengths (input drives output time).
 
@@ -60,10 +62,23 @@ from vocos import Vocos
 # Tutti i file audio passati al mel devono essere a questo sample rate (Hz).
 ENCODER_INPUT_SR_HZ = 24_000
 
+# Default WAV root: ``evaluation/bottleneck-ablations/<swap|no_swap>/`` (repo-relative).
+EVAL_BOTTLENECK_ABLATIONS_ROOT = _SCRIPT_DIR / "evaluation" / "bottleneck-ablations"
+
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+
+def pick_default_device() -> torch.device:
+    """Prefer CUDA, then Apple MPS, then CPU."""
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    mps = getattr(torch.backends, "mps", None)
+    if mps is not None and mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
 
 
 def load_config(config_path: str) -> Dict[str, Any]:
@@ -96,7 +111,9 @@ def build_model_from_config(
 
     if mel_cfg.use_bigvgan_mel:
         try:
-            bigvgan_path = "/home/ec2-user/MelCausalVAE/bigvgan/bigvgan_v2_24khz_100band_256x"
+            bigvgan_path = (
+                "/home/ec2-user/MelCausalVAE/bigvgan/bigvgan_v2_24khz_100band_256x"
+            )
             if bigvgan_path not in sys.path:
                 sys.path.append(bigvgan_path)
             import bigvgan
@@ -160,9 +177,7 @@ def load_wav_mono_resampled(
     wav = wav.squeeze(0)
     if sr != target_sr:
         logger.info("Resampling %s: %s Hz → %s Hz", path.name, sr, target_sr)
-        wav = torchaudio.functional.resample(
-            wav.unsqueeze(0), sr, target_sr
-        ).squeeze(0)
+        wav = torchaudio.functional.resample(wav.unsqueeze(0), sr, target_sr).squeeze(0)
     return wav.to(device=device, dtype=torch.float32)
 
 
@@ -241,10 +256,12 @@ def swap_latent_chunk_range(
     end_chunk: int,
     chunk_size: int,
     latent_dim: int,
+    alpha: float = 1.0,
 ) -> torch.Tensor:
     """
-    Start from ``z_src`` and replace channels
-    ``[start_chunk * cs : (end_chunk + 1) * cs)`` with the same slice from ``z_tgt``.
+    Start from ``z_src`` and set channels
+    ``[start_chunk * cs : (end_chunk + 1) * cs)`` to a blend of source and target:
+    ``(1 - alpha) * z_src + alpha * z_tgt`` on that slice (``alpha=1`` full swap).
     """
     max_chunks = latent_dim // chunk_size
     if start_chunk < 0 or end_chunk >= max_chunks or start_chunk > end_chunk:
@@ -255,7 +272,13 @@ def swap_latent_chunk_range(
     lo = start_chunk * chunk_size
     hi = (end_chunk + 1) * chunk_size
     out = z_src.clone()
-    out[:, :, lo:hi] = z_tgt[:, :, lo:hi]
+    if alpha >= 1.0:
+        out[:, :, lo:hi] = z_tgt[:, :, lo:hi]
+    elif alpha <= 0.0:
+        pass
+    else:
+        a = z_src.new_tensor(alpha)
+        out[:, :, lo:hi] = (1.0 - a) * z_src[:, :, lo:hi] + a * z_tgt[:, :, lo:hi]
     return out
 
 
@@ -267,10 +290,12 @@ def mean_interleave_chunk_swap(
     end_chunk: int,
     chunk_size: int,
     latent_dim: int,
+    alpha: float = 1.0,
 ) -> torch.Tensor:
     """
     Media del target lungo il tempo sui canali dei chunk ``[lo:hi)``;
-    ``repeat_interleave`` su ``dim=1`` fino a ``T_src`` e sostituzione su ``z_src``.
+    ``repeat_interleave`` su ``dim=1`` fino a ``T_src``; blend con ``z_src`` via
+    ``alpha`` come in ``swap_latent_chunk_range``.
     """
     max_chunks = latent_dim // chunk_size
     if start_chunk < 0 or end_chunk >= max_chunks or start_chunk > end_chunk:
@@ -281,9 +306,15 @@ def mean_interleave_chunk_swap(
     lo = start_chunk * chunk_size
     hi = (end_chunk + 1) * chunk_size
     mu = z_tgt[:, :, lo:hi].mean(dim=1, keepdim=True)
-    tiled = mu.repeat_interleave(z_src.shape[1], dim=1)
+    tiled = mu.repeat_interleave(z_src.shape[1], dim=1).to(z_src.dtype)
     out = z_src.clone()
-    out[:, :, lo:hi] = tiled.to(out.dtype)
+    if alpha >= 1.0:
+        out[:, :, lo:hi] = tiled
+    elif alpha <= 0.0:
+        pass
+    else:
+        a = z_src.new_tensor(alpha)
+        out[:, :, lo:hi] = (1.0 - a) * z_src[:, :, lo:hi] + a * tiled
     return out
 
 
@@ -358,14 +389,15 @@ def run(
     target_audio_tensor: Optional[torch.Tensor] = None,
     mean_fill: bool = False,
     stochastic_latent: bool = False,
+    swap_alpha: float = 1.0,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Returns (full_mel_bf16 [1,T,F], trimmed_mel for vocoder [1,T_valid,F]).
 
-    If ``target_audio_tensor`` is set, **swap** mode: same chunk range is copied
-    from the target latent into the source latent (same time/channel positions);
-    other channels stay from the source. Padding / durations for decoding come
-    from the source after time alignment.
+    If ``target_audio_tensor`` is set, **swap** mode: same chunk range is blended
+    from target into the source latent (``swap_alpha``); other channels stay from
+    the source. Padding / durations for decoding come from the source after time
+    alignment.
 
     If ``mean_fill`` (con swap): media del target sui chunk selezionati lungo ``T``,
     poi ``repeat_interleave`` su tutti i frame del latent di input; maschere/durate
@@ -393,6 +425,7 @@ def run(
                 end_chunk=end_chunk,
                 chunk_size=chunk_size,
                 latent_dim=latent_dim,
+                alpha=swap_alpha,
             )
             conv_for_recon = _LatentPaddingView(pad_src, dur_src)
         else:
@@ -417,6 +450,7 @@ def run(
                 end_chunk=end_chunk,
                 chunk_size=chunk_size,
                 latent_dim=latent_dim,
+                alpha=swap_alpha,
             )
             conv_for_recon = _LatentPaddingView(pad_src, dur_src)
     else:
@@ -505,7 +539,8 @@ def parse_args() -> argparse.Namespace:
         "--output-dir",
         type=Path,
         default=None,
-        help="Directory for output WAV (default: next to input audio)",
+        help="Directory for output WAV (default: evaluation/bottleneck-ablations/swap or "
+        ".../no_swap under the repo, depending on --target-audio)",
     )
     p.add_argument(
         "--output-name",
@@ -517,7 +552,7 @@ def parse_args() -> argparse.Namespace:
         "--device",
         type=str,
         default=None,
-        help="cuda / cuda:0 / cpu (default: cuda if available else cpu)",
+        help="Override: cuda / cuda:0 / mps / cpu (default: cuda, else mps, else cpu)",
     )
     p.add_argument("--seed", type=int, default=42)
     p.add_argument(
@@ -528,6 +563,13 @@ def parse_args() -> argparse.Namespace:
         "taken from the target and pasted into the same positions over the input "
         "latent; other channels stay from the input. Without --mean, input and target "
         "are cropped to the shorter waveform length (samples) before mel/encode.",
+    )
+    p.add_argument(
+        "--swap-alpha",
+        type=float,
+        default=1.0,
+        help="Swap only: blend in the selected chunk channels, "
+        "0=no swap (source), 1=full target (default 1). Values outside [0,1] are clamped.",
     )
     p.add_argument(
         "--mean",
@@ -557,11 +599,21 @@ def main() -> None:
     if args.mean and args.target_audio is None:
         raise ValueError("--mean richiede --target-audio (modalità swap).")
 
-    device = (
-        torch.device(args.device)
-        if args.device
-        else torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    )
+    if args.target_audio is None:
+        swap_alpha = 1.0
+        if float(args.swap_alpha) != 1.0:
+            logger.warning(
+                "--swap-alpha ignored without --target-audio (not in swap mode)."
+            )
+    else:
+        swap_alpha = float(args.swap_alpha)
+        if swap_alpha < 0.0 or swap_alpha > 1.0:
+            logger.warning(
+                "Clamping --swap-alpha from %s to [0, 1].", swap_alpha
+            )
+            swap_alpha = max(0.0, min(1.0, swap_alpha))
+
+    device = torch.device(args.device) if args.device else pick_default_device()
     logger.info("Device: %s", device)
 
     config_dict = load_config(args.config_path)
@@ -631,11 +683,16 @@ def main() -> None:
         target_audio_tensor=wav_tgt,
         mean_fill=args.mean,
         stochastic_latent=args.stochastic_latent,
+        swap_alpha=swap_alpha,
     )
 
     waveform = mel_to_audio(vocoder, mel_valid, device, vocoder_type)
 
-    out_dir = args.output_dir or args.input_audio.parent
+    if args.output_dir is not None:
+        out_dir = args.output_dir
+    else:
+        mode_dir = "swap" if args.target_audio is not None else "no_swap"
+        out_dir = EVAL_BOTTLENECK_ABLATIONS_ROOT / mode_dir
     stem = args.output_name or args.input_audio.stem
     mode_parts = []
     if args.target_audio is not None:
@@ -644,17 +701,22 @@ def main() -> None:
         mode_parts.append("mean")
     if args.stochastic_latent:
         mode_parts.append("stochz")
+    alpha_tag = ""
+    if args.target_audio is not None and swap_alpha != 1.0:
+        alpha_tag = f"_a{swap_alpha:g}"
     mode_tag = ("_" + "_".join(mode_parts)) if mode_parts else ""
     out_name = (
-        f"{stem}{mode_tag}_chunks{start_c}-{end_c}_of{max_chunks}_"
+        f"{stem}{mode_tag}{alpha_tag}_chunks{start_c}-{end_c}_of{max_chunks}_"
         f"steps{args.n_steps}_t{args.temperature}_g{args.guidance_scale}.wav"
     )
     out_path = out_dir / out_name
     save_wav(out_path, waveform, sr=encoder_sr)
     logger.info(
-        "Saved %s (swap=%s, mean_fill=%s, stochastic_latent=%s, chunks [%s, %s] / %s, chunk_size=%s, latent_dim=%s)",
+        "Saved %s (swap=%s, swap_alpha=%s, mean_fill=%s, stochastic_latent=%s, "
+        "chunks [%s, %s] / %s, chunk_size=%s, latent_dim=%s)",
         out_path,
         args.target_audio is not None,
+        swap_alpha,
         args.mean,
         args.stochastic_latent,
         start_c,
@@ -673,15 +735,18 @@ if __name__ == "__main__":
 # python eval_encode_single_chunks.py \
 #     --config-path configs/settings/bottleneck-ablations/dropout_eval.yaml \
 #     --checkpoint checkpoints/ablations/dropout-5-epochs/model.safetensors \
-#     --input-audio cond_male.wav \
+#     --input-audio ablations/male.wav \
 #     --start-chunk 0 --end-chunk 31 \
-#     --n-steps 16 --temperature 0.2 --guidance-scale 1.3
+#     --n-steps 8 --temperature 0.3 --guidance-scale 1.4
+
 
 # swap with target audio
+
+
 # python eval_encode_single_chunks.py \
-#     --config-path configs/settings/bottleneck-ablations/dropout.yaml \
+#     --config-path configs/settings/bottleneck-ablations/dropout_eval.yaml \
 #     --checkpoint checkpoints/ablations/dropout-5-epochs/model.safetensors \
-#     --input-audio cond_male.wav \
-#     --target-audio female.wav \
-#     --start-chunk 6 --end-chunk 31 \
-#     --n-steps 16 --temperature 0.3 --guidance-scale 1.9
+#     --input-audio ablations/male.wav \
+#     --target-audio ablations/female.wav \
+#     --start-chunk 0 --end-chunk 31 \
+#     --n-steps 8 --temperature 0.3 --guidance-scale 1.4
