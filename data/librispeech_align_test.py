@@ -15,7 +15,7 @@ from data.audio_dataset import SimpleAudioDataset, DataCollator, TrainDatasetWra
 from modules.melspecEncoder import MelSpectrogramEncoder, MelSpectrogramConfig
 
 # Specify custom cache directory
-parquet_dir = "/home/ec2-user/data"
+parquet_dir = "/Users/software/Research/MelCausalVAE/dataset"
 # Path to the JSON file containing the test set IDs
 test_json_path = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "e2tts_librispeech_pc_test_clean.json"

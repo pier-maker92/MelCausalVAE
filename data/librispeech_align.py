@@ -14,7 +14,7 @@ from data.audio_dataset import SimpleAudioDataset, DataCollator, TrainDatasetWra
 from modules.melspecEncoder import MelSpectrogramEncoder, MelSpectrogramConfig
 
 # Specify custom cache directory
-parquet_dir = "/workspace/data"
+parquet_dir = "/Users/software/Research/MelCausalVAE/dataset"
 # import mel spec encoder
 mel_spec_encoder = MelSpectrogramEncoder(config=MelSpectrogramConfig())
 
@@ -29,7 +29,9 @@ class LibriSpeechAlignDataset(SimpleAudioDataset):
         # Load the two datasets
         dataset = load_dataset(
             "parquet",
-            data_dir=f"{parquet_dir}/librispeech-aligned",
+            data_files={
+                "test": f"{parquet_dir}/librispeech-aligned/test_clean/*.parquet"
+            },
         )
         partitions_per_destination = defaultdict(list)
         for partition in dataset:
@@ -48,10 +50,7 @@ class LibriSpeechAlignDataset(SimpleAudioDataset):
             )
 
     def _partition_to_destination(self, partition_name):
-        if partition_name in ["train", "validation"]:
-            return "train"
-        elif partition_name in ["test"]:
-            return "test"
+        return "train"  #  mock for internal testing on mps
 
     # def __len__(self):
     #     return len(self.dataset)
