@@ -31,6 +31,8 @@ class ConvformerOutput:
     vq_codes_used_frac: Optional[torch.FloatTensor] = None
     # [B, T, vq_quant_dim] pre-additive VQ residual (mu_head - mu_q), detached.
     vq_latent_residual: Optional[torch.FloatTensor] = None
+    # [B, T] codebook indices (padded positions still hold an index; mask with padding_mask).
+    vq_indices: Optional[torch.LongTensor] = None
 
 
 @dataclass

@@ -136,6 +136,7 @@ class HardVectorQuantizer(nn.Module):
             vq_loss: scalar commitment + optional codebook loss.
             z_q: ``[B, T, dim]`` quantised vectors (grad flows to codebook if not EMA).
             stats: perplexity and code usage on non-padded positions (detached).
+            indices_bt: ``[B, T]`` int64 codebook indices (same shape as ``z`` time dim).
         """
         B, T, D = z.shape
         if D != self.dim:
@@ -183,7 +184,7 @@ class HardVectorQuantizer(nn.Module):
             global_step=global_step,
         )
 
-        return z_residual, vq_loss, z_q, stats
+        return z_residual, vq_loss, z_q, stats, indices_bt
 
     @torch.no_grad()
     def _ema_update_codebook(

@@ -54,27 +54,26 @@ def once(fn):
 
 print_once = once(print)
 
-# FlashAttention v2 APIs (only)
-# Requires CUDA; dtype must be fp16/bf16; head_dim <= 256 and divisible by 8.
-from flash_attn import (
-    flash_attn_qkvpacked_func,
-    flash_attn_func,
-    flash_attn_varlen_qkvpacked_func,
-)
+# FlashAttention v2 (optional). Without the package, or on MPS/CPU, we use SDPA.
+try:
+    from flash_attn import (
+        flash_attn_func,
+        flash_attn_qkvpacked_func,
+        flash_attn_varlen_qkvpacked_func,
+    )
 
-_HAS_FLASH_ATTN = True
+    _HAS_FLASH_ATTN = True
+except ImportError:
+    flash_attn_func = None  # type: ignore[misc, assignment]
+    flash_attn_qkvpacked_func = None  # type: ignore[misc, assignment]
+    flash_attn_varlen_qkvpacked_func = None  # type: ignore[misc, assignment]
+    _HAS_FLASH_ATTN = False
 
 
 class Attend(nn.Module):
     """
-    FlashAttention-only attend core operating on [B, H, N, D].
-
-    Rules:
-      - CUDA tensors only; dtype must be float16/bfloat16; D % 8 == 0 and D <= 256.
-      - Self-attention with no mask: packed kernel.
-      - Self-attention with padding mask [B,S] or [B,1,1,S]: varlen packed kernel.
-      - Cross-attention without mask: non-packed kernel.
-      - Cross-attention with mask: not implemented here.
+    Attention on [B, H, N, D]. Uses Flash-Attention-2 on CUDA when installed and
+    ``flash=True``; otherwise (no package, MPS, CPU) falls back to ``scaled_dot_product_attention``.
     """
 
     def __init__(self, dropout: float = 0.0, flash: bool = False, scale: Optional[float] = None, window_size: Optional[int] = None):
@@ -135,8 +134,8 @@ class Attend(nn.Module):
         # Block-causal: key's group <= query's group
         attn_mask = (idx_k[None, :] // group_size) <= (idx_q[:, None] // group_size)
 
-        # Sliding window constraint (left side only)
-        window_left = self.fa_window_size[0]
+        # Sliding window constraint (left side only, matches flash_attn causal window)
+        window_left = int(self._window_size) if self._window_size is not None else 0
         if window_left > 0:
             attn_mask = attn_mask & (idx_k[None, :] >= (idx_q[:, None] - window_left))
 
@@ -151,6 +150,62 @@ class Attend(nn.Module):
             float_mask.masked_fill_(~attn_mask.unsqueeze(0).unsqueeze(0), float("-inf"))
 
         return float_mask
+
+    def _sdpa_self_attention(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        mask: Optional[torch.Tensor],
+        causal: bool,
+        dropout_p: float,
+        softmax_scale: float,
+    ) -> torch.Tensor:
+        B, _H, N, _D = q.shape
+        attn_bias = torch.zeros(B, 1, N, N, device=q.device, dtype=torch.float32)
+
+        if self._window_size is not None:
+            W = int(self._window_size)
+            idx_q = torch.arange(N, device=q.device)
+            idx_k = torch.arange(N, device=q.device)
+            if causal:
+                allowed = (idx_k[None, :] <= idx_q[:, None]) & (
+                    idx_k[None, :] >= (idx_q[:, None] - W)
+                )
+            else:
+                allowed = (idx_k[None, :] - idx_q[:, None]).abs() <= W
+            attn_bias = attn_bias.masked_fill(~allowed.unsqueeze(0).unsqueeze(0), float("-inf"))
+        elif causal:
+            c = torch.triu(torch.ones((N, N), device=q.device, dtype=torch.bool), diagonal=1)
+            attn_bias = attn_bias.masked_fill(c.unsqueeze(0).unsqueeze(0), float("-inf"))
+
+        if mask is not None:
+            mask_bs = self._normalize_mask(mask, S=N)
+            qm = mask_bs[:, None, :, None]
+            km = mask_bs[:, None, None, :]
+            attn_bias = attn_bias.masked_fill(~(qm & km), float("-inf"))
+
+        return F.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            attn_mask=attn_bias.to(q.dtype),
+            dropout_p=dropout_p,
+            scale=softmax_scale,
+        )
+
+    def _sdpa_cross_attention(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        causal: bool,
+        dropout_p: float,
+        softmax_scale: float,
+    ) -> torch.Tensor:
+        return F.scaled_dot_product_attention(
+            q, k, v, dropout_p=dropout_p, is_causal=causal, scale=softmax_scale
+        )
 
     def forward(
         self,
@@ -172,14 +227,10 @@ class Attend(nn.Module):
         B, H, Nq, D = q.shape
         _, Hk, Nk, Dk = k.shape
         assert H == Hk and D == Dk, "Mismatched heads or head_dim between q and k/v"
-        assert q.is_cuda and k.is_cuda and v.is_cuda, "FlashAttention requires CUDA"
-        assert q.dtype in (torch.float16, torch.bfloat16), "Use fp16 or bf16 for FlashAttention"
-        assert D % 8 == 0 and D <= 256, "head_dim must be divisible by 8 and <= 256"
 
         p = self.dropout if self.training else 0.0
         softmax_scale = self.scale if self.scale is not None else (D**-0.5)
 
-        # Block-causal path: SDPA with explicit mask (Flash Attn can't express this)
         if group_size is not None:
             float_mask = self._build_group_causal_mask(
                 Nq, Nk, group_size, q.device, q.dtype, padding_mask=mask,
@@ -188,30 +239,50 @@ class Attend(nn.Module):
                 q, k, v, attn_mask=float_mask, dropout_p=p, scale=softmax_scale,
             )
 
-        # to [B, S, H, D]
+        use_flash = (
+            self.flash
+            and _HAS_FLASH_ATTN
+            and q.is_cuda
+            and q.dtype in (torch.float16, torch.bfloat16)
+            and D % 8 == 0
+            and D <= 256
+            and flash_attn_qkvpacked_func is not None
+            and flash_attn_func is not None
+        )
+
         q_ = q.permute(0, 2, 1, 3).contiguous()
         k_ = k.permute(0, 2, 1, 3).contiguous()
         v_ = v.permute(0, 2, 1, 3).contiguous()
 
-        # Window size: (left, right). Causal → right=0; bidirectional → symmetric.
         if self._window_size is not None:
             w = (self._window_size, 0) if causal else (self._window_size, self._window_size)
         else:
             w = (-1, -1)
+
         if Nq == Nk:
-            if mask is None:
-                qkv = torch.stack([q_, k_, v_], dim=2)  # [B, S, 3, H, D]
+            if (
+                use_flash
+                and mask is None
+            ):
+                qkv = torch.stack([q_, k_, v_], dim=2)
                 out = flash_attn_qkvpacked_func(
-                    qkv, dropout_p=p, softmax_scale=softmax_scale, causal=causal,
+                    qkv,
+                    dropout_p=p,
+                    softmax_scale=softmax_scale,
+                    causal=causal,
                     window_size=w,
-                )  # [B, S, H, D]
+                )
                 return out.permute(0, 2, 1, 3).contiguous()
-            else:
-                mask_bs = self._normalize_mask(mask, S=Nk)  # [B,S]
+            if (
+                use_flash
+                and mask is not None
+                and flash_attn_varlen_qkvpacked_func is not None
+            ):
+                mask_bs = self._normalize_mask(mask, S=Nk)
                 keep = mask_bs.reshape(B * Nk)
-                qkv = torch.stack([q_, k_, v_], dim=2)  # [B, S, 3, H, D]
+                qkv = torch.stack([q_, k_, v_], dim=2)
                 qkv_flat = qkv.view(B * Nk, 3, H, D)
-                qkv_packed = qkv_flat[keep]  # [T, 3, H, D], T=sum(valid)
+                qkv_packed = qkv_flat[keep]
                 cu_seqlens, max_seqlen = self._build_cu_seqlens(mask_bs)
                 out_packed = flash_attn_varlen_qkvpacked_func(
                     qkv_packed,
@@ -221,19 +292,27 @@ class Attend(nn.Module):
                     softmax_scale=softmax_scale,
                     causal=causal,
                     window_size=w,
-                )  # [T, H, D]
+                )
                 out_flat = torch.zeros(B * Nk, H, D, device=q.device, dtype=q.dtype)
                 out_flat[keep] = out_packed
                 out = out_flat.view(B, Nk, H, D).permute(0, 2, 1, 3).contiguous()
                 return out
+            return self._sdpa_self_attention(q, k, v, mask, causal, p, softmax_scale)
 
-        # cross-attention
         if mask is not None:
             raise NotImplementedError(
                 "Cross-attention with mask requires separate q and kv masks; use varlen APIs for both."
             )
-        out = flash_attn_func(q_, k_, v_, dropout_p=p, softmax_scale=softmax_scale, causal=causal, window_size=w)  # [B, Nq, H, D]
-        return out.permute(0, 2, 1, 3).contiguous()
+        if use_flash:
+            out = flash_attn_func(
+                q_, k_, v_,
+                dropout_p=p,
+                softmax_scale=softmax_scale,
+                causal=causal,
+                window_size=w,
+            )
+            return out.permute(0, 2, 1, 3).contiguous()
+        return self._sdpa_cross_attention(q, k, v, causal, p, softmax_scale)
 
 
 class LearnedSinusoidalPosEmb(Module):

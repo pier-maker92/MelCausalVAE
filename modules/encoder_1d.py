@@ -316,11 +316,12 @@ class ConvformerEncoder1d(SigmaVAEEncoder):
 
         mu_vec = self.mu(z)
         vq_latent_residual = None
+        vq_indices = None
         if self.config.use_vq:
             qd = self.config.vq_quant_dim
             mu_head = mu_vec[..., :qd]
             mu_tail = mu_vec[..., qd:]
-            mu_res_vq, vq_loss, mu_q, vq_stats = self.vq(
+            mu_res_vq, vq_loss, mu_q, vq_stats, vq_indices = self.vq(
                 mu_head,
                 latent_padding_mask,
                 global_step=kwargs.get("step", None),
@@ -417,6 +418,7 @@ class ConvformerEncoder1d(SigmaVAEEncoder):
             vq_codes_used=vq_codes_used,
             vq_codes_used_frac=vq_codes_used_frac,
             vq_latent_residual=vq_latent_residual,
+            vq_indices=vq_indices,
         )
 
 

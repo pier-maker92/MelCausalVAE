@@ -36,8 +36,15 @@ from modules.Encoder import ConvformerEncoderConfig
 from modules.melspecEncoder import MelSpectrogramConfig
 from modules.VAE import VAE, VAEConfig
 from vocos import Vocos
+from vq_inference import default_inference_device
 
 ENCODER_INPUT_SR_HZ = 24_000
+
+
+def _infer_eval_dtype(device: torch.device) -> torch.dtype:
+    if device.type == "cuda":
+        return torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+    return torch.float32
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -51,7 +58,10 @@ def load_config(config_path: str) -> Dict[str, Any]:
 
 
 def build_model_from_config(
-    config_dict: Dict[str, Any], checkpoint_path: str, device: torch.device
+    config_dict: Dict[str, Any],
+    checkpoint_path: str,
+    device: torch.device,
+    dtype: Optional[torch.dtype] = None,
 ) -> Tuple[VAE, torch.nn.Module, str]:
     encoder_cfg = ConvformerEncoderConfig(**config_dict["convformer"])  # type: ignore[arg-type]
     decoder_cfg = DiTConfig(**config_dict["cfm"])  # type: ignore[arg-type]
@@ -66,10 +76,12 @@ def build_model_from_config(
         use_classic_decoder=config_dict.get("use_classic_decoder", False),
     )
 
-    model = VAE(vae_cfg, dtype=torch.bfloat16).to(device)
+    if dtype is None:
+        dtype = _infer_eval_dtype(device)
+    model = VAE(vae_cfg, dtype=dtype).to(device)
     model.from_pretrained(checkpoint_path)
     model.set_device(device)
-    model.set_dtype(torch.bfloat16)
+    model.set_dtype(dtype)
     model.eval()
 
     if mel_cfg.use_bigvgan_mel:
@@ -332,7 +344,6 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    torch.set_default_dtype(torch.bfloat16)
     torch.manual_seed(args.seed)
 
     if not args.input_audio.is_file():
@@ -341,15 +352,15 @@ def main() -> None:
         raise FileNotFoundError(f"Target audio not found: {args.target_audio}")
 
     device = (
-        torch.device(args.device)
-        if args.device
-        else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        torch.device(args.device) if args.device else default_inference_device()
     )
-    logger.info("Device: %s", device)
+    eval_dtype = _infer_eval_dtype(device)
+    torch.set_default_dtype(eval_dtype)
+    logger.info("Device: %s dtype: %s", device, eval_dtype)
 
     config_dict = load_config(args.config_path)
     model, vocoder, vocoder_type = build_model_from_config(
-        config_dict, args.checkpoint, device
+        config_dict, args.checkpoint, device, dtype=eval_dtype
     )
 
     mel_sr_model = int(model.wav2mel.sampling_rate)
@@ -398,3 +409,17 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+# python eval_vq_components.py 
+# --config-path configs/settings/exps/vq.yaml 
+# --checkpoint checkpoints/exps/1d-8x-NAR-AE-vq-latent/checkpoint-8000/model.safetensors
+# --input-audio ablations/male.wav
+# --mode both 
+# --n-steps 16 
+# --temperature 0.2 
+# --guidance-scale 1.3 
+# --output-dir audio_outputs/
+# --output-name test 
+# --device mps
+# --seed 42

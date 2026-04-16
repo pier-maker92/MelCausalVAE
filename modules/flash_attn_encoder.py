@@ -7,13 +7,14 @@ import torch.nn.functional as F
 # public API functions per README:
 # flash_attn_qkvpacked_func(qkv, dropout_p=0.0, softmax_scale=None, causal=False, ...)
 # flash_attn_func(q, k, v, dropout_p=0.0, softmax_scale=None, causal=False, ...)
-from flash_attn import flash_attn_qkvpacked_func, flash_attn_func
+try:
+    from flash_attn import flash_attn_func, flash_attn_qkvpacked_func
 
-_HAS_FLASH = True
-# except Exception:
-#     flash_attn_qkvpacked_func = None
-#     flash_attn_func = None
-#     _HAS_FLASH = False
+    _HAS_FLASH = True
+except ImportError:
+    flash_attn_qkvpacked_func = None  # type: ignore[misc, assignment]
+    flash_attn_func = None  # type: ignore[misc, assignment]
+    _HAS_FLASH = False
 
 
 class FlashMultiheadAttention(nn.Module):
@@ -65,7 +66,7 @@ class FlashMultiheadAttention(nn.Module):
         v = v.view(B, T, H, D)
 
         # If flash-attn is available and running on CUDA, prefer the packed QKV kernel (less concat overhead)
-        if _HAS_FLASH and x.is_cuda:
+        if _HAS_FLASH and x.is_cuda and flash_attn_qkvpacked_func is not None:
             orig_proj_dtype = self.out_proj.weight.dtype
             # Ensure inputs to flash-attn are in a supported dtype (fp16/bf16)
             if q.dtype not in (torch.float16, torch.bfloat16):
