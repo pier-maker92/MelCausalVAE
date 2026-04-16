@@ -77,6 +77,15 @@ class VAEtrainer(Trainer):
         try:
             if getattr(self.model.encoder.config, "semantic_regulation", False):
                 granular_losses.append("semantic_loss")
+            if getattr(self.model.encoder.config, "use_vq", False):
+                granular_losses.extend(
+                    [
+                        "vq_loss",
+                        "vq_perplexity",
+                        "vq_codes_used",
+                        "vq_codes_used_frac",
+                    ]
+                )
         except Exception:
             pass
         self.add_callback(AddGranularLossesToTrainerState(granular_losses))
@@ -95,15 +104,20 @@ class VAEtrainer(Trainer):
         """Compute the loss for the VAE"""
         if hasattr(self.control, "granular_losses") and model.training:
             audios_srs = inputs["output_audios_srs"]
-            corrupted_audios_srs = inputs["corrupted_audios_srs"]
+            #corrupted_audios_srs = inputs["corrupted_audios_srs"]
             # Forward pass
             outputs = model(
                 audios_srs=audios_srs,
                 training_step=self.state.global_step,
-                corrupted_audios_srs=corrupted_audios_srs,
+                phoneme_alignments=inputs["phoneme_alignments"],
+                #corrupted_audios_srs=corrupted_audios_srs,
             )
             audio_loss = outputs["audio_loss"]
             kl_loss = outputs["kl_loss"]
+            vq_loss = outputs.get("vq_loss", None)
+            vq_perplexity = outputs.get("vq_perplexity", None)
+            vq_codes_used = outputs.get("vq_codes_used", None)
+            vq_codes_used_frac = outputs.get("vq_codes_used_frac", None)
             semantic_loss = outputs.get("semantic_loss", None)
             mu_mean = outputs.get("mu_mean")
             mu_var = outputs.get("mu_var")
@@ -111,6 +125,7 @@ class VAEtrainer(Trainer):
             loss = (
                 audio_loss
                 + kl_loss
+                + (vq_loss if vq_loss is not None else 0.0)
                 + (semantic_loss if semantic_loss is not None else 0.0)
             )
 
@@ -118,6 +133,14 @@ class VAEtrainer(Trainer):
             if self.args.n_gpu > 1:
                 audio_loss = audio_loss.mean()
                 kl_loss = kl_loss.mean()
+                if vq_loss is not None:
+                    vq_loss = vq_loss.mean()
+                if vq_perplexity is not None:
+                    vq_perplexity = vq_perplexity.mean()
+                if vq_codes_used is not None:
+                    vq_codes_used = vq_codes_used.mean()
+                if vq_codes_used_frac is not None:
+                    vq_codes_used_frac = vq_codes_used_frac.mean()
 
             self.control.granular_losses["audio_loss"] += (
                 audio_loss.detach() / self.args.gradient_accumulation_steps
@@ -125,6 +148,25 @@ class VAEtrainer(Trainer):
             self.control.granular_losses["kl_loss"] += (
                 kl_loss.detach() / self.args.gradient_accumulation_steps
             )
+            if vq_loss is not None:
+                self.control.granular_losses["vq_loss"] += (
+                    vq_loss.detach() / self.args.gradient_accumulation_steps
+                )
+            if vq_perplexity is not None:
+                self.control.granular_losses["vq_perplexity"] += (
+                    vq_perplexity.detach().float()
+                    / self.args.gradient_accumulation_steps
+                )
+            if vq_codes_used is not None:
+                self.control.granular_losses["vq_codes_used"] += (
+                    vq_codes_used.detach().float()
+                    / self.args.gradient_accumulation_steps
+                )
+            if vq_codes_used_frac is not None:
+                self.control.granular_losses["vq_codes_used_frac"] += (
+                    vq_codes_used_frac.detach().float()
+                    / self.args.gradient_accumulation_steps
+                )
             if semantic_loss is not None:
                 if self.args.n_gpu > 1:
                     semantic_loss = semantic_loss.mean()
@@ -292,14 +334,42 @@ class VAEtrainer(Trainer):
         # Get some samples from the eval dataset using its dataloader
         eval_dataloader = self.get_eval_dataloader(self.eval_dataset)
 
+        need_aligner = getattr(
+            self.model.config.encoder_config, "use_aligner", False
+        )
+        max_batches = (
+            len(eval_dataloader)
+            if hasattr(eval_dataloader, "__len__")
+            else 10_000
+        )
+
+        audios_srs = None
+        phoneme_alignments = None
         for i, batch in enumerate(eval_dataloader):
-            if "output_audios_srs" in batch:
-                audios_srs = batch["output_audios_srs"]
-                audios_srs = [
-                    (audio.to(self.args.device).to(torch.bfloat16), sr)
-                    for audio, sr in audios_srs
-                ]
+            if i >= max_batches:
                 break
+            if "output_audios_srs" not in batch:
+                continue
+            pas = batch.get("phoneme_alignments")
+            if need_aligner and (
+                pas is None or any(p is None for p in pas)
+            ):
+                continue
+            audios_srs = batch["output_audios_srs"]
+            audios_srs = [
+                (audio.to(self.args.device).to(torch.bfloat16), sr)
+                for audio, sr in audios_srs
+            ]
+            phoneme_alignments = pas
+            break
+
+        if audios_srs is None:
+            logger.warning(
+                "Skipping reconstruction logging: no eval batch with "
+                f"output audio{' and non-null phoneme_alignments' if need_aligner else ''}"
+            )
+            return
+
         # Generate reconstructions
         try:
             with torch.no_grad():
@@ -308,6 +378,7 @@ class VAEtrainer(Trainer):
                     num_steps=16,
                     temperature=0.2,
                     guidance_scale=1.3,
+                    phoneme_alignments=phoneme_alignments,
                 )
             # Create visualizations
             images = []

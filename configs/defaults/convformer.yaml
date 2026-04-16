@@ -13,6 +13,22 @@ convformer:
   use_classic_decoder: false
   use_bigvgan_mel: false
   use_1d_encoder: false
+  use_aligner: false
+  residual: false
+  use_vq: false
+  vq_num_embeddings: 128
+  vq_commit_weight: 0.25
+  vq_reset_dead_codes: true
+  vq_reset_max_per_step: null
+  vq_reset_every_forward: 1
+  vq_residual_dropout: 0.3
+  vq_use_ema_codebook: false
+  vq_ema_decay: 0.99
+  vq_ema_epsilon: 1.0e-5
+  vq_quant_dim: 32
+  vq_kl_zero_chunks: 0
+  vq_kl_tail_weight_start: 1.0e-6
+  vq_kl_tail_weight_end: 1.0e-4
   use_similarity: false
   similarity_threshold: 0.9
   similarity_threshold_in_01: false

@@ -25,6 +25,12 @@ class ConvformerOutput:
     semantic_features: Optional[torch.FloatTensor] = None
     durations: Optional[torch.LongTensor] = None
     z_pooled_fps: Optional[torch.FloatTensor] = None
+    vq_loss: Optional[torch.FloatTensor] = None
+    vq_perplexity: Optional[torch.FloatTensor] = None
+    vq_codes_used: Optional[torch.FloatTensor] = None
+    vq_codes_used_frac: Optional[torch.FloatTensor] = None
+    # [B, T, vq_quant_dim] pre-additive VQ residual (mu_head - mu_q), detached.
+    vq_latent_residual: Optional[torch.FloatTensor] = None
 
 
 @dataclass
@@ -47,6 +53,18 @@ class ConvformerEncoderConfig(SigmaVAEencoderConfig):
     n_residual_blocks: int = 3
     use_bigvgan_mel: bool = False
     use_1d_encoder: bool = False
+    use_aligner: bool = False
+    residual: bool = False
+    use_vq: bool = False
+    vq_num_embeddings: int = 128
+    vq_commit_weight: float = 0.25
+    vq_reset_dead_codes: bool = True
+    vq_reset_max_per_step: Optional[int] = None
+    vq_reset_every_forward: int = 1
+    vq_residual_dropout: float = 0.3
+    vq_use_ema_codebook: bool = False
+    vq_ema_decay: float = 0.99
+    vq_ema_epsilon: float = 1e-5
     use_similarity: bool = False
     similarity_threshold: float = 0.9
     similarity_threshold_in_01: bool = False
@@ -63,6 +81,11 @@ class ConvformerEncoderConfig(SigmaVAEencoderConfig):
     latent_chunk_dropout_hierarchical: bool = True
     latent_chunk_kl_weight_start: float = 1e-10
     latent_chunk_kl_weight_end: float = 1e-2
+    # VQ (1d): quantize only first ``vq_quant_dim`` channels; KL chunk weights (below).
+    vq_quant_dim: int = 32
+    vq_kl_zero_chunks: int = 0
+    vq_kl_tail_weight_start: float = 1e-6
+    vq_kl_tail_weight_end: float = 1e-4
 
 
 def _assert_latent_chunks_divisible(latent_dim: int, chunk_size: int) -> None:
@@ -184,6 +207,42 @@ def latent_chunk_kl_channel_weights(
             weight_start, weight_end, n_chunks, device=device, dtype=dtype
         )
     return chunk_w.repeat_interleave(chunk_size)
+
+
+def latent_chunk_kl_channel_weights_vq_tail(
+    *,
+    latent_dim: int,
+    chunk_size: int,
+    zero_chunks: int,
+    tail_weight_start: float,
+    tail_weight_end: float,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """
+    Per-channel KL weights: first ``zero_chunks`` chunks are 0; remaining chunks
+    linearly from ``tail_weight_start`` (at chunk index ``zero_chunks``) to
+    ``tail_weight_end`` (last chunk).
+    """
+    _assert_latent_chunks_divisible(latent_dim, chunk_size)
+    n_chunks = latent_dim // chunk_size
+    if zero_chunks < 0 or zero_chunks > n_chunks:
+        raise ValueError(
+            f"vq_kl_zero_chunks ({zero_chunks}) must be in [0, {n_chunks}] "
+            f"for latent_dim={latent_dim}, chunk_size={chunk_size}."
+        )
+    w = torch.zeros(latent_dim, device=device, dtype=dtype)
+    n_tail = n_chunks - zero_chunks
+    if n_tail <= 0:
+        return w
+    for c in range(zero_chunks, n_chunks):
+        if n_tail == 1:
+            wc = tail_weight_start
+        else:
+            t = (c - zero_chunks) / float(n_tail - 1)
+            wc = tail_weight_start + (tail_weight_end - tail_weight_start) * t
+        w[c * chunk_size : (c + 1) * chunk_size] = wc
+    return w
 
 
 class SigmaVAEEncoder(nn.Module):
@@ -437,6 +496,10 @@ class ConvformerEncoder(SigmaVAEEncoder):
 
     def __init__(self, config: ConvformerEncoderConfig):
         super().__init__(config)
+        if config.use_vq:
+            raise ValueError(
+                "use_vq is only supported with use_1d_encoder=True (ConvformerEncoder1d)."
+            )
 
         compress_factor_C = config.compress_factor_C
         tf_heads = config.tf_heads

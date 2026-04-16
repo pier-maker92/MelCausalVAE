@@ -167,6 +167,7 @@ class DataCollator(object):
         batch_language = [None] * len(instances)
         batch_ids = [None] * len(instances)
         batch_corrupted_audios_srs = [None] * len(instances)
+        batch_phoneme_alignments = [None] * len(instances)
         for i, instance in enumerate(instances):
             if "audio_input" in instance:
                 batch_input_audios_srs[i] = (
@@ -188,6 +189,8 @@ class DataCollator(object):
                     instance["corrupted_audio"][0],
                     instance["corrupted_audio_sr"][0],
                 )
+            if "phoneme_alignments" in instance:
+                batch_phoneme_alignments[i] = instance["phoneme_alignments"]
             if "transcription_ids" in instance:
                 batch_transcription_ids[i] = instance["transcription_ids"]
             if "aligned_transcription_ids" in instance:
@@ -221,6 +224,8 @@ class DataCollator(object):
             batch["ids"] = batch_ids
         if not all_none(batch_corrupted_audios_srs):
             batch["corrupted_audios_srs"] = batch_corrupted_audios_srs
+        if not all_none(batch_phoneme_alignments):
+            batch["phoneme_alignments"] = batch_phoneme_alignments
         return batch
 
 
@@ -238,6 +243,7 @@ class TrainDatasetWrapper(SimpleAudioDataset):
         data = self.dataset[idx]
         self._process_audio_output(data_dict, data["audio"])
         data_dict["ids"] = data.get("id")
+        data_dict["phoneme_alignments"] = data.get("phonemes", None)
         return data_dict
 
 

@@ -75,6 +75,11 @@ class VAE(torch.nn.Module):
         super().__init__()
         self.config = config
         if config.use_classic_decoder:
+            if getattr(config.encoder_config, "use_vq", False):
+                raise ValueError(
+                    "encoder use_vq is only supported with the DiT decoder "
+                    "(context dim = latent_dim)."
+                )
             classic_dec_cfg = ConvformerDecoderConfig.from_encoder_config(config.encoder_config)
             self.decoder = ConvformerDecoder(classic_dec_cfg)
         else:
@@ -136,6 +141,7 @@ class VAE(torch.nn.Module):
             padding_mask=encoded_audios.padding_mask,
             step=kwargs.get("training_step", None),
             semantic_guidance=semantic_output,
+            phoneme_alignments=kwargs.get("phoneme_alignments", None),
         )
         audio_loss = self.decoder(
             target=encoded_audios.audio_features,
@@ -145,9 +151,16 @@ class VAE(torch.nn.Module):
         ).loss
         mu_mean = convformer_output.mu[~convformer_output.padding_mask].mean()
         mu_var = convformer_output.mu[~convformer_output.padding_mask].var()
+        vq_loss = getattr(convformer_output, "vq_loss", None)
         return {
             "audio_loss": audio_loss,
             "kl_loss": convformer_output.kl_loss,
+            "vq_loss": vq_loss,
+            "vq_perplexity": getattr(convformer_output, "vq_perplexity", None),
+            "vq_codes_used": getattr(convformer_output, "vq_codes_used", None),
+            "vq_codes_used_frac": getattr(
+                convformer_output, "vq_codes_used_frac", None
+            ),
             "semantic_loss": None,  # convformer_output.semantic_loss * 0.1,
             "mu_mean": mu_mean,
             "mu_var": mu_var,
@@ -229,6 +242,7 @@ class VAE(torch.nn.Module):
         temperature: float = 1.0,
         guidance_scale: float = 1.0,
         generator: Optional[torch.Generator] = None,
+        **kwargs,
     ):
         """
         Encode audio to latent space and generate mel spectrogram.
@@ -243,6 +257,7 @@ class VAE(torch.nn.Module):
             x=original_mel,
             padding_mask=encoded_audios.padding_mask,
             step=None,
+            phoneme_alignments=kwargs.get("phoneme_alignments", None),
         )
 
         # Generate mel spectrogram from latent

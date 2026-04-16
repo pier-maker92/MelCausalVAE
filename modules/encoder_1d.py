@@ -16,8 +16,12 @@ from modules.Encoder import (
     _assert_latent_chunks_divisible,
     apply_latent_chunk_dropout,
     latent_chunk_kl_channel_weights,
+    latent_chunk_kl_channel_weights_vq_tail,
 )
+from modules.alignement import AlignmentMatrixBuilder
+from modules.qformer import AlignmentQFormer
 from modules.similarity import SimilarityPoolingBatch
+from modules.vq import HardVectorQuantizer
 
 
 # ---------- 1D building blocks ----------
@@ -132,6 +136,56 @@ class ConvformerEncoder1d(SigmaVAEEncoder):
         self.mu = nn.Linear(d_model, latent_dim)
         if config.logvar_layer:
             self.logvar = nn.Linear(d_model, latent_dim)
+        self.alignment_builder = None
+        self.qformer = None
+        self.qformer_in_proj = None
+        self.phoneme_to_value = None
+        self.residual_logit = None
+        self.phoneme_to_bottleneck = None
+        self.phoneme_fusion_logit = None
+        self.vq = None
+        self.vq_residual_drop = None
+        if config.use_vq and (config.use_aligner or config.use_similarity):
+            raise ValueError(
+                "use_vq is mutually exclusive with use_aligner and use_similarity."
+            )
+        if config.use_vq:
+            self.vq = HardVectorQuantizer(
+                dim=config.vq_quant_dim,
+                num_embeddings=config.vq_num_embeddings,
+                commit_weight=config.vq_commit_weight,
+                reset_dead_codes=config.vq_reset_dead_codes,
+                reset_max_per_step=config.vq_reset_max_per_step,
+                reset_every_forward=config.vq_reset_every_forward,
+                use_ema_codebook=config.vq_use_ema_codebook,
+                ema_decay=config.vq_ema_decay,
+                ema_epsilon=config.vq_ema_epsilon,
+            )
+            self.vq_residual_drop = nn.Dropout(p=config.vq_residual_dropout)
+        if config.use_aligner:
+            qformer_d_model = max(d_model // 4, 1)
+            if qformer_d_model % tf_heads != 0:
+                raise ValueError(
+                    f"qformer_d_model ({qformer_d_model}) must be divisible by tf_heads ({tf_heads})."
+                )
+            self.alignment_builder = AlignmentMatrixBuilder(
+                compress_factor=compress_factor_C,
+                embedding_dim=qformer_d_model,
+            )
+            self.qformer_in_proj = nn.Linear(d_model, qformer_d_model, bias=False)
+            self.phoneme_to_value = nn.Linear(qformer_d_model, d_model, bias=False)
+            self.residual_logit = nn.Parameter(torch.tensor(0.0))
+            self.phoneme_to_bottleneck = nn.Linear(
+                qformer_d_model, latent_dim, bias=False
+            )
+            self.phoneme_fusion_logit = nn.Parameter(torch.tensor(0.0))
+            self.qformer = AlignmentQFormer(
+                d_model=qformer_d_model,
+                num_heads=tf_heads,
+                num_layers=4,
+                dropout=drop_p,
+                out_dim=latent_dim,
+            )
         self.similarity_pooler = (
             SimilarityPoolingBatch(
                 threshold=config.similarity_threshold,
@@ -140,8 +194,15 @@ class ConvformerEncoder1d(SigmaVAEEncoder):
             if config.use_similarity
             else None
         )
+        if config.use_aligner and config.use_similarity:
+            raise ValueError("use_aligner and use_similarity cannot both be enabled.")
         if config.latent_chunk_ablate_dropout or config.latent_chunk_ablate_kl:
             _assert_latent_chunks_divisible(config.latent_dim, config.latent_chunk_size)
+        if config.use_vq:
+            if config.vq_quant_dim > config.latent_dim:
+                raise ValueError(
+                    f"vq_quant_dim ({config.vq_quant_dim}) must be <= latent_dim ({config.latent_dim})."
+                )
         if config.freeze_encoder_before_latent_heads:
             self._freeze_encoder_before_latent_heads()
 
@@ -153,7 +214,9 @@ class ConvformerEncoder1d(SigmaVAEEncoder):
         if hasattr(self, "logvar"):
             for param in self.logvar.parameters():
                 param.requires_grad = True
-
+        if self.config.use_vq and self.vq is not None:
+            for param in self.vq.parameters():
+                param.requires_grad = True
     def forward(
         self,
         x: torch.FloatTensor,
@@ -179,31 +242,125 @@ class ConvformerEncoder1d(SigmaVAEEncoder):
         )
         durations = None
         z_pooled_fps = None
-        if self.similarity_pooler is not None:
-            z, durations, pooled_mask = self.similarity_pooler(z, latent_padding_mask.long())
+        phoneme_bottleneck_cond = None
+        vq_loss = None
+        vq_perplexity = None
+        vq_codes_used = None
+        vq_codes_used_frac = None
+        if self.config.use_aligner:
+            phoneme_alignments = kwargs.get("phoneme_alignments", None)
+            if phoneme_alignments is not None:
+                if len(phoneme_alignments) != z.shape[0]:
+                    raise ValueError(
+                        f"Expected {z.shape[0]} phoneme alignments, got {len(phoneme_alignments)}."
+                    )
+                alignment_output = self.alignment_builder.build(
+                    all_phoneme_alignments=phoneme_alignments,
+                    total_frames_list=[z.shape[1]] * z.shape[0],
+                    device=z.device,
+                    dtype=z.dtype,
+                )
+                alignments = alignment_output.alignments
+                if latent_padding_mask is not None:
+                    alignments = alignments.masked_fill(
+                        latent_padding_mask.unsqueeze(-1), 0.0
+                    )
+                durations = alignments.sum(dim=1).to(dtype=torch.long)
+                aligned_phoneme_mask = alignment_output.phoneme_mask | (durations == 0)
+                z_scores = self.qformer_in_proj(z)
+                mel_values = z
+                if self.config.residual:
+                    phoneme_values = self.phoneme_to_value(
+                        alignment_output.embeddings.to(dtype=z.dtype)
+                    )
+                    residual_gate = torch.sigmoid(self.residual_logit).to(dtype=z.dtype)
+                    # Map phoneme-level values [B, N, D] to frame-level [B, T, D]
+                    # via alignment matrix [B, T, N] before residual subtraction.
+                    frame_phoneme_values = torch.bmm(alignments, phoneme_values)
+                    frame_norm = alignments.sum(dim=-1, keepdim=True).clamp_min(1.0)
+                    frame_phoneme_values = frame_phoneme_values / frame_norm
+                    mel_values = z - residual_gate * frame_phoneme_values
+                qformer_out = self.qformer(
+                    mel_features=z_scores,
+                    alignment=alignments,
+                    phoneme_embeddings=alignment_output.embeddings.to(
+                        dtype=z_scores.dtype
+                    ),
+                    phoneme_mask=aligned_phoneme_mask,
+                    mel_values=mel_values,
+                )
+                z = qformer_out.pooled
+                phoneme_bottleneck_cond = self.phoneme_to_bottleneck(
+                    alignment_output.embeddings.to(dtype=z.dtype)
+                )
+                latent_padding_mask = aligned_phoneme_mask
+                valid_durs = durations[durations > 0].float()
+                if valid_durs.numel() > 0:
+                    latent_fps = 93.75 / float(self.C)
+                    z_pooled_fps = (
+                        torch.tensor(latent_fps, device=z.device, dtype=z.dtype)
+                        / valid_durs.mean()
+                    )
+        elif self.similarity_pooler is not None:
+            z, durations, pooled_mask = self.similarity_pooler(
+                z, latent_padding_mask.long()
+            )
             latent_padding_mask = pooled_mask.bool()
             valid_durs = durations[durations > 0].float()
             if valid_durs.numel() > 0:
                 latent_fps = 93.75 / float(self.C)
-                z_pooled_fps = torch.tensor(
-                    latent_fps, device=z.device, dtype=z.dtype
-                ) / valid_durs.mean()
+                z_pooled_fps = (
+                    torch.tensor(latent_fps, device=z.device, dtype=z.dtype)
+                    / valid_durs.mean()
+                )
 
-        mu = self.mu(z)
+        mu_vec = self.mu(z)
+        vq_latent_residual = None
+        if self.config.use_vq:
+            qd = self.config.vq_quant_dim
+            mu_head = mu_vec[..., :qd]
+            mu_tail = mu_vec[..., qd:]
+            mu_res_vq, vq_loss, mu_q, vq_stats = self.vq(
+                mu_head,
+                latent_padding_mask,
+                global_step=kwargs.get("step", None),
+            )
+            vq_perplexity = vq_stats.perplexity
+            vq_codes_used = vq_stats.codes_used
+            vq_codes_used_frac = vq_stats.codes_used_frac
+            vq_latent_residual = (mu_head - mu_q.detach()).detach()
+            r_add = self.vq_residual_drop(mu_res_vq)
+            z_head = mu_q + r_add
+            mu = torch.cat([mu_res_vq, mu_tail], dim=-1)
+        else:
+            mu = mu_vec
+
         logvar = None
         if hasattr(self, "logvar"):
             logvar = self.logvar(z)
-        z = self.reparameterize(mu, logvar)
+        z_stoch = self.reparameterize(mu, logvar)
+        if phoneme_bottleneck_cond is not None:
+            fusion_gate = torch.sigmoid(self.phoneme_fusion_logit).to(dtype=z_stoch.dtype)
+            z_stoch = z_stoch + fusion_gate * phoneme_bottleneck_cond.to(dtype=z_stoch.dtype)
 
         if self.config.latent_chunk_ablate_dropout:
-            z = apply_latent_chunk_dropout(
-                z,
+            z_stoch = apply_latent_chunk_dropout(
+                z_stoch,
                 chunk_size=self.config.latent_chunk_size,
                 dropout_start=self.config.latent_chunk_dropout_start,
                 dropout_end=self.config.latent_chunk_dropout_end,
                 training=self.training,
                 hierarchical=self.config.latent_chunk_dropout_hierarchical,
             )
+
+        if self.config.use_vq:
+            qd = self.config.vq_quant_dim
+            z = torch.cat(
+                [z_head.to(dtype=z_stoch.dtype), z_stoch[..., qd:].to(dtype=z_stoch.dtype)],
+                dim=-1,
+            )
+        else:
+            z = z_stoch
 
         semantic_loss = None
         if kwargs.get("semantic_guidance", None) is not None:
@@ -212,14 +369,25 @@ class ConvformerEncoder1d(SigmaVAEEncoder):
         kl_loss = None
         if kwargs.get("step", None) is not None:
             if self.config.latent_chunk_ablate_kl:
-                ch_w = latent_chunk_kl_channel_weights(
-                    latent_dim=self.config.latent_dim,
-                    chunk_size=self.config.latent_chunk_size,
-                    weight_start=self.config.latent_chunk_kl_weight_start,
-                    weight_end=self.config.latent_chunk_kl_weight_end,
-                    device=z.device,
-                    dtype=torch.float32,
-                )
+                if self.config.use_vq and self.config.vq_kl_zero_chunks > 0:
+                    ch_w = latent_chunk_kl_channel_weights_vq_tail(
+                        latent_dim=self.config.latent_dim,
+                        chunk_size=self.config.latent_chunk_size,
+                        zero_chunks=self.config.vq_kl_zero_chunks,
+                        tail_weight_start=self.config.vq_kl_tail_weight_start,
+                        tail_weight_end=self.config.vq_kl_tail_weight_end,
+                        device=z.device,
+                        dtype=torch.float32,
+                    )
+                else:
+                    ch_w = latent_chunk_kl_channel_weights(
+                        latent_dim=self.config.latent_dim,
+                        chunk_size=self.config.latent_chunk_size,
+                        weight_start=self.config.latent_chunk_kl_weight_start,
+                        weight_end=self.config.latent_chunk_kl_weight_end,
+                        device=z.device,
+                        dtype=torch.float32,
+                    )
                 kl_term = self.kl_divergence_weighted(
                     mu,
                     logvar,
@@ -244,6 +412,11 @@ class ConvformerEncoder1d(SigmaVAEEncoder):
             semantic_loss=semantic_loss,
             durations=durations,
             z_pooled_fps=z_pooled_fps,
+            vq_loss=vq_loss,
+            vq_perplexity=vq_perplexity,
+            vq_codes_used=vq_codes_used,
+            vq_codes_used_frac=vq_codes_used_frac,
+            vq_latent_residual=vq_latent_residual,
         )
 
 

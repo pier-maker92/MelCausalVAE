@@ -1,0 +1,66 @@
+# Only specify values that override defaults in configs/defaults/*.yaml
+training:
+  num_train_epochs: 1
+  dataset_name: librispeech_aligned
+  output_dir: checkpoints/exps/1d-8x-NAR-AE-vq-chunks
+  min_learning_rate: 5e-5
+  per_device_train_batch_size: 24
+  per_device_eval_batch_size: 2
+  report_to: wandb
+  wandb_project: CaDiT-VAE-exps
+  wandb_run_name: 1d-8x-NAR-AE-vq-chunks
+  fp16: false
+  bf16: true
+  save_steps: 1000
+  eval_steps: 500
+  save_total_limit: 1
+  gradient_accumulation_steps: 1
+  dataloader_num_workers: 4
+  #from_pretrained: /home/ec2-user/MelCausalVAE/checkpoints/MelCausalVAE/restored-downsample8X/checkpoint-16000/model.safetensors
+  #resume_from_checkpoint: /home/ec2-user/MelCausalVAE/checkpoints/MelCausalVAE/restored-downsample8X/checkpoint-16000
+convformer:
+  compress_factor_C: 4
+  tf_heads: 8
+  tf_layers: 4
+  latent_dim: 64
+  n_residual_blocks: 3
+  logvar_layer: false
+  use_sofplus: false
+  target_std: 0.3
+  kl_loss_warmup_steps: 1000
+  kl_loss_weight: 5e-4
+  use_bigvgan_mel: false
+  d_model: 1024
+  use_1d_encoder: true
+  use_vq: true
+  vq_num_embeddings: 128
+  vq_commit_weight: 0.25
+  vq_reset_dead_codes: true
+  vq_reset_every_forward: 100
+  # Dropout on VQ residual before adding to mu_q (sometimes zeros the additive residual).
+  vq_residual_dropout: 0.2
+  vq_quant_dim: 32
+  vq_kl_zero_chunks: 16
+  vq_kl_tail_weight_start: 1.0e-6
+  vq_kl_tail_weight_end: 1.0e-4
+  vq_use_ema_codebook: false
+  # vq_ema_decay: 0.99
+  latent_chunk_size: 2
+  latent_chunk_ablate_dropout: true
+  latent_chunk_dropout_start: 0.0
+  latent_chunk_dropout_end: 0.4
+  latent_chunk_dropout_hierarchical: false
+  latent_chunk_ablate_kl: true
+
+cfm:
+  unet_dim: 768
+  unet_depth: 6
+  unet_heads: 12
+  unet_dropout_rate: 0.1
+  use_conv_layer: true
+  audio_latent_dim: 64
+  uncond_prob: 0.15
+  learned_prior: false
+  is_causal: false
+  use_window_attention: true
+  window_attention_seconds: 3.0
