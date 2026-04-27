@@ -10,6 +10,7 @@ from .encoder_1d import ConvformerEncoder1d
 from .melspecEncoder import MelSpectrogramEncoder, MelSpectrogramConfig
 from .ConvformerDecoder import ConvformerDecoder, ConvformerDecoderConfig
 
+
 def count_parameters_by_module(model, title: str):
     table_width = 65
     print("=" * table_width)
@@ -17,20 +18,21 @@ def count_parameters_by_module(model, title: str):
     print("-" * table_width)
     print(f"{'Module':<30} | {'Total Params':>15} | {'Trainable':>12}")
     print("-" * table_width)
-    
+
     total_p = 0
     trainable_p = 0
-    
+
     for name, module in model.named_children():
         t = sum(p.numel() for p in module.parameters())
         tr = sum(p.numel() for p in module.parameters() if p.requires_grad)
         print(f"{name:<30} | {t:15,d} | {tr:12,d}")
         total_p += t
         trainable_p += tr
-        
+
     print("-" * table_width)
     print(f"{'GRAND TOTAL':<30} | {total_p:15,d} | {trainable_p:12,d}")
     print("-" * table_width + "\n")
+
 
 @dataclass
 class VAEOutput:
@@ -70,7 +72,7 @@ class VAEConfig:
 
 class VAE(torch.nn.Module):
     _keys_to_ignore_on_save = None
-    
+
     def __init__(self, config: VAEConfig, dtype: torch.dtype):
         super().__init__()
         self.config = config
@@ -80,7 +82,9 @@ class VAE(torch.nn.Module):
                     "encoder use_vq is only supported with the DiT decoder "
                     "(context dim = latent_dim)."
                 )
-            classic_dec_cfg = ConvformerDecoderConfig.from_encoder_config(config.encoder_config)
+            classic_dec_cfg = ConvformerDecoderConfig.from_encoder_config(
+                config.encoder_config
+            )
             self.decoder = ConvformerDecoder(classic_dec_cfg)
         else:
             self.decoder = DiT(config.decoder_config)
@@ -131,7 +135,7 @@ class VAE(torch.nn.Module):
 
     def forward(self, audios_srs, **kwargs):
         encoded_audios = self.wav2mel(audios_srs)
-        #corrupted_encoded_audios = self.wav2mel(kwargs.get("corrupted_audios_srs"))
+        # corrupted_encoded_audios = self.wav2mel(kwargs.get("corrupted_audios_srs"))
         semantic_output = None
         if self.config.add_semantic_distillation:
             semantic_output = self.semantic_module(audios_srs)
@@ -188,13 +192,15 @@ class VAE(torch.nn.Module):
             step=None,
         )
         if self.config.add_semantic_mapper:
-            convformer_output.semantic_features = self.semantic_mapper(convformer_output.mu).y.to(
-                convformer_output.mu.dtype
-            )
+            convformer_output.semantic_features = self.semantic_mapper(
+                convformer_output.mu
+            ).y.to(convformer_output.mu.dtype)
         if not return_original_mel:
             return convformer_output
         else:
-            encoded_audios.audio_features = self.denormalize_mel(encoded_audios.audio_features)
+            encoded_audios.audio_features = self.denormalize_mel(
+                encoded_audios.audio_features
+            )
             return convformer_output, encoded_audios
 
     @torch.no_grad()
@@ -213,19 +219,19 @@ class VAE(torch.nn.Module):
         """
         Sample from the VAE.
         """
-        # if z is not None:
-        #     context_vector = z
-        # elif µ is not None:
-        #     context_vector = self.encoder.reparameterize(µ)
-        # else:
-        #     raise ValueError("Either z or µ must be provided")
+        if z is not None:
+            context_vector = z
+        elif mu is not None:
+            context_vector = self.encoder.reparameterize(mu)
+        else:
+            raise ValueError("Either z or mu must be provided")
 
         reconstructed_mel = self.decoder.generate(
             num_steps=num_steps,
             generator=generator,
             temperature=temperature,
             padding_mask=padding_mask,
-            context_vector=z,
+            context_vector=context_vector,
             durations=durations,
             guidance_scale=guidance_scale,
             std=std,
