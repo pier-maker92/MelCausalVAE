@@ -90,3 +90,10 @@ Thumbs.db
 # Logs
 *.log
 
+# Custom ignores
+*.png
+*.json
+*.sh
+*.npz
+*.csv
+ablations/

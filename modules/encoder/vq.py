@@ -1,22 +1,8 @@
-"""
-Minimal vector quantisation for encoder residuals.
-
-Single codebook of ``num_embeddings`` vectors in ``dim`` space (encoder latent dim when VQ is after ``mu``).
-Hard nearest-neighbour assignment + VQ-VAE style commitment loss.
-
-Optional EMA codebook updates (no grad on embeddings); commitment still trains the encoder.
-
-Forward returns ``z - z_q`` (quantised vector subtracted) for use as input
-to Gaussian heads, while ``vq_loss`` trains the encoder (and codebook if not EMA).
-"""
-
-from __future__ import annotations
-
-from typing import NamedTuple, Optional, Tuple
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from modules.configs import VQConfig
+from typing import NamedTuple, Optional, Tuple
 
 
 class VQBatchStats(NamedTuple):
@@ -56,7 +42,9 @@ def _batch_vq_stats(
     )
 
 
-def _deterministic_sample_indices(n: int, m: int, step: int, device: torch.device) -> torch.Tensor:
+def _deterministic_sample_indices(
+    n: int, m: int, step: int, device: torch.device
+) -> torch.Tensor:
     """``m`` indices in ``[0, n)`` identical across ranks given the same ``step`` (DDP-safe)."""
     if n <= 0 or m <= 0:
         return torch.zeros(0, dtype=torch.long, device=device)
@@ -65,54 +53,30 @@ def _deterministic_sample_indices(n: int, m: int, step: int, device: torch.devic
 
 
 class HardVectorQuantizer(nn.Module):
-    """
-    Args:
-        dim: feature dimension (e.g. encoder ``d_model``).
-        num_embeddings: codebook size (number of discrete codes).
-        commit_weight: weight on commitment term (encoder pulls toward codes).
-        reset_dead_codes: if True (training), reassign unused codes each step to random
-            encoder vectors (valid positions), mitigating collapse.
-        reset_max_per_step: cap how many dead codes are reset per forward (None = all).
-        reset_every_forward: run dead-code reset only every N forwards (use >1 if using
-            gradient accumulation to avoid thrashing the codebook mid-accumulation).
-        use_ema_codebook: if True, update ``codebook`` with EMA of batch cluster stats
-            (no optimizer grad on embeddings); ``vq_loss`` is commitment-only.
-        ema_decay: decay for EMA buffers (per-code updates only when the code appears
-            in the current batch).
-        ema_epsilon: floor on cluster size when dividing to form code vectors.
-    """
-
     def __init__(
         self,
-        dim: int,
-        num_embeddings: int,
-        commit_weight: float = 0.25,
-        reset_dead_codes: bool = True,
-        reset_max_per_step: Optional[int] = None,
-        reset_every_forward: int = 1,
-        use_ema_codebook: bool = False,
-        ema_decay: float = 0.99,
-        ema_epsilon: float = 1e-5,
+        config: VQConfig,
     ):
         super().__init__()
-        self.dim = dim
-        self.num_embeddings = num_embeddings
-        self.commit_weight = float(commit_weight)
-        self.reset_dead_codes = bool(reset_dead_codes)
-        self.reset_max_per_step = reset_max_per_step
-        self.reset_every_forward = max(1, int(reset_every_forward))
-        self.use_ema_codebook = bool(use_ema_codebook)
-        self.ema_decay = float(ema_decay)
-        self.ema_epsilon = float(ema_epsilon)
+        self.config = config
+        self.dim = config.dim_to_quantize
+        self.num_embeddings = config.num_embeddings
+        self.commit_weight = float(config.commitment_weight)
+        self.reset_dead_codes = bool(config.reset_dead_codes)
+        self.reset_max_per_step = config.reset_max_per_step
+        self.reset_every_forward = max(1, int(config.reset_every_forward))
+        self.use_ema_codebook = bool(config.use_ema_codebook)
+        self.ema_decay = float(config.ema_decay)
+        self.ema_epsilon = float(config.ema_epsilon)
         self.register_buffer("_vq_forward_index", torch.tensor(0, dtype=torch.long))
-        self.codebook = nn.Embedding(num_embeddings, dim)
-        nn.init.normal_(self.codebook.weight, mean=0.0, std=dim**-0.5)
+        self.codebook = nn.Embedding(self.num_embeddings, self.dim)
+        nn.init.normal_(self.codebook.weight, mean=0.0, std=self.dim**-0.5)
 
         if self.use_ema_codebook:
             self.codebook.weight.requires_grad_(False)
             self.register_buffer(
                 "_ema_cluster_size",
-                torch.ones(num_embeddings, dtype=torch.float32),
+                torch.ones(self.num_embeddings, dtype=torch.float32),
             )
             self.register_buffer(
                 "_ema_embedding_sum",
@@ -258,7 +222,9 @@ class HardVectorQuantizer(nn.Module):
         step = int(global_step) if global_step is not None else 0
         r = _deterministic_sample_indices(n, m, step, z.device)
         dead_f = dead.to(dtype=torch.float32).reshape(-1, 1)
-        d_ix = torch.arange(self.dim, device=z.device, dtype=torch.float32).reshape(1, -1)
+        d_ix = torch.arange(self.dim, device=z.device, dtype=torch.float32).reshape(
+            1, -1
+        )
         jitter = (1e-3 * torch.sin(dead_f * 0.01745 + d_ix * 0.03142 + float(step))).to(
             self.codebook.weight.dtype
         )
