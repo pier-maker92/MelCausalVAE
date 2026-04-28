@@ -1,0 +1,9 @@
+defaults:
+  - defaults/train
+  - defaults/convformer
+  - defaults/cfm
+  - settings: null
+  - _self_
+
+# The _self_ target ensures that any keys added directly in this file
+# will override the defaults loaded above.

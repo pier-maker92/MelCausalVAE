@@ -3,7 +3,8 @@ import yaml
 import wandb
 import torch
 import logging
-import argparse
+import hydra
+from omegaconf import DictConfig, OmegaConf
 from vocos import Vocos
 from pathlib import Path
 from typing import Dict, List
@@ -566,61 +567,14 @@ class VAEtrainer(Trainer):
         return fig
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="Train VAE")
-
-    # Data arguments
-    parser.add_argument(
-        "--exp-config",
-        dest="exp_config_path",
-        type=Path,
-        required=True,
-        help="Path to experiment YAML overriding defaults in configs/defaults",
-    )
-
-    # DeepSpeed config
-    parser.add_argument(
-        "--deepspeed",
-        type=str,
-        default=None,
-        help="Path to DeepSpeed config file",
-    )
-
-    return parser.parse_args()
-
-
-def main():
-    args = parse_args()
-
-    # --- Load defaults + experiment overrides ---
-    def deep_update(base: dict, override: dict) -> dict:
-        for k, v in (override or {}).items():
-            if isinstance(v, dict) and isinstance(base.get(k), dict):
-                base[k] = deep_update(base[k], v)
-            else:
-                base[k] = v
-        return base
-
-    def load_yaml(path: Path) -> dict:
-        if not path.exists():
-            return {}
-        with path.open("r") as f:
-            data = yaml.safe_load(f) or {}
-        return data
-
-    cfg_root = Path(__file__).resolve().parent / "configs"
-    defaults = {
-        "training": load_yaml(cfg_root / "defaults" / "train.yaml").get("training", {}),
-        "convformer": load_yaml(cfg_root / "defaults" / "convformer.yaml").get(
-            "convformer", {}
-        ),
-        "cfm": load_yaml(cfg_root / "defaults" / "cfm.yaml").get("cfm", {}),
-    }
-    custom = load_yaml(args.exp_config_path)
-    merged = deep_update(defaults, custom)
-    training_cfg = merged.get("training", {})
-    convformer_cfg = merged.get("convformer", {})
-    cfm_cfg = merged.get("cfm", {})
+@hydra.main(version_base=None, config_path="configs", config_name="main")
+def main(cfg: DictConfig):
+    # Convert OmegaConf DictConfig to standard python dict
+    cfg_dict = OmegaConf.to_container(cfg, resolve=True)
+    
+    training_cfg = cfg_dict.get("training", {})
+    convformer_cfg = cfg_dict.get("convformer", {})
+    cfm_cfg = cfg_dict.get("cfm", {})
 
     # Set seed for reproducibility
     set_seed(training_cfg.get("seed", 42))
@@ -692,10 +646,9 @@ def main():
     training_cfg["learning_rate"] = float(training_cfg.get("learning_rate"))
     min_learning_rate = float(training_cfg.pop("min_learning_rate", 0.0))
 
-    # Add DeepSpeed config if provided
-    if args.deepspeed:
-        training_cfg["deepspeed"] = args.deepspeed
-        logger.info(f"Using DeepSpeed config: {args.deepspeed}")
+    # Check for DeepSpeed config in training_cfg
+    if "deepspeed" in training_cfg and training_cfg["deepspeed"]:
+        logger.info(f"Using DeepSpeed config: {training_cfg['deepspeed']}")
 
     from_pretrained = training_cfg.pop("from_pretrained", None)
     if from_pretrained:
