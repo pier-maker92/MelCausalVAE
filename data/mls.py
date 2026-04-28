@@ -11,7 +11,7 @@ from collections import defaultdict
 from torch.utils.data import DataLoader
 from datasets import load_dataset, concatenate_datasets
 from data.audio_dataset import SimpleAudioDataset, DataCollator, TrainDatasetWrapper
-from modules.melspecEncoder import MelSpectrogramEncoder, MelSpectrogramConfig
+from modules.feature_extractor import MelSpectrogramEncoder, MelSpectrogramConfig
 
 # Specify custom cache directory
 cache_dir = "/home/ec2-user/dataset_cache"
@@ -65,8 +65,12 @@ class MLSDataset(SimpleAudioDataset):
         partitions_per_destination = defaultdict(list)
         for dataset in ds_list:
             for partition in dataset:
-                print(f"partition: {partition}, destination: {self._partition_to_destination(partition)}")
-                partitions_per_destination[self._partition_to_destination(partition)].append(dataset[partition])
+                print(
+                    f"partition: {partition}, destination: {self._partition_to_destination(partition)}"
+                )
+                partitions_per_destination[
+                    self._partition_to_destination(partition)
+                ].append(dataset[partition])
 
         for destination in partitions_per_destination:
             setattr(

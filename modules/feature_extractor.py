@@ -1,15 +1,15 @@
 import sys
+import json
 import torch
 import einops
-import json
 from torch import nn
-from typing import Optional
 from einops import rearrange
-from typing import List, Tuple
-from dataclasses import dataclass
-from transformers import PretrainedConfig
+from .configs import MelSpectrogramConfig
 from torchaudio.transforms import MelSpectrogram
+from .output_dataclasses import FeatureExtractorOutput
 
+
+# TODO fix implementation for bigvgan
 sys.path.append("/home/ec2-user/MelCausalVAE/bigvgan/bigvgan_v2_24khz_100band_256x")
 
 
@@ -26,22 +26,7 @@ def load_hparams_from_json(path) -> AttrDict:
     return AttrDict(json.loads(data))
 
 
-@dataclass
-class MelSpectrogramConfig:
-    mel_channels: int = 100
-    sampling_rate: int = 24000
-    n_fft: int = 1024
-    hop_length: int = 256
-    n_mels: int = 100
-    padding: str = "center"
-    normalize: bool = True
-    use_bigvgan_mel: bool = False
-
-
-class MelSpectrogramEncoder(torch.nn.Module):
-    _supports_flash_attn_2 = True
-    _supports_sdpa = True
-
+class FeatureExtractor(nn.Module):
     def __init__(
         self,
         config: MelSpectrogramConfig,
@@ -165,16 +150,7 @@ class MelSpectrogramEncoder(torch.nn.Module):
             .to(dtype=torch.bool)
             .squeeze(0)
             .squeeze(0)
-        )  # 93.75Hz
-
-        # means = []
-        # stds = []
-        # for features, mask in zip(mel_spec, padding_mask):
-        #     std, mean = self._update_std_mean_with_momentum(features[~mask])
-        #     means.append(mean)
-        #     stds.append(std)
-        # print(f"means: {torch.tensor(means).mean()}")
-        # print(f"stds: {torch.tensor(stds).mean()}")
+        )  # 93.75Hz @ 24000 sampling rate
 
         assert padding_mask.shape[1] == mel_spec.shape[1], (
             f"Temporal dimensions mismatch: padding_mask {padding_mask.shape[1]} vs "
@@ -184,17 +160,7 @@ class MelSpectrogramEncoder(torch.nn.Module):
         if self.normalize:
             mel_spec = (mel_spec - self.mean) / self.std
 
-        return MelSpectrogramOutput(
+        return FeatureExtractorOutput(
             audio_features=mel_spec,
             padding_mask=padding_mask,
-            codes=None,
-            embeddings=mel_spec,
         )
-
-
-@dataclass
-class MelSpectrogramOutput:
-    audio_features: torch.Tensor
-    padding_mask: torch.Tensor
-    codes: Optional[torch.Tensor] = None
-    embeddings: Optional[torch.Tensor] = None

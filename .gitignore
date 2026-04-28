@@ -96,4 +96,8 @@ Thumbs.db
 *.sh
 *.npz
 *.csv
+*.parquet
 ablations/
+
+# Ignore all hidden directories and their contents
+**/.*/**

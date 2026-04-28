@@ -9,7 +9,7 @@ from tqdm import tqdm
 from collections import defaultdict
 from torch.utils.data import DataLoader
 from datasets import load_dataset, concatenate_datasets
-from modules.melspecEncoder import MelSpectrogramEncoder, MelSpectrogramConfig
+from modules.feature_extractor import MelSpectrogramEncoder, MelSpectrogramConfig
 from data.audio_dataset import SimpleAudioDataset, DataCollator, TrainDatasetWrapper
 
 # Specify custom cache directory

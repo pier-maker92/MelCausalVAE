@@ -51,9 +51,9 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
-from modules.cfm import DiTConfig
+from modules.decoder.cfm import DiTConfig
 from modules.Encoder import ConvformerEncoderConfig
-from modules.melspecEncoder import MelSpectrogramConfig
+from modules.feature_extractor import MelSpectrogramConfig
 from modules.VAE import VAE, VAEConfig
 from vocos import Vocos
 
@@ -96,7 +96,9 @@ def build_model_from_config(
 
     if mel_cfg.use_bigvgan_mel:
         try:
-            bigvgan_path = "/home/ec2-user/MelCausalVAE/bigvgan/bigvgan_v2_24khz_100band_256x"
+            bigvgan_path = (
+                "/home/ec2-user/MelCausalVAE/bigvgan/bigvgan_v2_24khz_100band_256x"
+            )
             if bigvgan_path not in sys.path:
                 sys.path.append(bigvgan_path)
             import bigvgan
@@ -160,9 +162,7 @@ def load_wav_mono_resampled(
     wav = wav.squeeze(0)
     if sr != target_sr:
         logger.info("Resampling %s: %s Hz → %s Hz", path.name, sr, target_sr)
-        wav = torchaudio.functional.resample(
-            wav.unsqueeze(0), sr, target_sr
-        ).squeeze(0)
+        wav = torchaudio.functional.resample(wav.unsqueeze(0), sr, target_sr).squeeze(0)
     return wav.to(device=device, dtype=torch.float32)
 
 

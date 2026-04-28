@@ -96,10 +96,6 @@ class Transformer(Module):
         self.out_linear = nn.Linear(dim, audio_latent_dim, bias=False)
         self.is_causal = is_causal  # honor ctor arg
 
-    @property
-    def device(self):
-        return next(self.parameters()).device
-
     def _get_causal_mask(self, attention_mask: torch.BoolTensor):
         seq_len = attention_mask.shape[1]
         causal_mask = torch.triu(
@@ -114,7 +110,9 @@ class Transformer(Module):
         causal_mask = causal_mask.unsqueeze(0).unsqueeze(0)
         return attention_mask.unsqueeze(1).unsqueeze(2) & causal_mask
 
-    def _get_custom_causal_mask(self, attention_mask: torch.BoolTensor, special_mask: torch.BoolTensor):
+    def _get_custom_causal_mask(
+        self, attention_mask: torch.BoolTensor, special_mask: torch.BoolTensor
+    ):
         batch, seq_len = attention_mask.shape
         device = attention_mask.device
         causal_mask = torch.triu(
@@ -124,8 +122,14 @@ class Transformer(Module):
         identity = torch.eye(seq_len, device=device, dtype=torch.bool)
         special_mask_row = special_mask.unsqueeze(1).unsqueeze(-1)
         special_mask_col = special_mask.unsqueeze(1).unsqueeze(1)
-        interest_mask = (identity.unsqueeze(0) & special_mask_row & special_mask_col) | (~special_mask_col)
-        final_mask = causal_mask.unsqueeze(0).unsqueeze(0) & attention_mask.unsqueeze(1).unsqueeze(2) & interest_mask
+        interest_mask = (
+            identity.unsqueeze(0) & special_mask_row & special_mask_col
+        ) | (~special_mask_col)
+        final_mask = (
+            causal_mask.unsqueeze(0).unsqueeze(0)
+            & attention_mask.unsqueeze(1).unsqueeze(2)
+            & interest_mask
+        )
         return final_mask
 
     def forward(
@@ -144,7 +148,9 @@ class Transformer(Module):
 
         # Ensure a 2D boolean mask for FlashAttention varlen when needed
         if attention_mask is None:
-            attention_mask = torch.ones((batch, seq_len), device=x.device, dtype=torch.bool)
+            attention_mask = torch.ones(
+                (batch, seq_len), device=x.device, dtype=torch.bool
+            )
 
         # time embedding
         time_emb = self.sinu_pos_emb(t)
@@ -154,7 +160,9 @@ class Transformer(Module):
             register_tokens = repeat(self.register_tokens, "n d -> b n d", b=batch)
             x, ps = pack([register_tokens, x], "b * d")
             if exists(attention_mask):
-                attention_mask = F.pad(attention_mask, (self.num_register_tokens, 0), value=True)
+                attention_mask = F.pad(
+                    attention_mask, (self.num_register_tokens, 0), value=True
+                )
 
         # keep track of skip connections
         skip_connects = []
@@ -191,7 +199,16 @@ class Transformer(Module):
                 x = skip_combiner(x)
 
             attn_input = attn_prenorm(x, **rmsnorm_kwargs)
-            x = attn(attn_input, mask=attention_mask, rotary_emb=rotary_emb, causal=self.is_causal, group_size=group_size) + x
+            x = (
+                attn(
+                    attn_input,
+                    mask=attention_mask,
+                    rotary_emb=rotary_emb,
+                    causal=self.is_causal,
+                    group_size=group_size,
+                )
+                + x
+            )
 
             ff_input = ff_prenorm(x, **rmsnorm_kwargs)
             x = ff(ff_input) + x
@@ -202,3 +219,11 @@ class Transformer(Module):
 
         x = self.final_norm(x)
         return self.out_linear(x)
+
+    @property
+    def device(self):
+        return next(self.parameters()).device
+
+    @property
+    def dtype(self):
+        return next(self.parameters()).dtype

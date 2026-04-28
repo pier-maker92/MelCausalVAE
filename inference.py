@@ -12,7 +12,7 @@ model = MelVAEInference.load(
 model.eval()
 
 with torch.inference_mode():
-    wav = model.load_wav_mono_resampled("ablations/male.wav")
+    wav = model.load_wav_mono_resampled("ablations/violin.wav")
     latent = model.encode(wav, model.sample_rate)
     audio = model.sample(
         latent,
@@ -27,8 +27,8 @@ with torch.inference_mode():
 
 os.makedirs("audio_outputs", exist_ok=True)
 torchaudio.save(
-    "audio_outputs/reconstructed.wav",
+    "audio_outputs/violin.wav",
     audio.unsqueeze(0),
     model.sample_rate,
 )
-print("Audio saved to audio_outputs/reconstructed.wav")
+print("Audio saved to audio_outputs/violin.wav")

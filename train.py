@@ -8,10 +8,10 @@ from vocos import Vocos
 from pathlib import Path
 from typing import Dict, List
 import matplotlib.pyplot as plt
-from modules.cfm import DiTConfig
+from modules.decoder.cfm import DiTConfig
 from modules.VAE import VAE, VAEConfig
 from modules.Encoder import ConvformerEncoderConfig
-from modules.melspecEncoder import MelSpectrogramConfig
+from modules.feature_extractor import MelSpectrogramConfig
 from modules.similarity import plot_durations_on_mel
 from transformers import (
     Trainer,
@@ -104,13 +104,13 @@ class VAEtrainer(Trainer):
         """Compute the loss for the VAE"""
         if hasattr(self.control, "granular_losses") and model.training:
             audios_srs = inputs["output_audios_srs"]
-            #corrupted_audios_srs = inputs["corrupted_audios_srs"]
+            # corrupted_audios_srs = inputs["corrupted_audios_srs"]
             # Forward pass
             outputs = model(
                 audios_srs=audios_srs,
                 training_step=self.state.global_step,
                 phoneme_alignments=inputs["phoneme_alignments"],
-                #corrupted_audios_srs=corrupted_audios_srs,
+                # corrupted_audios_srs=corrupted_audios_srs,
             )
             audio_loss = outputs["audio_loss"]
             kl_loss = outputs["kl_loss"]
@@ -334,13 +334,9 @@ class VAEtrainer(Trainer):
         # Get some samples from the eval dataset using its dataloader
         eval_dataloader = self.get_eval_dataloader(self.eval_dataset)
 
-        need_aligner = getattr(
-            self.model.config.encoder_config, "use_aligner", False
-        )
+        need_aligner = getattr(self.model.config.encoder_config, "use_aligner", False)
         max_batches = (
-            len(eval_dataloader)
-            if hasattr(eval_dataloader, "__len__")
-            else 10_000
+            len(eval_dataloader) if hasattr(eval_dataloader, "__len__") else 10_000
         )
 
         audios_srs = None
@@ -351,9 +347,7 @@ class VAEtrainer(Trainer):
             if "output_audios_srs" not in batch:
                 continue
             pas = batch.get("phoneme_alignments")
-            if need_aligner and (
-                pas is None or any(p is None for p in pas)
-            ):
+            if need_aligner and (pas is None or any(p is None for p in pas)):
                 continue
             audios_srs = batch["output_audios_srs"]
             audios_srs = [
@@ -411,15 +405,22 @@ class VAEtrainer(Trainer):
                 plt.close(fig)
 
                 # Plot durations on mel if available
-                if results.get("durations") is not None and results["durations"][idx] is not None:
+                if (
+                    results.get("durations") is not None
+                    and results["durations"][idx] is not None
+                ):
                     durations = results["durations"][idx]
-                    
+
                     # Use original_padding_mask for the original mel (before upsampling)
-                    mel_mask = results.get("original_padding_mask", results["padding_mask"])[idx].unsqueeze(0)
-                    
+                    mel_mask = results.get(
+                        "original_padding_mask", results["padding_mask"]
+                    )[idx].unsqueeze(0)
+
                     # Get compress_factor_C from model config
-                    compress_factor_C = self.model.config.encoder_config.compress_factor_C
-                    
+                    compress_factor_C = (
+                        self.model.config.encoder_config.compress_factor_C
+                    )
+
                     seg_fig = plot_durations_on_mel(
                         mels=results["original_mel"][idx].unsqueeze(0),
                         durations=durations.unsqueeze(0),

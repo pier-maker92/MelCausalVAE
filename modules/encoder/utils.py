@@ -1,4 +1,6 @@
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
 
 def _assert_latent_chunks_divisible(latent_dim: int, chunk_size: int) -> None:
@@ -156,3 +158,76 @@ def latent_chunk_kl_channel_weights_vq_tail(
             wc = tail_weight_start + (tail_weight_end - tail_weight_start) * t
         w[c * chunk_size : (c + 1) * chunk_size] = wc
     return w
+
+
+class TimeCausalConv1d(nn.Conv1d):
+    """Causal Conv1d: left-pad only so output at time t depends only on inputs <= t."""
+
+    def __init__(self, c_in, c_out, k, d=1, s=1):
+        super().__init__(c_in, c_out, k, dilation=d, stride=s, padding=0)
+        self.k, self.d, self.s = k, d, s
+
+    def forward(self, x):  # x: [B, C, T]
+        pad_left = (self.k - 1) * self.d
+        x = F.pad(x, (pad_left, 0))
+        return super().forward(x)
+
+
+class PreNormResCausalBlock1d(nn.Module):
+    """GroupNorm(1) -> GELU -> CausalConv1d -> Dropout + skip."""
+
+    def __init__(self, c_in, c_out, *, k=3, d=1, s=1, drop_p=0.1):
+        super().__init__()
+        self.norm = nn.GroupNorm(1, c_in)
+        self.act = nn.GELU()
+        self.main = TimeCausalConv1d(c_in, c_out, k=k, d=d, s=s)
+        if c_in != c_out or s != 1:
+            self.skip = TimeCausalConv1d(c_in, c_out, k=1, d=1, s=s)
+        else:
+            self.skip = nn.Identity()
+        self.dropout = nn.Dropout(drop_p)
+
+    def forward(self, x):  # x: [B, C, T]
+        h = self.act(self.norm(x))
+        h = self.dropout(h)
+        return self.main(h) + self.skip(x)
+
+
+class CausalDownsamplingBlock1d(nn.Module):
+    """Dilated residual blocks followed by a stride-2 downsampler."""
+
+    def __init__(self, c_in, c_out, n_residual_blocks=3, drop_p=0.1):
+        super().__init__()
+        dilations = [1, 2, 4, 8]
+        self.residual_blocks = nn.ModuleList(
+            [
+                PreNormResCausalBlock1d(c_in, c_in, k=5, d=dilation, drop_p=drop_p)
+                for dilation in dilations[:n_residual_blocks]
+            ]
+        )
+        self.downsampling = PreNormResCausalBlock1d(
+            c_in, c_out, k=5, d=1, s=2, drop_p=drop_p
+        )
+
+    def forward(self, x):  # x: [B, C, T]
+        for block in self.residual_blocks:
+            x = block(x)
+        return self.downsampling(x)
+
+
+class Transformer(nn.Module):
+    def __init__(self, d_model=512, nheads=8, nlayers=4, drop_p=0.1):
+        super().__init__()
+        layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=nheads,
+            batch_first=True,
+            norm_first=True,
+            dropout=drop_p,
+            dim_feedforward=4 * d_model,
+            activation="gelu",
+        )
+        self.enc = nn.TransformerEncoder(layer, num_layers=nlayers)
+
+    def forward(self, x, pad_mask=None):
+        return self.enc(x, src_key_padding_mask=pad_mask, is_causal=True)

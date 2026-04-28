@@ -1,209 +1,80 @@
 import torch
 import safetensors
 from typing import Optional
-from .cfm import DiT, DiTConfig
-from dataclasses import dataclass, asdict
-from .semantic_module import SeamlessM4Tv2Encoder
-from .semantic_mapper import SemanticMapperConfig, Z2YMapper
-from .Encoder import ConvformerEncoderConfig, ConvformerEncoder
-from .encoder_1d import ConvformerEncoder1d
-from .melspecEncoder import MelSpectrogramEncoder, MelSpectrogramConfig
-from .ConvformerDecoder import ConvformerDecoder, ConvformerDecoderConfig
-
-
-def count_parameters_by_module(model, title: str):
-    table_width = 65
-    print("=" * table_width)
-    print(f"{title:^{table_width}}")
-    print("-" * table_width)
-    print(f"{'Module':<30} | {'Total Params':>15} | {'Trainable':>12}")
-    print("-" * table_width)
-
-    total_p = 0
-    trainable_p = 0
-
-    for name, module in model.named_children():
-        t = sum(p.numel() for p in module.parameters())
-        tr = sum(p.numel() for p in module.parameters() if p.requires_grad)
-        print(f"{name:<30} | {t:15,d} | {tr:12,d}")
-        total_p += t
-        trainable_p += tr
-
-    print("-" * table_width)
-    print(f"{'GRAND TOTAL':<30} | {total_p:15,d} | {trainable_p:12,d}")
-    print("-" * table_width + "\n")
-
-
-@dataclass
-class VAEOutput:
-    audio_loss: torch.Tensor
-    kl_loss: torch.Tensor
-    semantic_loss: Optional[torch.Tensor] = None
-    mu_mean: Optional[torch.Tensor] = None
-    mu_var: Optional[torch.Tensor] = None
-
-
-@dataclass
-class VAEConfig:
-    """Config for VAE model - needed for DeepSpeed compatibility"""
-
-    encoder_config: ConvformerEncoderConfig
-    decoder_config: DiTConfig
-    mel_spec_config: MelSpectrogramConfig
-    add_semantic_distillation: bool = False
-    add_semantic_mapper: bool = False
-    use_classic_decoder: bool = False
-
-    @property
-    def hidden_size(self):
-        """Return hidden size for DeepSpeed compatibility"""
-        return 512
-
-    def to_dict(self):
-        """Convert config to dict for W&B logging compatibility"""
-        return {
-            "model_type": "VAE",
-            "encoder_config": asdict(self.encoder_config),
-            "decoder_config": asdict(self.decoder_config),
-            "mel_spec_config": asdict(self.mel_spec_config),
-            "use_classic_decoder": self.use_classic_decoder,
-        }
+from .configs import VAEConfig
+from .feature_extractor import FeatureExtractor
+from .encoder.encoder import Encoder
+from .decoder.cfm import DiT
+from .utils import count_parameters_by_module
 
 
 class VAE(torch.nn.Module):
     _keys_to_ignore_on_save = None
 
-    def __init__(self, config: VAEConfig, dtype: torch.dtype):
+    def __init__(self, config: VAEConfig):
         super().__init__()
         self.config = config
-        if config.use_classic_decoder:
-            if getattr(config.encoder_config, "use_vq", False):
-                raise ValueError(
-                    "encoder use_vq is only supported with the DiT decoder "
-                    "(context dim = latent_dim)."
-                )
-            classic_dec_cfg = ConvformerDecoderConfig.from_encoder_config(
-                config.encoder_config
-            )
-            self.decoder = ConvformerDecoder(classic_dec_cfg)
-        else:
-            self.decoder = DiT(config.decoder_config)
-            self.decoder.expansion_factor = config.encoder_config.compress_factor_C
-        if config.encoder_config.use_1d_encoder:
-            self.encoder = ConvformerEncoder1d(config.encoder_config)
-        else:
-            self.encoder = ConvformerEncoder(config.encoder_config)
-        self.wav2mel = MelSpectrogramEncoder(config.mel_spec_config)
-        if config.add_semantic_distillation:
-            self.semantic_module = SeamlessM4Tv2Encoder(dtype=dtype)
-        if config.add_semantic_mapper:
-            self.semantic_mapper = Z2YMapper(config.semantic_mapper_config)
-        self.dtype = dtype
-        self.set_dtype(dtype)
+        self.feature_extractor = FeatureExtractor(config.mel_spec_config)
+        self.encoder = Encoder(config.encoder_config)
+        self.decoder = DiT(config.decoder_config)
+
         count_parameters_by_module(self.encoder, "Encoder")
         count_parameters_by_module(self.decoder, "Decoder")
-
-    def set_dtype(self, dtype: torch.dtype):
-        self.dtype = dtype
-        self.decoder.to(dtype=dtype)
-        self.encoder.to(dtype=dtype)
-        self.wav2mel.to(dtype=dtype)
-        if self.config.add_semantic_distillation:
-            self.semantic_module.set_dtype(dtype=dtype)
-        if self.config.add_semantic_mapper:
-            self.semantic_mapper.to(dtype=dtype)
-
-    def set_device(self, device: torch.device):
-        self.decoder.to(device=device)
-        self.encoder.to(device=device)
-        self.wav2mel.to(device=device)
-        if self.config.add_semantic_distillation:
-            self.semantic_module.set_device(device=device)
-        if self.config.add_semantic_mapper:
-            self.semantic_mapper.to(device=device)
-
-    def _encoder_temporal_upsample_factor(self) -> int:
-        """Mel time steps per latent time step (matches DiT.generate / classic decoder)."""
-        if self.config.use_classic_decoder:
-            return int(self.config.encoder_config.compress_factor_C)
-        return int(self.decoder.expansion_factor)
 
     def from_pretrained(self, checkpoint_path: str):
         state_dict = safetensors.torch.load_file(checkpoint_path)
         self.load_state_dict(state_dict, strict=False)
         print(f"Loaded checkpoint from {checkpoint_path}")
 
-    def forward(self, audios_srs, **kwargs):
-        encoded_audios = self.wav2mel(audios_srs)
-        # corrupted_encoded_audios = self.wav2mel(kwargs.get("corrupted_audios_srs"))
-        semantic_output = None
-        if self.config.add_semantic_distillation:
-            semantic_output = self.semantic_module(audios_srs)
-        features = encoded_audios.audio_features.to(self.dtype)
-        convformer_output = self.encoder(
+    @torch.no_grad()
+    def extract_features(self, audios_srs, **kwargs):
+        features_extractor_output = self.feature_extractor(audios_srs)
+        features = features_extractor_output.audio_features
+        padding_mask = features_extractor_output.padding_mask
+        return features, padding_mask
+
+    def encode(self, features, padding_mask, **kwargs):
+        encoder_output = self.encoder(
             x=features,
-            padding_mask=encoded_audios.padding_mask,
+            padding_mask=padding_mask,
             step=kwargs.get("training_step", None),
-            semantic_guidance=semantic_output,
-            phoneme_alignments=kwargs.get("phoneme_alignments", None),
         )
+        return encoder_output
+
+    def forward(self, audios_srs, **kwargs):
+        features, padding_mask = self.extract_features(audios_srs, **kwargs)
+        encoder_output = self.encode(features, padding_mask, **kwargs)
         audio_loss = self.decoder(
-            target=encoded_audios.audio_features,
-            target_padding_mask=encoded_audios.padding_mask,
-            context_vector=convformer_output.z,
-            durations=convformer_output.durations,
+            target=features,
+            target_padding_mask=padding_mask,
+            context_vector=encoder_output.z,
         ).loss
-        mu_mean = convformer_output.mu[~convformer_output.padding_mask].mean()
-        mu_var = convformer_output.mu[~convformer_output.padding_mask].var()
-        vq_loss = getattr(convformer_output, "vq_loss", None)
+        mu_mean = encoder_output.mu[~encoder_output.padding_mask].mean()
+        mu_var = encoder_output.mu[~encoder_output.padding_mask].var()
+        vq_loss = getattr(encoder_output, "vq_loss", None)
         return {
             "audio_loss": audio_loss,
-            "kl_loss": convformer_output.kl_loss,
+            "kl_loss": encoder_output.kl_loss,
             "vq_loss": vq_loss,
-            "vq_perplexity": getattr(convformer_output, "vq_perplexity", None),
-            "vq_codes_used": getattr(convformer_output, "vq_codes_used", None),
-            "vq_codes_used_frac": getattr(
-                convformer_output, "vq_codes_used_frac", None
-            ),
-            "semantic_loss": None,  # convformer_output.semantic_loss * 0.1,
+            "vq_perplexity": getattr(encoder_output, "vq_perplexity", None),
+            "vq_codes_used": getattr(encoder_output, "vq_codes_used", None),
+            "vq_codes_used_frac": getattr(encoder_output, "vq_codes_used_frac", None),
             "mu_mean": mu_mean,
             "mu_var": mu_var,
-            "z_pooled_fps": convformer_output.z_pooled_fps,
         }
 
     @torch.no_grad()
     def denormalize_mel(self, mel: torch.Tensor):
         if not self.config.mel_spec_config.normalize:
             return mel
-        return mel * self.wav2mel.std + self.wav2mel.mean
+        return mel * self.feature_extractor.std + self.feature_extractor.mean
 
     @torch.no_grad()
     def normalize_mel(self, mel: torch.Tensor):
         if not self.config.mel_spec_config.normalize:
             return mel
-        return (mel - self.wav2mel.mean) / self.wav2mel.std
+        return (mel - self.feature_extractor.mean) / self.feature_extractor.std
 
-    @torch.no_grad()
-    def encode(self, audios_srs, return_original_mel: bool = False):
-        encoded_audios = self.wav2mel(audios_srs)
-        convformer_output = self.encoder(
-            x=encoded_audios.audio_features.to(self.dtype),
-            padding_mask=encoded_audios.padding_mask,
-            step=None,
-        )
-        if self.config.add_semantic_mapper:
-            convformer_output.semantic_features = self.semantic_mapper(
-                convformer_output.mu
-            ).y.to(convformer_output.mu.dtype)
-        if not return_original_mel:
-            return convformer_output
-        else:
-            encoded_audios.audio_features = self.denormalize_mel(
-                encoded_audios.audio_features
-            )
-            return convformer_output, encoded_audios
-
-    @torch.no_grad()
     def sample(
         self,
         num_steps: int = 4,
@@ -211,37 +82,28 @@ class VAE(torch.nn.Module):
         guidance_scale: float = 1.0,
         z: Optional[torch.Tensor] = None,
         mu: Optional[torch.Tensor] = None,
-        durations: Optional[torch.LongTensor] = None,
         generator: Optional[torch.Generator] = None,
         padding_mask: Optional[torch.BoolTensor] = None,
-        std: float = 1.0,
+        **kwargs,
     ):
-        """
-        Sample from the VAE.
-        """
-        if z is not None:
-            context_vector = z
-        elif mu is not None:
-            context_vector = self.encoder.reparameterize(mu)
-        else:
-            raise ValueError("Either z or mu must be provided")
-
-        reconstructed_mel = self.decoder.generate(
+        assert z or mu, "Either z or mu must be provided"
+        context_vector = z or mu
+        decoder_output = self.decoder.generate(
             num_steps=num_steps,
             generator=generator,
             temperature=temperature,
             padding_mask=padding_mask,
             context_vector=context_vector,
-            durations=durations,
             guidance_scale=guidance_scale,
-            std=std,
         )
+        reconstructed_mel = decoder_output.audio_features
+        reconstructed_padding_mask = decoder_output.padding_mask
         if self.config.mel_spec_config.normalize:
             reconstructed_mel = self.denormalize_mel(reconstructed_mel)
-        return reconstructed_mel
+        return reconstructed_mel, reconstructed_padding_mask
 
     @torch.no_grad()
-    def encode_and_sample(
+    def encode_decode(
         self,
         audios_srs,
         num_steps: int = 50,
@@ -255,62 +117,32 @@ class VAE(torch.nn.Module):
         """
 
         # Encode audio to mel spectrogram
-        encoded_audios = self.wav2mel(audios_srs)
-        original_mel = encoded_audios.audio_features.to(self.dtype)
+        features, padding_mask = self.extract_features(audios_srs, **kwargs)
+        encoder_output = self.encode(features, padding_mask, **kwargs)
 
-        # Encode to latent space
-        convformer_output = self.encoder(
-            x=original_mel,
-            padding_mask=encoded_audios.padding_mask,
-            step=None,
-            phoneme_alignments=kwargs.get("phoneme_alignments", None),
-        )
-
-        # Generate mel spectrogram from latent
-        reconstructed_mel = self.decoder.generate(
+        reconstructed_mel, reconstructed_padding_mask = self.sample(
             num_steps=num_steps,
-            context_vector=convformer_output.z,  # z
-            durations=convformer_output.durations,
             temperature=temperature,
             guidance_scale=guidance_scale,
+            z=encoder_output.z,
             generator=generator,
-            padding_mask=convformer_output.padding_mask,
+            padding_mask=padding_mask,
         )
         if self.config.mel_spec_config.normalize:
-            original_mel = self.denormalize_mel(original_mel)
-            reconstructed_mel = self.denormalize_mel(reconstructed_mel)
-
-        # Padding mask for reconstructed mel: must match decoder.generate / logging.
-        # With similarity pooling, use expanded durations; otherwise upsample latent mask
-        # (same repeat_interleave as DiT.generate when durations is None).
-        B, Tm, _ = reconstructed_mel.shape
-        device = reconstructed_mel.device
-        ef = self._encoder_temporal_upsample_factor()
-        reconstructed_padding_mask = torch.zeros(
-            (B, Tm), device=device, dtype=torch.bool
-        )
-        if convformer_output.durations is not None:
-            expanded_durations = convformer_output.durations.long() * ef
-            valid_lengths = expanded_durations.sum(dim=1).long()
-            for b in range(B):
-                valid_len = min(int(valid_lengths[b].item()), Tm)
-                reconstructed_padding_mask[b, valid_len:] = True
-        else:
-            pm = convformer_output.padding_mask.repeat_interleave(ef, dim=1)
-            if pm.shape[1] < Tm:
-                extension = torch.zeros(
-                    B, Tm - pm.shape[1], device=device, dtype=torch.bool
-                )
-                pm = torch.cat([pm, extension], dim=1)
-            else:
-                pm = pm[:, :Tm]
-            reconstructed_padding_mask = pm
+            features = self.denormalize_mel(features)
 
         return {
-            "original_mel": original_mel,
+            "original_mel": features,
             "reconstructed_mel": reconstructed_mel,
-            "context_vector": convformer_output.z,
+            "context_vector": encoder_output.z,
             "padding_mask": reconstructed_padding_mask,
-            "original_padding_mask": encoded_audios.padding_mask,
-            "durations": convformer_output.durations,
+            "original_padding_mask": padding_mask,
         }
+
+    @property
+    def dtype(self):
+        return next(self.parameters()).dtype
+
+    @property
+    def device(self):
+        return next(self.parameters()).device

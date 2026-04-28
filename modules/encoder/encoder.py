@@ -1,95 +1,23 @@
 import math
 import torch
+import random
 import torch.nn as nn
 from typing import Optional
 import torch.nn.functional as F
-from modules.configs import EncoderConfig
 from modules.encoder.vq import HardVectorQuantizer
+from modules.configs import EncoderConfig, VQConfig
 from modules.output_dataclasses import EncoderOutput
 from modules.encoder.sigma_vae_encoder import SigmaVAEEncoder
-from modules.encoder.utils import (
-    _assert_latent_chunks_divisible,
-    apply_latent_chunk_dropout,
-    latent_chunk_kl_channel_weights_vq_tail,
-    latent_chunk_kl_channel_weights,
-)
 from modules.encoder.regularization import (
     DropoutRegularizer,
     KLChunkRegularizer,
 )
-
-
-class TimeCausalConv1d(nn.Conv1d):
-    """Causal Conv1d: left-pad only so output at time t depends only on inputs <= t."""
-
-    def __init__(self, c_in, c_out, k, d=1, s=1):
-        super().__init__(c_in, c_out, k, dilation=d, stride=s, padding=0)
-        self.k, self.d, self.s = k, d, s
-
-    def forward(self, x):  # x: [B, C, T]
-        pad_left = (self.k - 1) * self.d
-        x = F.pad(x, (pad_left, 0))
-        return super().forward(x)
-
-
-class PreNormResCausalBlock1d(nn.Module):
-    """GroupNorm(1) -> GELU -> CausalConv1d -> Dropout + skip."""
-
-    def __init__(self, c_in, c_out, *, k=3, d=1, s=1, drop_p=0.1):
-        super().__init__()
-        self.norm = nn.GroupNorm(1, c_in)
-        self.act = nn.GELU()
-        self.main = TimeCausalConv1d(c_in, c_out, k=k, d=d, s=s)
-        if c_in != c_out or s != 1:
-            self.skip = TimeCausalConv1d(c_in, c_out, k=1, d=1, s=s)
-        else:
-            self.skip = nn.Identity()
-        self.dropout = nn.Dropout(drop_p)
-
-    def forward(self, x):  # x: [B, C, T]
-        h = self.act(self.norm(x))
-        h = self.dropout(h)
-        return self.main(h) + self.skip(x)
-
-
-class CausalDownsamplingBlock1d(nn.Module):
-    """Dilated residual blocks followed by a stride-2 downsampler."""
-
-    def __init__(self, c_in, c_out, n_residual_blocks=3, drop_p=0.1):
-        super().__init__()
-        dilations = [1, 2, 4, 8]
-        self.residual_blocks = nn.ModuleList(
-            [
-                PreNormResCausalBlock1d(c_in, c_in, k=5, d=dilation, drop_p=drop_p)
-                for dilation in dilations[:n_residual_blocks]
-            ]
-        )
-        self.downsampling = PreNormResCausalBlock1d(
-            c_in, c_out, k=5, d=1, s=2, drop_p=drop_p
-        )
-
-    def forward(self, x):  # x: [B, C, T]
-        for block in self.residual_blocks:
-            x = block(x)
-        return self.downsampling(x)
-
-
-class Transformer(nn.Module):
-    def __init__(self, d_model=512, nheads=8, nlayers=4, drop_p=0.1):
-        super().__init__()
-        layer = nn.TransformerEncoderLayer(
-            d_model=d_model,
-            nhead=nheads,
-            batch_first=True,
-            norm_first=True,
-            dropout=drop_p,
-            dim_feedforward=4 * d_model,
-            activation="gelu",
-        )
-        self.enc = nn.TransformerEncoder(layer, num_layers=nlayers)
-
-    def forward(self, x, pad_mask=None):
-        return self.enc(x, src_key_padding_mask=pad_mask, is_causal=True)
+from modules.encoder.utils import (
+    TimeCausalConv1d,
+    PreNormResCausalBlock1d,
+    CausalDownsamplingBlock1d,
+    Transformer,
+)
 
 
 class Encoder(SigmaVAEEncoder):
@@ -148,20 +76,12 @@ class Encoder(SigmaVAEEncoder):
         if config.vq_config:
             if config.vq_config.dim_to_quantize > config.latent_dim:
                 raise ValueError(
-                    f"vq_quant_dim ({config.vq_quant_dim}) must be <= latent_dim ({config.latent_dim})."
+                    f"dim_to_quantize ({config.vq_config.dim_to_quantize}) must be <= latent_dim ({config.latent_dim})."
                 )
-            self.vq = HardVectorQuantizer(
-                dim=config.vq_quant_dim,
-                num_embeddings=config.vq_num_embeddings,
-                commit_weight=config.vq_commit_weight,
-                reset_dead_codes=config.vq_reset_dead_codes,
-                reset_max_per_step=config.vq_reset_max_per_step,
-                reset_every_forward=config.vq_reset_every_forward,
-                use_ema_codebook=config.vq_use_ema_codebook,
-                ema_decay=config.vq_ema_decay,
-                ema_epsilon=config.vq_ema_epsilon,
+            self.vq = HardVectorQuantizer(VQConfig(config=config.vq_config))
+            self.residual_and_tail_dropout_p = (
+                config.vq_config.residual_and_tail_dropout_p
             )
-            self.vq_residual_drop = nn.Dropout(p=config.vq_residual_dropout)
 
         if config.dropout_regularizer_config:
             self.dropout_regularizer = DropoutRegularizer(
@@ -199,6 +119,7 @@ class Encoder(SigmaVAEEncoder):
         padding_mask: Optional[torch.BoolTensor] = None,
         **kwargs,
     ):
+        drop_res_and_tail = random.random() < self.residual_and_tail_dropout_p
         # x: [B, T, 100]
         x = x.transpose(1, 2)  # [B, 100, T]
         x = self.in_proj(x)  # [B, d_model//2, T]
@@ -241,8 +162,7 @@ class Encoder(SigmaVAEEncoder):
             vq_codes_used = vq_stats.codes_used
             vq_codes_used_frac = vq_stats.codes_used_frac
             vq_latent_residual = (mu_head - mu_q.detach()).detach()
-            r_add = self.vq_residual_drop(mu_res_vq)
-            z_head = mu_q + r_add
+            z_head = mu_q if drop_res_and_tail else mu_q + mu_res_vq
             mu = torch.cat([mu_res_vq, mu_tail], dim=-1)
         else:
             mu = mu_pre_vq
@@ -250,32 +170,18 @@ class Encoder(SigmaVAEEncoder):
         logvar = None
         if hasattr(self, "logvar"):
             logvar = self.logvar(z)
-        z_stoch = self.reparameterize(mu, logvar)
-
-        if self.config.latent_chunk_ablate_dropout:
-            z_stoch = apply_latent_chunk_dropout(
-                z_stoch,
-                chunk_size=self.config.latent_chunk_size,
-                dropout_start=self.config.latent_chunk_dropout_start,
-                dropout_end=self.config.latent_chunk_dropout_end,
-                training=self.training,
-                hierarchical=self.config.latent_chunk_dropout_hierarchical,
-            )
+        z_stoch = self.reparameterize(
+            mu, logvar
+        )  # z tail if vq enabled. full latent otherwise
 
         if hasattr(self, "vq"):
             qd = self.config.vq_config.dim_to_quantize
-            z = torch.cat(
-                [
-                    z_head.to(dtype=z_stoch.dtype),
-                    z_stoch[..., qd:].to(dtype=z_stoch.dtype),
-                ],
-                dim=-1,
-            )
+            if drop_res_and_tail:
+                z = torch.cat([z_head, torch.zeros_like(mu_tail)], dim=-1)
+            else:
+                z = torch.cat([z_head, z_stoch[..., qd:]], dim=-1)
         else:
             z = z_stoch
-
-        if kwargs.get("semantic_guidance", None) is not None:
-            raise NotImplementedError("Semantic guidance is not implemented yet")
 
         kl_loss = None
         if kwargs.get("step", None) is not None:
@@ -307,3 +213,11 @@ class Encoder(SigmaVAEEncoder):
             out["vq_indices"] = vq_indices
 
         return EncoderOutput(**out)
+
+    @property
+    def dtype(self):
+        return next(self.parameters()).dtype
+
+    @property
+    def device(self):
+        return next(self.parameters()).device

@@ -11,7 +11,7 @@ from collections import defaultdict
 from torch.utils.data import DataLoader
 from datasets import load_dataset, concatenate_datasets
 from data.audio_dataset import SimpleAudioDataset, DataCollator, TrainDatasetWrapper
-from modules.melspecEncoder import MelSpectrogramEncoder, MelSpectrogramConfig
+from modules.feature_extractor import MelSpectrogramEncoder, MelSpectrogramConfig
 
 # Specify custom cache directory
 parquet_dir = "/workspace/data"
