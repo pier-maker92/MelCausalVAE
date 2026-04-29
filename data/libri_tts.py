@@ -12,16 +12,8 @@ from datasets import load_dataset, concatenate_datasets
 from modules.feature_extractor import FeatureExtractor, MelSpectrogramConfig
 from data.audio_dataset import SimpleAudioDataset, DataCollator, TrainDatasetWrapper
 
-<<<<<<< HEAD
 # Specify custom cache directory
 parquet_dir = "/home/ec2-user/data"
-=======
-# set the HF_HOME environment variable
-# os.environ["HF_HOME"] = "/Volumes/Crucial X6/HF_HOME"
-cache_dir = "/Users/pierfrancescomelucci/Research/Playground/data_cache"
-
-
->>>>>>> origin/main
 # import mel spec encoder
 mel_spec_encoder = FeatureExtractor(config=MelSpectrogramConfig())
 

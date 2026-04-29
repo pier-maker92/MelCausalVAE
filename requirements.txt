@@ -1,35 +1,21 @@
 wandb
 vocos
-<<<<<<< HEAD
 datasets==3.6.0
 torch==2.8.0
 torchaudio==2.8.0
-=======
-datasets
-torch==2.8
-torchaudio
->>>>>>> origin/main
 matplotlib
 torchdiffeq
 beartype
 safetensors
-<<<<<<< HEAD
 transformers==5.0.0
-=======
-transformers[torch]
->>>>>>> origin/main
 torchvision==0.23.0
 torchcodec==0.7
 deepspeed==0.18.4
 numpy==1.26.4
 mpi4py
-<<<<<<< HEAD
 soundfile
 jiwer
 torchaudio_filters
 accelerate>=1.1.0
 hydra-core
 
-=======
-soundfile
->>>>>>> origin/main
