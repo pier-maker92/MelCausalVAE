@@ -17,10 +17,6 @@ class DropoutRegularizer(nn.Module):
         self.dropout_end = config.dropout_end
         self.chunk_size = config.chunk_size
         self.dropout_hierarchical = config.dropout_hierarchical
-        self.training = True
-
-    def set_training(self, training: bool) -> None:
-        self.training = training
 
     def _latent_chunk_dropout_probs_per_chunk(
         self, num_chunks: int, device: torch.device, dtype: torch.dtype
@@ -113,10 +109,6 @@ class KLChunkRegularizer(nn.Module):
         self.kl_end = config.kl_weight_end
         self.chunk_size = config.chunk_size
         self.vq_quant_dim = vq_quant_dim
-        self.training = True
-
-    def set_training(self, training: bool) -> None:
-        self.training = training
 
     def latent_chunk_kl_weights(
         self,

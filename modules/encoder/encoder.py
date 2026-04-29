@@ -119,7 +119,7 @@ class Encoder(SigmaVAEEncoder):
         padding_mask: Optional[torch.BoolTensor] = None,
         **kwargs,
     ):
-        drop_res_and_tail = random.random() < self.residual_and_tail_dropout_p
+        drop_res_and_tail = self.training and (random.random() < self.residual_and_tail_dropout_p)
         # x: [B, T, 100]
         x = x.transpose(1, 2)  # [B, 100, T]
         x = self.in_proj(x)  # [B, d_model//2, T]

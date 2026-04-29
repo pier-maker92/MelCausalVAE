@@ -479,9 +479,15 @@ class VAEtrainer(Trainer):
         Run evaluation and generate sample reconstructions.
         """
         metrics = {}
+        # Set model to eval mode for sample generation
+        self.model.eval()
+        
         # Generate samples and log to wandb
         # All processes must call this to avoid deadlock in distributed training
         self._generate_and_log_samples()
+        
+        # Set model back to train mode
+        self.model.train()
 
         return metrics
 
