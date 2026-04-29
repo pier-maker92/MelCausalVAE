@@ -1,6 +1,23 @@
+from pandas.core.internals.construction import dataclasses_to_dicts
 import torch
 from typing import Optional
 from dataclasses import dataclass
+
+
+@dataclass
+class VQStats:
+    perplexity: torch.Tensor
+    codes_used: torch.Tensor
+    codes_used_frac: torch.Tensor
+
+
+@dataclass
+class VQVAEOutput:
+    indices: torch.LongTensor
+    quantized: torch.FloatTensor
+    residual: torch.FloatTensor
+    stats: VQStats
+    loss: Optional[torch.FloatTensor] = None
 
 
 @dataclass
@@ -9,12 +26,18 @@ class EncoderOutput:
     kl_loss: Optional[torch.FloatTensor] = None
     padding_mask: Optional[torch.BoolTensor] = None
     mu: Optional[torch.FloatTensor] = None
+    vq_output: Optional[VQVAEOutput] = None
+    mu_pre_vq: Optional[torch.FloatTensor] = None
+
+
+@dataclass
+class VAEOutput:
+    audio_loss: Optional[torch.FloatTensor] = None
+    kl_loss: Optional[torch.FloatTensor] = None
+    mu_mean: Optional[torch.FloatTensor] = None
+    mu_var: Optional[torch.FloatTensor] = None
+    vq_stats: Optional[VQStats] = None
     vq_loss: Optional[torch.FloatTensor] = None
-    vq_perplexity: Optional[torch.FloatTensor] = None
-    vq_codes_used: Optional[torch.FloatTensor] = None
-    vq_codes_used_frac: Optional[torch.FloatTensor] = None
-    vq_latent_residual: Optional[torch.FloatTensor] = None
-    vq_indices: Optional[torch.LongTensor] = None
 
 
 @dataclass

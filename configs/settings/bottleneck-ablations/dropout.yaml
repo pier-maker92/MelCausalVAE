@@ -18,34 +18,32 @@ training:
   gradient_accumulation_steps: 1
   dataloader_num_workers: 4
   from_pretrained: /workspace/MelCausalVAE/checkpoints/ablations/dropout/model.safetensors
-  #resume_from_checkpoint: /workspace/MelCausalVAE/checkpoints/ablations/dropout/checkpoint-3000
-convformer:
-  compress_factor_C: 8
-  tf_heads: 8
-  tf_layers: 4
-  latent_dim: 64
-  n_residual_blocks: 3
+
+# --- Encoder Config ---
+encoder:
+  d_model: 1024
+
   logvar_layer: false
-  use_sofplus: false
   target_std: 0.3
   kl_loss_warmup_steps: 10
   kl_loss_weight: 5e-4
-  use_bigvgan_mel: false
-  d_model: 1024
-  use_1d_encoder: true
-  latent_chunk_ablate_dropout: true
-  latent_chunk_ablate_kl: false
-  latent_chunk_dropout_hierarchical: false
+  
+  # Dropout Config
+  dropout_regularizer_config:
+    chunk_size: 2
+    dropout_start: 0.0
+    dropout_end: 0.8
+    dropout_hierarchical: false
 
-cfm:
-  unet_dim: 768
-  unet_depth: 6
-  unet_heads: 12
-  unet_dropout_rate: 0.1
+# --- Decoder Config ---
+decoder:
+  dit_dim: 768      
+  dit_depth: 6      
+  dit_heads: 12     
+  dit_dropout_rate: 0.1 
+  
   use_conv_layer: true
-  audio_latent_dim: 64
   uncond_prob: 0.15
-  learned_prior: false
   is_causal: false
   use_window_attention: true
   window_attention_seconds: 3.0

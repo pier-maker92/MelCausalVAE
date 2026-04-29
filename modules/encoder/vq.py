@@ -1,16 +1,10 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from dataclasses import dataclass
+from typing import Optional, Tuple
 from modules.configs import VQConfig
-from typing import NamedTuple, Optional, Tuple
-
-
-class VQBatchStats(NamedTuple):
-    """Detached scalars for logging (valid positions only)."""
-
-    perplexity: torch.Tensor
-    codes_used: torch.Tensor
-    codes_used_frac: torch.Tensor
+from modules.output_dataclasses import VQVAEOutput, VQStats
 
 
 def _batch_vq_stats(
@@ -18,14 +12,14 @@ def _batch_vq_stats(
     valid: torch.BoolTensor,
     num_embeddings: int,
     ref: torch.Tensor,
-) -> VQBatchStats:
+) -> VQStats:
     """
     Empirical entropy perplexity exp(H) over code indices in the batch,
     and how many distinct codes appear (absolute and relative to codebook size).
     """
     if not valid.any():
         z = ref.new_zeros(())
-        return VQBatchStats(perplexity=z, codes_used=z, codes_used_frac=z)
+        return VQStats(perplexity=z, codes_used=z, codes_used_frac=z)
     idx = indices_bt[valid].long()
     counts = torch.bincount(idx, minlength=num_embeddings).float()
     total = counts.sum().clamp(min=1.0)
@@ -35,7 +29,7 @@ def _batch_vq_stats(
     perplexity = entropy.exp()
     codes_used = (counts > 0).sum().to(dtype=torch.float32)
     codes_used_frac = codes_used / float(num_embeddings)
-    return VQBatchStats(
+    return VQStats(
         perplexity=perplexity.detach(),
         codes_used=codes_used.detach(),
         codes_used_frac=codes_used_frac.detach(),
@@ -88,7 +82,7 @@ class HardVectorQuantizer(nn.Module):
         z: torch.Tensor,
         padding_mask: Optional[torch.BoolTensor] = None,
         global_step: Optional[int] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, VQBatchStats]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, VQStats]:
         """
         Args:
             z: ``[B, T, dim]`` continuous features.
@@ -148,7 +142,13 @@ class HardVectorQuantizer(nn.Module):
             global_step=global_step,
         )
 
-        return z_residual, vq_loss, z_q, stats, indices_bt
+        return VQVAEOutput(
+            indices=indices_bt,
+            quantized=z_q,
+            residual=z_residual,
+            stats=stats,
+            loss=vq_loss,
+        )
 
     @torch.no_grad()
     def _ema_update_codebook(

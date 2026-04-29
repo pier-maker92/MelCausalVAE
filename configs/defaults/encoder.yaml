@@ -1,0 +1,36 @@
+encoder:
+  d_model: 512
+  tf_heads: 8
+  tf_layers: 4
+  drop_p: 0.1
+  n_residual_blocks: 3
+  freeze_encoder_before_latent_heads: false
+  
+  logvar_layer: true
+  kl_loss_weight: 1.0e-3
+  target_std: null
+  kl_loss_warmup_steps: 1000
+
+  # --- VQ ---
+  vq_config:
+    num_embeddings: 128
+    commitment_weight: 0.25
+    reset_dead_codes: true
+    reset_max_per_step: null
+    reset_every_forward: 1
+    use_ema_codebook: false
+    ema_decay: 0.99
+    ema_epsilon: 1.0e-5
+    dim_to_quantize: 32
+    residual_and_tail_dropout_p: 0.3
+
+  dropout_regularizer_config: null
+    # chunk_size: 2
+    # dropout_start: 0.0
+    # dropout_end: 0.8
+    # dropout_hierarchical: false
+
+  kl_chunk_regularizer_config: null
+    # chunk_size: 2
+    # kl_weight_start: 1.0e-10
+    # kl_weight_end: 1.0e-2

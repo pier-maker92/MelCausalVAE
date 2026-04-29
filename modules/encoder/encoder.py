@@ -136,57 +136,44 @@ class Encoder(SigmaVAEEncoder):
         )
 
         hiddens = x.transpose(1, 2)  # [B, T/C, 512]
-        z = self.transformer(hiddens)  # [B, T/C, 512]
+        h = self.transformer(hiddens)  # [B, T/C, 512]
 
-        vq_loss = None
-        vq_perplexity = None
-        vq_codes_used = None
-        vq_codes_used_frac = None
+        mu_pre_vq = self.mu(h)
 
-        mu_pre_vq = self.mu(z)
         if hasattr(self, "dropout_regularizer"):
             mu_pre_vq = self.dropout_regularizer(mu_pre_vq)
 
-        vq_latent_residual = None
-        vq_indices = None
+        logvar = None
+        if hasattr(self, "logvar"):
+            logvar = self.logvar(h)
+
+        mu_stoch = mu_pre_vq
+        z_quantized = torch.zeros_like(mu_pre_vq)
         if hasattr(self, "vq"):
             qd = self.config.vq_config.dim_to_quantize
             mu_head = mu_pre_vq[..., :qd]
             mu_tail = mu_pre_vq[..., qd:]
-            mu_res_vq, vq_loss, mu_q, vq_stats, vq_indices = self.vq(
+
+            vq_out = self.vq(
                 mu_head,
                 padding_mask,
                 global_step=kwargs.get("step", None),
             )
-            vq_perplexity = vq_stats.perplexity
-            vq_codes_used = vq_stats.codes_used
-            vq_codes_used_frac = vq_stats.codes_used_frac
-            vq_latent_residual = (mu_head - mu_q.detach()).detach()
-            z_head = mu_q if drop_res_and_tail else mu_q + mu_res_vq
-            mu = torch.cat([mu_res_vq, mu_tail], dim=-1)
-        else:
-            mu = mu_pre_vq
 
-        logvar = None
-        if hasattr(self, "logvar"):
-            logvar = self.logvar(z)
-        z_stoch = self.reparameterize(
-            mu, logvar
-        )  # z tail if vq enabled. full latent otherwise
+            mu_stoch = torch.cat([vq_out.residual, mu_tail], dim=-1)
 
-        if hasattr(self, "vq"):
-            qd = self.config.vq_config.dim_to_quantize
-            if drop_res_and_tail:
-                z = torch.cat([z_head, torch.zeros_like(mu_tail)], dim=-1)
-            else:
-                z = torch.cat([z_head, z_stoch[..., qd:]], dim=-1)
-        else:
-            z = z_stoch
+            z_quantized = torch.cat(
+                [vq_out.quantized.detach(), torch.zeros_like(mu_tail)], dim=-1
+            )
 
+        z_stoch = self.reparameterize(mu_stoch, logvar)
+        z = z_quantized if drop_res_and_tail else z_quantized + z_stoch
+
+        mu = mu_stoch
         kl_loss = None
         if kwargs.get("step", None) is not None:
             if hasattr(self, "kl_chunk_regularizer"):
-                kl_term = self.kl_chunk_regularizer(mu_pre_vq, padding_mask)
+                kl_term = self.kl_chunk_regularizer(mu, logvar, padding_mask)
             else:
                 kl_term = self.kl_divergence(
                     mu,
@@ -200,17 +187,12 @@ class Encoder(SigmaVAEEncoder):
             "z": z,
             "kl_loss": kl_loss,
             "padding_mask": padding_mask,
-            "mu": mu_pre_vq,
-            "logvar": logvar,
+            "mu": mu,
+            "mu_pre_vq": mu_pre_vq,
         }
 
         if hasattr(self, "vq"):
-            out["vq_loss"] = vq_loss
-            out["vq_perplexity"] = vq_perplexity
-            out["vq_codes_used"] = vq_codes_used
-            out["vq_codes_used_frac"] = vq_codes_used_frac
-            out["vq_latent_residual"] = vq_latent_residual
-            out["vq_indices"] = vq_indices
+            out["vq_output"] = vq_out
 
         return EncoderOutput(**out)
 

@@ -1,17 +1,14 @@
+from MelCausalVAE.data.audio_dataset import TestDatasetWrapper
 import os
-import yaml
 import wandb
 import torch
 import logging
 import hydra
 from omegaconf import DictConfig, OmegaConf
 from vocos import Vocos
-from pathlib import Path
 from typing import Dict, List
 import matplotlib.pyplot as plt
-from modules.decoder.cfm import DiTConfig
 from modules.VAE import VAE, VAEConfig
-from modules.Encoder import ConvformerEncoderConfig
 from modules.feature_extractor import MelSpectrogramConfig
 from modules.similarity import plot_durations_on_mel
 from transformers import (
@@ -25,13 +22,19 @@ from transformers import (
 
 # data
 from data.mls import MLSDataset
+import torch.distributed as dist
 from data.libri_tts import LibriTTS
 from data.audio_dataset import DataCollator
 from data.audio_dataset import TrainDatasetWrapper
 from data.librispeech_align import LibriSpeechAlignDataset
 from torch.optim.lr_scheduler import CosineAnnealingLR
-import torch.distributed as dist
-
+from modules.configs import (
+    EncoderConfig,
+    VQConfig,
+    DropoutConfig,
+    KLChunkRegularizer,
+    DiTConfig,
+)
 
 # Set up logging
 logging.basicConfig(
@@ -62,8 +65,6 @@ class AddGranularLossesToTrainerState(TrainerCallback):
 
 
 class VAEtrainer(Trainer):
-    """Custom trainer for VAE"""
-
     def __init__(self, min_learning_rate: float = 0.0, **kwargs):
         super().__init__(**kwargs)
         self.min_learning_rate = min_learning_rate
@@ -73,22 +74,16 @@ class VAEtrainer(Trainer):
             "kl_loss",
             "mu_mean",
             "mu_var",
-            "z_pooled_fps",
         ]
-        try:
-            if getattr(self.model.encoder.config, "semantic_regulation", False):
-                granular_losses.append("semantic_loss")
-            if getattr(self.model.encoder.config, "use_vq", False):
-                granular_losses.extend(
-                    [
-                        "vq_loss",
-                        "vq_perplexity",
-                        "vq_codes_used",
-                        "vq_codes_used_frac",
-                    ]
-                )
-        except Exception:
-            pass
+        if getattr(self.model.encoder.config, "vq_config", None) is not None:
+            granular_losses.extend(
+                [
+                    "vq_loss",
+                    "vq_perplexity",
+                    "vq_codes_used",
+                    "vq_codes_used_frac",
+                ]
+            )
         self.add_callback(AddGranularLossesToTrainerState(granular_losses))
 
     def create_scheduler(self, num_training_steps: int, optimizer=None):
@@ -102,119 +97,41 @@ class VAEtrainer(Trainer):
         return self.lr_scheduler
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
-        """Compute the loss for the VAE"""
         if hasattr(self.control, "granular_losses") and model.training:
             audios_srs = inputs["output_audios_srs"]
-            # corrupted_audios_srs = inputs["corrupted_audios_srs"]
-            # Forward pass
             outputs = model(
                 audios_srs=audios_srs,
                 training_step=self.state.global_step,
                 phoneme_alignments=inputs["phoneme_alignments"],
-                # corrupted_audios_srs=corrupted_audios_srs,
             )
             audio_loss = outputs["audio_loss"]
             kl_loss = outputs["kl_loss"]
             vq_loss = outputs.get("vq_loss", None)
-            vq_perplexity = outputs.get("vq_perplexity", None)
-            vq_codes_used = outputs.get("vq_codes_used", None)
-            vq_codes_used_frac = outputs.get("vq_codes_used_frac", None)
-            semantic_loss = outputs.get("semantic_loss", None)
-            mu_mean = outputs.get("mu_mean")
-            mu_var = outputs.get("mu_var")
-            z_pooled_fps = outputs.get("z_pooled_fps")
-            loss = (
-                audio_loss
-                + kl_loss
-                + (vq_loss if vq_loss is not None else 0.0)
-                + (semantic_loss if semantic_loss is not None else 0.0)
-            )
+            vq_stats = outputs.get("vq_stats", None)
+            loss = audio_loss + kl_loss + (vq_loss if vq_loss is not None else 0.0)
 
             # Accumulate granular losses
-            if self.args.n_gpu > 1:
-                audio_loss = audio_loss.mean()
-                kl_loss = kl_loss.mean()
-                if vq_loss is not None:
-                    vq_loss = vq_loss.mean()
-                if vq_perplexity is not None:
-                    vq_perplexity = vq_perplexity.mean()
-                if vq_codes_used is not None:
-                    vq_codes_used = vq_codes_used.mean()
-                if vq_codes_used_frac is not None:
-                    vq_codes_used_frac = vq_codes_used_frac.mean()
+            flat_metrics = {
+                "audio_loss": audio_loss,
+                "kl_loss": kl_loss,
+                "mu_mean": outputs.get("mu_mean"),
+                "mu_var": outputs.get("mu_var"),
+                "vq_loss": vq_loss,
+            }
+            if vq_stats is not None:
+                flat_metrics["vq_perplexity"] = vq_stats.perplexity
+                flat_metrics["vq_codes_used"] = vq_stats.codes_used
+                flat_metrics["vq_codes_used_frac"] = vq_stats.codes_used_frac
 
-            self.control.granular_losses["audio_loss"] += (
-                audio_loss.detach() / self.args.gradient_accumulation_steps
-            )
-            self.control.granular_losses["kl_loss"] += (
-                kl_loss.detach() / self.args.gradient_accumulation_steps
-            )
-            if vq_loss is not None:
-                self.control.granular_losses["vq_loss"] += (
-                    vq_loss.detach() / self.args.gradient_accumulation_steps
-                )
-            if vq_perplexity is not None:
-                self.control.granular_losses["vq_perplexity"] += (
-                    vq_perplexity.detach().float()
-                    / self.args.gradient_accumulation_steps
-                )
-            if vq_codes_used is not None:
-                self.control.granular_losses["vq_codes_used"] += (
-                    vq_codes_used.detach().float()
-                    / self.args.gradient_accumulation_steps
-                )
-            if vq_codes_used_frac is not None:
-                self.control.granular_losses["vq_codes_used_frac"] += (
-                    vq_codes_used_frac.detach().float()
-                    / self.args.gradient_accumulation_steps
-                )
-            if semantic_loss is not None:
-                if self.args.n_gpu > 1:
-                    semantic_loss = semantic_loss.mean()
-                self.control.granular_losses["semantic_loss"] += (
-                    semantic_loss.detach() / self.args.gradient_accumulation_steps
-                )
-            if mu_mean is not None:
-                val = mu_mean.detach().float()
-                if val.dim() > 0:
-                    val = val.mean()
-                self.control.granular_losses["mu_mean"] += (
-                    val.to(self.control.granular_losses["mu_mean"].dtype)
-                    / self.args.gradient_accumulation_steps
-                )
-            if mu_var is not None:
-                val = mu_var.detach().float()
-                if val.dim() > 0:
-                    val = val.mean()
-                self.control.granular_losses["mu_var"] += (
-                    val.to(self.control.granular_losses["mu_var"].dtype)
-                    / self.args.gradient_accumulation_steps
-                )
-            if z_pooled_fps is not None:
-                val = z_pooled_fps.detach().float()
-                if val.dim() > 0:
-                    val = val.mean()
-                self.control.granular_losses["z_pooled_fps"] += (
-                    val.to(self.control.granular_losses["z_pooled_fps"].dtype)
-                    / self.args.gradient_accumulation_steps
-                )
-
-            return (loss, outputs) if return_outputs else loss
-        else:
-            # Fallback for eval mode or before callback is initialized
-            audios_srs = inputs["output_audios_srs"]
-            outputs = model(
-                audios_srs=audios_srs,
-                training_step=self.state.global_step,
-            )
-            audio_loss = outputs.audio_loss
-            kl_loss = outputs.kl_loss
-            semantic_loss = getattr(outputs, "semantic_loss", None)
-            loss = (
-                audio_loss
-                + kl_loss
-                + (semantic_loss if semantic_loss is not None else 0.0)
-            )
+            for key in self.control.granular_losses:
+                if flat_metrics.get(key) is not None:
+                    val = flat_metrics[key].detach().float()
+                    if self.args.n_gpu > 1 and val.dim() > 0:
+                        val = val.mean()
+                    self.control.granular_losses[key] += (
+                        val.to(self.control.granular_losses[key].dtype)
+                        / self.args.gradient_accumulation_steps
+                    )
             return (loss, outputs) if return_outputs else loss
 
     def _maybe_log_save_evaluate(self, *args, **kwargs):
@@ -571,24 +488,13 @@ class VAEtrainer(Trainer):
 def main(cfg: DictConfig):
     # Convert OmegaConf DictConfig to standard python dict
     cfg_dict = OmegaConf.to_container(cfg, resolve=True)
-    
+
     training_cfg = cfg_dict.get("training", {})
-    convformer_cfg = cfg_dict.get("convformer", {})
-    cfm_cfg = cfg_dict.get("cfm", {})
+    encoder_cfg = cfg_dict.get("encoder", {})
+    decoder_cfg = cfg_dict.get("decoder", {})
 
     # Set seed for reproducibility
     set_seed(training_cfg.get("seed", 42))
-
-    # Set default dtype
-    if training_cfg.get("bf16", False):
-        torch.set_default_dtype(torch.bfloat16)
-        dtype = torch.bfloat16
-    elif training_cfg.get("fp16", False):
-        torch.set_default_dtype(torch.float16)
-        dtype = torch.float16
-    else:
-        torch.set_default_dtype(torch.float32)
-        dtype = torch.float32
 
     # Setup device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -605,8 +511,7 @@ def main(cfg: DictConfig):
     else:
         raise ValueError(f"Dataset {dataset_name} not supported")
     train_dataset = TrainDatasetWrapper(dataset, "train")
-    test_dataset = TrainDatasetWrapper(dataset, "train")
-
+    test_dataset = TestDatasetWrapper(dataset, "test")
     # handle wandb - only initialize on main process (rank 0)
     wandb_project = training_cfg.pop("wandb_project", None)
     wandb_run_name = training_cfg.pop("wandb_run_name", None)
@@ -620,28 +525,45 @@ def main(cfg: DictConfig):
         )
         logger.info(f"Initialized W&B on rank {local_rank}")
 
-    # Create model config
-    # Build model configs from merged YAML
-    decoder_config = DiTConfig(**cfm_cfg)
-    use_classic_decoder = convformer_cfg.pop("use_classic_decoder", False)
-    encoder_config = ConvformerEncoderConfig(**convformer_cfg)
-    # Create model
+    decoder_config = DiTConfig(**decoder_cfg)
+
+    vq_dict = encoder_cfg.pop("vq_config", None)
+    vq_config = VQConfig(**vq_dict) if vq_dict else None
+
+    dropout_dict = encoder_cfg.pop("dropout_regularizer_config", None)
+    dropout_config = DropoutConfig(**dropout_dict) if dropout_dict else None
+
+    kl_dict = encoder_cfg.pop("kl_chunk_regularizer_config", None)
+    kl_config = KLChunkRegularizer(**kl_dict) if kl_dict else None
+
+    use_bigvgan_mel = cfg_dict.get("use_bigvgan_mel", False)
+
+    encoder_config = EncoderConfig(
+        vq_config=vq_config,
+        dropout_regularizer_config=dropout_config,
+        kl_chunk_regularizer_config=kl_config,
+        **encoder_cfg,
+    )
+
     logger.info("Creating VAE model...")
     mel_spec_config = MelSpectrogramConfig(
-        use_bigvgan_mel=convformer_cfg.get("use_bigvgan_mel", False),
+        use_bigvgan_mel=use_bigvgan_mel,
     )
     if mel_spec_config.use_bigvgan_mel:
         logger.info("Using BigVGAN-compatible mel spectrogram")
 
-    model = VAE(
-        config=VAEConfig(
-            encoder_config=encoder_config,
-            decoder_config=decoder_config,
-            mel_spec_config=mel_spec_config,
-            use_classic_decoder=use_classic_decoder,
-        ),
-        dtype=dtype,
+    # Inizializza la VAEConfig con i parametri globali (con fallback sui default)
+    vae_config = VAEConfig(
+        mel_dim=cfg_dict.get("mel_dim", 100),
+        latent_dim=cfg_dict.get("latent_dim", 64),
+        sample_rate=cfg_dict.get("sample_rate", 24000),
+        compress_factor=cfg_dict.get("compress_factor", 4),
+        encoder_config=encoder_config,
+        decoder_config=decoder_config,
+        mel_spectrogram_config=mel_spec_config,
     )
+
+    model = VAE(config=vae_config)
 
     training_cfg["learning_rate"] = float(training_cfg.get("learning_rate"))
     min_learning_rate = float(training_cfg.pop("min_learning_rate", 0.0))

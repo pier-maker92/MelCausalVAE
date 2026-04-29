@@ -140,7 +140,7 @@ class KLChunkRegularizer(nn.Module):
 
         return weights.repeat_interleave(self.chunk_size)
 
-    def kl_divergence_weighted(
+    def forward(
         self,
         mu: torch.FloatTensor,
         logvar: Optional[torch.FloatTensor],
