@@ -1,3 +1,4 @@
+# @package _global_
 decoder:
   dit_dim: 512
   dit_depth: 6

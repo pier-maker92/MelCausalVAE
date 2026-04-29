@@ -12,7 +12,7 @@ def _assert_latent_chunks_divisible(latent_dim: int, chunk_size: int) -> None:
 
 class DropoutRegularizer(nn.Module):
     def __init__(self, config: DropoutConfig):
-        super().__init__(config)
+        super().__init__()
         self.dropout_start = config.dropout_start
         self.dropout_end = config.dropout_end
         self.chunk_size = config.chunk_size
@@ -22,20 +22,20 @@ class DropoutRegularizer(nn.Module):
     def set_training(self, training: bool) -> None:
         self.training = training
 
-    def _latent_chunk_dropout_probs_per_chunk(self, num_chunks: int) -> torch.Tensor:
+    def _latent_chunk_dropout_probs_per_chunk(
+        self, num_chunks: int, device: torch.device, dtype: torch.dtype
+    ) -> torch.Tensor:
         """Per-chunk dropout probability (independent mode), linear from start to end."""
         if num_chunks <= 0:
             raise ValueError("num_chunks must be positive")
         if num_chunks == 1:
-            return torch.tensor(
-                [self.dropout_start], device=self.device, dtype=self.dtype
-            )
+            return torch.tensor([self.dropout_start], device=device, dtype=dtype)
         return torch.linspace(
             self.dropout_start,
             self.dropout_end,
             num_chunks,
-            device=self.device,
-            dtype=self.dtype,
+            device=device,
+            dtype=dtype,
         )
 
     def forward(self, z: torch.FloatTensor) -> torch.Tensor:
@@ -57,7 +57,9 @@ class DropoutRegularizer(nn.Module):
         n_chunks = D // self.chunk_size
 
         if not self.dropout_hierarchical:
-            probs = self._latent_chunk_dropout_probs_per_chunk(n_chunks=n_chunks)
+            probs = self._latent_chunk_dropout_probs_per_chunk(
+                num_chunks=n_chunks, device=z.device, dtype=z.dtype
+            )
             zv = z.view(B, T, n_chunks, self.chunk_size)
             u = torch.rand(B, 1, n_chunks, 1, device=z.device, dtype=z.dtype)
             keep = u >= probs.view(1, 1, n_chunks, 1)
@@ -106,9 +108,10 @@ class DropoutRegularizer(nn.Module):
 
 class KLChunkRegularizer(nn.Module):
     def __init__(self, config: KLChunkRegularizer, vq_quant_dim: Optional[int] = None):
-        super().__init__(config)
+        super().__init__()
         self.kl_start = config.kl_weight_start
         self.kl_end = config.kl_weight_end
+        self.chunk_size = config.chunk_size
         self.vq_quant_dim = vq_quant_dim
         self.training = True
 
@@ -145,13 +148,12 @@ class KLChunkRegularizer(nn.Module):
         mu: torch.FloatTensor,
         logvar: Optional[torch.FloatTensor],
         padding_mask: torch.BoolTensor,
-        dtype: torch.dtype,
-        channel_weights: torch.Tensor,
     ) -> torch.FloatTensor:
         """
         Same KL as kl_divergence but each latent dimension is scaled by channel_weights [latent_dim].
         When weights are all 1.0, matches kl_divergence (up to dtype handling).
         """
+        dtype = mu.dtype
         channel_weights = self.latent_chunk_kl_weights(
             latent_dim=mu.shape[-1],
             device=mu.device,

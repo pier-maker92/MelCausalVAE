@@ -4,6 +4,7 @@ import torch
 import einops
 from torch import nn
 from einops import rearrange
+from typing import Tuple, List
 from .configs import MelSpectrogramConfig
 from torchaudio.transforms import MelSpectrogram
 from .output_dataclasses import FeatureExtractorOutput

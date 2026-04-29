@@ -11,12 +11,12 @@ from collections import defaultdict
 from torch.utils.data import DataLoader
 from datasets import load_dataset, concatenate_datasets
 from data.audio_dataset import SimpleAudioDataset, DataCollator, TrainDatasetWrapper
-from modules.feature_extractor import MelSpectrogramEncoder, MelSpectrogramConfig
+from modules.feature_extractor import FeatureExtractor, MelSpectrogramConfig
 
 # Specify custom cache directory
 parquet_dir = "/workspace/data"
 # import mel spec encoder
-mel_spec_encoder = MelSpectrogramEncoder(config=MelSpectrogramConfig())
+mel_spec_encoder = FeatureExtractor(config=MelSpectrogramConfig())
 
 
 def simple_collate_fn(batch):

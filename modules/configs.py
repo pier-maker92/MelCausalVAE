@@ -14,6 +14,7 @@ class SigmaVAEencoderConfig:
     logvar_layer: bool = False
     kl_loss_weight: float = 1e-5
     kl_loss_warmup_steps: Optional[int] = None
+    use_sofplus: bool = False
 
 
 @dataclass

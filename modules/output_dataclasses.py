@@ -43,7 +43,7 @@ class VAEOutput:
 @dataclass
 class DecoderOutput:
     loss: Optional[torch.FloatTensor] = None
-    mel_generated: Optional[torch.FloatTensor] = None
+    audio_features: Optional[torch.FloatTensor] = None
     padding_mask: Optional[torch.BoolTensor] = None
 
 

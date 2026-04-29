@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from modules.encoder.vq import HardVectorQuantizer
 from modules.configs import EncoderConfig, VQConfig
 from modules.output_dataclasses import EncoderOutput
-from modules.encoder.sigma_vae_encoder import SigmaVAEEncoder
+from modules.encoder.sigmavae import SigmaVAEEncoder
 from modules.encoder.regularization import (
     DropoutRegularizer,
     KLChunkRegularizer,
@@ -78,7 +78,7 @@ class Encoder(SigmaVAEEncoder):
                 raise ValueError(
                     f"dim_to_quantize ({config.vq_config.dim_to_quantize}) must be <= latent_dim ({config.latent_dim})."
                 )
-            self.vq = HardVectorQuantizer(VQConfig(config=config.vq_config))
+            self.vq = HardVectorQuantizer(config.vq_config)
             self.residual_and_tail_dropout_p = (
                 config.vq_config.residual_and_tail_dropout_p
             )

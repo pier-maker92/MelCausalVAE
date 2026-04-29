@@ -5,7 +5,7 @@ defaults:
   - settings: null
   - _self_
 
-# --- Parametri Globali VAE ---
+# --- Global VAE Parameters ---
 mel_dim: 100
 latent_dim: 64
 sample_rate: 24000

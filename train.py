@@ -1,4 +1,4 @@
-from MelCausalVAE.data.audio_dataset import TestDatasetWrapper
+from data.audio_dataset import TestDatasetWrapper
 import os
 import wandb
 import torch
@@ -10,7 +10,6 @@ from typing import Dict, List
 import matplotlib.pyplot as plt
 from modules.VAE import VAE, VAEConfig
 from modules.feature_extractor import MelSpectrogramConfig
-from modules.similarity import plot_durations_on_mel
 from transformers import (
     Trainer,
     TrainingArguments,
@@ -96,26 +95,42 @@ class VAEtrainer(Trainer):
         )
         return self.lr_scheduler
 
+    def save_model(self, output_dir=None, _internal_call=False):
+        super().save_model(output_dir, _internal_call)
+
+        # Save VAEConfig alongside the model
+        if output_dir is None:
+            output_dir = self.args.output_dir
+
+        if output_dir is not None:
+            import os
+            import json
+            import dataclasses
+
+            config_path = os.path.join(output_dir, "config.json")
+            with open(config_path, "w") as f:
+                json.dump(dataclasses.asdict(self.model.config), f, indent=4)
+
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         if hasattr(self.control, "granular_losses") and model.training:
             audios_srs = inputs["output_audios_srs"]
-            outputs = model(
+            output = model(
                 audios_srs=audios_srs,
                 training_step=self.state.global_step,
                 phoneme_alignments=inputs["phoneme_alignments"],
             )
-            audio_loss = outputs["audio_loss"]
-            kl_loss = outputs["kl_loss"]
-            vq_loss = outputs.get("vq_loss", None)
-            vq_stats = outputs.get("vq_stats", None)
+            audio_loss = output.audio_loss
+            kl_loss = output.kl_loss
+            vq_loss = getattr(output, "vq_loss", None)
+            vq_stats = getattr(output, "vq_stats", None)
             loss = audio_loss + kl_loss + (vq_loss if vq_loss is not None else 0.0)
 
             # Accumulate granular losses
             flat_metrics = {
                 "audio_loss": audio_loss,
                 "kl_loss": kl_loss,
-                "mu_mean": outputs.get("mu_mean"),
-                "mu_var": outputs.get("mu_var"),
+                "mu_mean": getattr(output, "mu_mean", None),
+                "mu_var": getattr(output, "mu_var", None),
                 "vq_loss": vq_loss,
             }
             if vq_stats is not None:
@@ -132,7 +147,7 @@ class VAEtrainer(Trainer):
                         val.to(self.control.granular_losses[key].dtype)
                         / self.args.gradient_accumulation_steps
                     )
-            return (loss, outputs) if return_outputs else loss
+            return (loss, output) if return_outputs else loss
 
     def _maybe_log_save_evaluate(self, *args, **kwargs):
         tr_loss = args[0]
@@ -221,7 +236,7 @@ class VAEtrainer(Trainer):
         """
         logger.info(f"Generating reconstruction samples...")
 
-        if getattr(self.model.config.mel_spec_config, "use_bigvgan_mel", False):
+        if getattr(self.model.config.mel_spectrogram_config, "use_bigvgan_mel", False):
             try:
                 import sys
                 import os
@@ -269,7 +284,7 @@ class VAEtrainer(Trainer):
                 continue
             audios_srs = batch["output_audios_srs"]
             audios_srs = [
-                (audio.to(self.args.device).to(torch.bfloat16), sr)
+                (audio.to(self.args.device).to(self.model.dtype), sr)
                 for audio, sr in audios_srs
             ]
             phoneme_alignments = pas
@@ -285,7 +300,7 @@ class VAEtrainer(Trainer):
         # Generate reconstructions
         try:
             with torch.no_grad():
-                results = self.model.encode_and_sample(
+                results = self.model.encode_decode(
                     audios_srs=audios_srs,
                     num_steps=16,
                     temperature=0.2,
@@ -322,41 +337,6 @@ class VAEtrainer(Trainer):
                 )
                 plt.close(fig)
 
-                # Plot durations on mel if available
-                if (
-                    results.get("durations") is not None
-                    and results["durations"][idx] is not None
-                ):
-                    durations = results["durations"][idx]
-
-                    # Use original_padding_mask for the original mel (before upsampling)
-                    mel_mask = results.get(
-                        "original_padding_mask", results["padding_mask"]
-                    )[idx].unsqueeze(0)
-
-                    # Get compress_factor_C from model config
-                    compress_factor_C = (
-                        self.model.config.encoder_config.compress_factor_C
-                    )
-
-                    seg_fig = plot_durations_on_mel(
-                        mels=results["original_mel"][idx].unsqueeze(0),
-                        durations=durations.unsqueeze(0),
-                        mel_mask=mel_mask,
-                        compress_factor_C=compress_factor_C,
-                        batch_idx=0,
-                        step=self.state.global_step,
-                        labels=None,
-                        device_id=device_id,
-                    )
-                    segmentation_plots.append(
-                        wandb.Image(
-                            seg_fig,
-                            caption=f"Segmentation Sample {idx} - Step {self.state.global_step} - Device {device_id}",
-                        )
-                    )
-                    plt.close(seg_fig)
-
                 # Decode reconstructed mel to audio
                 mel = results["reconstructed_mel"][idx]  # [T, F]
                 pad_mask = results["padding_mask"][idx]  # [T] True = padded
@@ -369,7 +349,7 @@ class VAEtrainer(Trainer):
                 features = (
                     valid_mel.unsqueeze(0)
                     .permute(0, 2, 1)
-                    .to(torch.bfloat16)
+                    .float()
                     .to(self.args.device)
                 )
 
@@ -552,7 +532,7 @@ def main(cfg: DictConfig):
     if mel_spec_config.use_bigvgan_mel:
         logger.info("Using BigVGAN-compatible mel spectrogram")
 
-    # Inizializza la VAEConfig con i parametri globali (con fallback sui default)
+    # Initialize VAEConfig with global parameters (falling back to defaults)
     vae_config = VAEConfig(
         mel_dim=cfg_dict.get("mel_dim", 100),
         latent_dim=cfg_dict.get("latent_dim", 64),

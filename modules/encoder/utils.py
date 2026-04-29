@@ -230,4 +230,6 @@ class Transformer(nn.Module):
         self.enc = nn.TransformerEncoder(layer, num_layers=nlayers)
 
     def forward(self, x, pad_mask=None):
-        return self.enc(x, src_key_padding_mask=pad_mask, is_causal=True)
+        seq_len = x.shape[1]
+        mask = nn.Transformer.generate_square_subsequent_mask(seq_len, device=x.device)
+        return self.enc(x, mask=mask, src_key_padding_mask=pad_mask, is_causal=True)

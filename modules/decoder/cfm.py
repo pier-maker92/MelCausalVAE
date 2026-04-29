@@ -4,9 +4,9 @@ import torch.nn as nn
 from typing import Optional
 from einops import rearrange
 from torchdiffeq import odeint
-from modules.dit import Transformer
 from torch.nn import functional as F
 from modules.configs import DiTConfig
+from modules.decoder.dit import Transformer
 from modules.output_dataclasses import DecoderOutput
 
 
@@ -27,7 +27,6 @@ class DiT(torch.nn.Module):
         self.audio_latent_dim = config.audio_latent_dim
         self.expansion_factor = config.expansion_factor
         self.uncond_prob = config.uncond_prob
-        self.learned_prior = config.learned_prior
         self.is_causal = config.is_causal
         self.use_window_attention = config.use_window_attention
         self.use_group_bidirectional = config.use_group_bidirectional
@@ -48,7 +47,7 @@ class DiT(torch.nn.Module):
             )
 
         # context vector projection
-        self.context_vector_proj = (nn.Linear(self.audio_latent_dim, self.dit_dim),)
+        self.context_vector_proj = nn.Linear(self.audio_latent_dim, self.dit_dim)
         # noise projection
         self.noise_proj = nn.Sequential(
             nn.Linear(self.dit_dim + self.mel_dim, self.dit_dim),
@@ -60,6 +59,7 @@ class DiT(torch.nn.Module):
         self.transformer = Transformer(
             dim=self.dit_dim,
             depth=self.dit_depth,
+            out_dim=self.mel_dim,
             heads=self.dit_heads,
             use_conv_layer=self.use_conv_layer,
             is_causal=self.is_causal,
@@ -86,13 +86,13 @@ class DiT(torch.nn.Module):
             target = target[:, :min_length, :]
             if padding_mask is not None:
                 padding_mask = padding_mask[:, :min_length]
-                self.mel_dim,
 
         temperature = temperature or 1.0
         x0 = (
             torch.randn(
                 context_vector.shape[0],
                 context_vector.shape[1],
+                self.mel_dim,
                 dtype=context_vector.dtype,
                 device=context_vector.device,
                 generator=generator,
@@ -108,10 +108,7 @@ class DiT(torch.nn.Module):
         x0: torch.FloatTensor,
     ):
         if random.random() < self.uncond_prob:
-            if self.learned_prior:
-                context_vector = torch.randn_like(context_vector)
-            else:
-                context_vector = torch.zeros_like(context_vector)
+            context_vector = torch.zeros_like(context_vector)
         # We need times
         times = torch.rand(
             (target.shape[0],),
@@ -218,7 +215,7 @@ class DiT(torch.nn.Module):
                 state=state,
                 cfg_scale=cfg_scale,
                 context_vector=context_vector,
-                attention_mask=~padding_mask,
+                attention_mask=~upsampled_padding_mask,
             )
             return features
 
@@ -228,7 +225,7 @@ class DiT(torch.nn.Module):
         generated_latents = trajectory[-1]
 
         return DecoderOutput(
-            mel_generated=generated_latents.view(B, -1, self.mel_dim),
+            audio_features=generated_latents.view(B, -1, self.mel_dim),
             padding_mask=upsampled_padding_mask,
         )
 
@@ -241,11 +238,7 @@ class DiT(torch.nn.Module):
         attention_mask: Optional[torch.BoolTensor] = None,
     ):
         times = times.repeat(state.shape[0])
-        cond_state = (
-            self.noise_proj(context_vector)
-            if self.learned_prior
-            else self.noise_proj(torch.cat([context_vector, state], dim=-1))
-        )
+        cond_state = self.noise_proj(torch.cat([context_vector, state], dim=-1))
         gs = self._group_size
         cond_out = self.transformer(
             x=cond_state,
@@ -256,12 +249,8 @@ class DiT(torch.nn.Module):
         if cfg_scale == 1.0:
             return cond_out
 
-        uncond_state = (
-            self.noise_proj(
-                torch.cat([torch.zeros_like(context_vector), state], dim=-1)
-            )
-            if not self.learned_prior
-            else self.noise_proj(torch.zeros_like(context_vector))
+        uncond_state = self.noise_proj(
+            torch.cat([torch.zeros_like(context_vector), state], dim=-1)
         )
         uncond_out = self.transformer(
             x=uncond_state,

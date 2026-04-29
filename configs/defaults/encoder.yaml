@@ -1,3 +1,4 @@
+# @package _global_
 encoder:
   d_model: 512
   tf_heads: 8

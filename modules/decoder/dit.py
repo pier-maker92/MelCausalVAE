@@ -12,7 +12,7 @@ class Transformer(Module):
         self,
         dim: int,
         depth: int,
-        audio_latent_dim: int,
+        out_dim: int,
         dim_head: int = 64,
         heads: int = 8,
         ff_mult: int = 4,
@@ -82,7 +82,6 @@ class Transformer(Module):
                             dim_head=dim_head,
                             heads=heads,
                             dropout=attn_dropout,
-                            flash=attn_flash,
                             qk_norm=attn_qk_norm,
                             window_size=window_size,
                         ),
@@ -93,7 +92,7 @@ class Transformer(Module):
             )
 
         self.final_norm = RMSNorm(dim)
-        self.out_linear = nn.Linear(dim, audio_latent_dim, bias=False)
+        self.out_linear = nn.Linear(dim, out_dim, bias=False)
         self.is_causal = is_causal  # honor ctor arg
 
     def _get_causal_mask(self, attention_mask: torch.BoolTensor):
