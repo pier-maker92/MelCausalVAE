@@ -1,0 +1,49 @@
+# Only specify values that override defaults in configs/defaults/*.yaml
+training:
+  num_train_epochs: 4
+  dataset_name: librispeech_aligned
+  output_dir: checkpoints/ablations/dropout-5-epochs
+  learning_rate: 1e-4
+  min_learning_rate: 5e-5
+  per_device_train_batch_size: 24
+  per_device_eval_batch_size: 4
+  report_to: wandb
+  wandb_project: CaDiT-VAE-ablations
+  wandb_run_name: dropout-5-epochs
+  fp16: false
+  bf16: true
+  save_steps: 1000
+  eval_steps: 500
+  save_total_limit: 1
+  gradient_accumulation_steps: 1
+  dataloader_num_workers: 4
+  from_pretrained: /workspace/MelCausalVAE/checkpoints/ablations/dropout/model.safetensors
+
+# --- Encoder Config ---
+encoder:
+  d_model: 1024
+
+  logvar_layer: false
+  target_std: 0.3
+  kl_loss_warmup_steps: 10
+  kl_loss_weight: 5e-4
+  
+  # Dropout Config
+  dropout_regularizer_config:
+    chunk_size: 2
+    dropout_start: 0.0
+    dropout_end: 0.8
+    dropout_hierarchical: false
+
+# --- Decoder Config ---
+decoder:
+  dit_dim: 768      
+  dit_depth: 6      
+  dit_heads: 12     
+  dit_dropout_rate: 0.1 
+  
+  use_conv_layer: true
+  uncond_prob: 0.15
+  is_causal: false
+  use_window_attention: true
+  window_attention_seconds: 3.0

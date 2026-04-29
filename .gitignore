@@ -90,3 +90,14 @@ Thumbs.db
 # Logs
 *.log
 
+# Custom ignores
+*.png
+*.json
+*.sh
+*.npz
+*.csv
+*.parquet
+ablations/
+
+# Ignore all hidden directories and their contents
+**/.*/**

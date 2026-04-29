@@ -1,0 +1,2623 @@
+{
+  "samples": [
+    {
+      "index": 0,
+      "id": "1089-134686-0006",
+      "language": "en",
+      "gt_text": "the dull light fell more faintly upon the page whereon another equation began to unfold itself slowly and to spread abroad its widening tail",
+      "ref_transcription": "the dull light fell more faintly upon the page whereon another equation began to unfold itself slowly and to spread abroad its widening tail",
+      "recon_transcription": "the dull light fell more faintly upon the page where on another occasion thegan to unfold itself slowly and miss blingamor on its wedening nail",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 3.54
+      },
+      "reconstructed": {
+        "WER": 37.5,
+        "CER": 16.43
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 37.5,
+        "CER": 16.43,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 1,
+      "id": "7729-102255-0026",
+      "language": "en",
+      "gt_text": "in the shooting of sheriff jones in lawrence and in the refusal of ex governor beeder to allow the deputy marshal to arrest him they discovered grave offenses against the territorial and united states laws",
+      "ref_transcription": "in the shooting of sheriff jones in lawrence and in the refusal of ex governor reader to allow the deputy marshal to arrest him they discovered grave offences against the territorial and t united states laws",
+      "recon_transcription": "in the shooting of sheriff johns bn lawrence and in the refusal of x govenar rleader to allow the deputy marshal to arrest him english gover greav offences against the teratorial and the united states laws",
+      "ref": {
+        "WER": 8.57,
+        "CER": 2.44,
+        "UTMOS": 4.04
+      },
+      "reconstructed": {
+        "WER": 31.43,
+        "CER": 13.66
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 22.86,
+        "CER": 11.22,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 2,
+      "id": "5639-40744-0021",
+      "language": "en",
+      "gt_text": "she meanwhile passed her life with her parents in the strictest retirement never letting herself be seen but shunning every eye lest it should read her misfortune in her face",
+      "ref_transcription": "she meanwhile passed her life with her parents in the strictest retirement never letting herself be seen but shunning every eye lest it should read her misfortune in her face",
+      "recon_transcription": "she knew wo pass er alongs with her parents in wha strictly stepid vimend never letting herself be seen and stantlng every eye lest they should read her in thi sfortune in her face",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 3.49
+      },
+      "reconstructed": {
+        "WER": 50.0,
+        "CER": 26.44
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 50.0,
+        "CER": 26.44,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 3,
+      "id": "1995-1826-0002",
+      "language": "en",
+      "gt_text": "john taylor who had supported her through college was interested in cotton",
+      "ref_transcription": "john taylor who had supported her through college was interested in cotton",
+      "recon_transcription": "not di ernlids of piner or the eyes os ante stakin hotton",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 3.61
+      },
+      "reconstructed": {
+        "WER": 100.0,
+        "CER": 60.81
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 100.0,
+        "CER": 60.81,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 4,
+      "id": "2300-131720-0034",
+      "language": "en",
+      "gt_text": "the others having been in operation too short a time to show definite results although they also went quickly to a dividend basis",
+      "ref_transcription": "the others having been in operation too short a time to show definite results although they also went quickly to a dividend basis",
+      "recon_transcription": "the others anconetent operation fi shermocks ar isiom of definite results although they all humor porpoint frome divienvations",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 2.92
+      },
+      "reconstructed": {
+        "WER": 69.57,
+        "CER": 42.64
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 69.57,
+        "CER": 42.64,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 5,
+      "id": "8463-294828-0031",
+      "language": "en",
+      "gt_text": "one of the sailors led me to the afterdeck where i stood in the presence of a smart looking officer who extended his hand to me",
+      "ref_transcription": "one of the sailors led me to the after deck where i stood in the presence of a smart looking officer who extended his hand to me",
+      "recon_transcription": "r the sailors ted me ki e african were haf straid an the pesens of a sargen yoth officer who extended his mandy to me",
+      "ref": {
+        "WER": 7.69,
+        "CER": 0.79,
+        "UTMOS": 3.01
+      },
+      "reconstructed": {
+        "WER": 53.85,
+        "CER": 31.5
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 46.16,
+        "CER": 30.71,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 6,
+      "id": "7127-75946-0017",
+      "language": "en",
+      "gt_text": "his legs the best shaped at court were displayed to great advantage in flesh colored silken hose of silk so fine and so transparent that it seemed almost like flesh itself",
+      "ref_transcription": "his legs the best shaped at court were displayed to great advantage in flesh colored silken hose of silk so fine and so transparent that it seemed almost like flesh itself",
+      "recon_transcription": "explains tha thes shai tharp an displayed ta righten mange in flesh toon his ugly poms thast u so fine hoso transparent that een tewols wife bushens up",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 2.76
+      },
+      "reconstructed": {
+        "WER": 80.65,
+        "CER": 47.95
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 80.65,
+        "CER": 47.95,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 7,
+      "id": "7729-102255-0008",
+      "language": "en",
+      "gt_text": "all the territorial dignitaries were present governor shannon presided john calhoun the surveyor general made the principal speech a denunciation of the abolitionists supporting the topeka movement chief justice lecompte dignified the occasion with approving remarks",
+      "ref_transcription": "all the territorial dignitaries were present governor shandon presided john calhoun the surveyor general made the principal speech a denunciation of the abolitionist supporting the tupeka movement chief justice le compte dignified the occasion with approving remarks",
+      "recon_transcription": "a'll car proviin  bet materials forthe present and theres yo ha rosedin john calhoun the surregor general made the principal speech i enanstiation of the avolutionist supporting thisipeta movement chief justislekovte upon the occasion with he promting remarks",
+      "ref": {
+        "WER": 13.89,
+        "CER": 1.5,
+        "UTMOS": 3.84
+      },
+      "reconstructed": {
+        "WER": 61.11,
+        "CER": 29.7
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 47.22,
+        "CER": 28.2,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 8,
+      "id": "2961-961-0014",
+      "language": "en",
+      "gt_text": "nine thousand years have elapsed since she founded yours and eight thousand since she founded ours as our annals record",
+      "ref_transcription": "nine thousand years have elapsed since she founded yours and eight thousand since she founded ours as our annals record",
+      "recon_transcription": "nine thousand years have elapsed since she found e humors and eight thousand since she found a box as her erans ar or",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 3.36
+      },
+      "reconstructed": {
+        "WER": 50.0,
+        "CER": 18.49
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 50.0,
+        "CER": 18.49,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 9,
+      "id": "5105-28233-0005",
+      "language": "en",
+      "gt_text": "sometimes he would wander on foot upon the sandy shore and sometimes he would enjoy a ride along the summit of the cliff altogether being in no hurry at all to bring his task to an end",
+      "ref_transcription": "sometimes he would wander on foot upon the sandy shore and sometimes he would enjoy a ride along the summit of the cliff altogether being in no hurry at all to bring his task to an end",
+      "recon_transcription": "tatme wander on foot upon the sandy shird sai antiunti e arie awon the servat of the cliff altogether meing an outrady and all during his task perten",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 3.69
+      },
+      "reconstructed": {
+        "WER": 62.16,
+        "CER": 36.96
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 62.16,
+        "CER": 36.96,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 10,
+      "id": "1089-134691-0019",
+      "language": "en",
+      "gt_text": "a voice from beyond the world was calling",
+      "ref_transcription": "a voice from beyond the world was calling",
+      "recon_transcription": "a voice cam down the ro he was calling",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 3.93
+      },
+      "reconstructed": {
+        "WER": 50.0,
+        "CER": 29.27
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 50.0,
+        "CER": 29.27,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 11,
+      "id": "2961-960-0005",
+      "language": "en",
+      "gt_text": "in the present day we are well aware that an ancient philosopher is to be interpreted from himself and by the contemporary history of thought",
+      "ref_transcription": "in the present day we are well aware that an ancient philosopher is to be interpreted from himself and by the contemporary history of thought",
+      "recon_transcription": "hansom pi i have a bobo  wear that i anci philospher i sennin trigger toe flee himself a a even ga every historyof thought",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 3.32
+      },
+      "reconstructed": {
+        "WER": 88.0,
+        "CER": 47.52
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 88.0,
+        "CER": 47.52,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 12,
+      "id": "2830-3980-0001",
+      "language": "en",
+      "gt_text": "they said to the galatians you have no right to think highly of paul",
+      "ref_transcription": "they said to the galatians you have no right to think highly of paul",
+      "recon_transcription": "excep for he relegions you ave berit in e hom of law",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 2.85
+      },
+      "reconstructed": {
+        "WER": 85.71,
+        "CER": 52.94
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 85.71,
+        "CER": 52.94,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 13,
+      "id": "1320-122612-0003",
+      "language": "en",
+      "gt_text": "he often stopped to examine the trees nor did he cross a rivulet without attentively considering the quantity the velocity and the color of its waters",
+      "ref_transcription": "he often stopped to examine the trees nor did he cross a rivulet without attentively considering the quantity the velocity and the color of its waters",
+      "recon_transcription": "he often stopped to examine the trees nor di he ass a regular o relotive the leaping stirring of the hans feet alosity and the color of is lavers",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 2.79
+      },
+      "reconstructed": {
+        "WER": 53.85,
+        "CER": 32.67
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 53.85,
+        "CER": 32.67,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 14,
+      "id": "2094-142345-0001",
+      "language": "en",
+      "gt_text": "but the windows are patched with wooden panes and the door i think is like the gate it is never opened",
+      "ref_transcription": "but the windows are patched with wooden panes and the door i think is like the gate it is never opened",
+      "recon_transcription": "the windows are patched with movin panes a muc dorr i thing it's like a gate it's ther gruten",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 2.75
+      },
+      "reconstructed": {
+        "WER": 57.14,
+        "CER": 29.41
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 57.14,
+        "CER": 29.41,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 15,
+      "id": "4992-23283-0008",
+      "language": "en",
+      "gt_text": "he seemed to wait for her reply but as she made none he proceeded",
+      "ref_transcription": "he seemed to wait for her reply but as she made none he proceeded",
+      "recon_transcription": "he seemed to wat te re py pe echin aan he proceeded",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 2.5
+      },
+      "reconstructed": {
+        "WER": 64.29,
+        "CER": 38.46
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 64.29,
+        "CER": 38.46,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 16,
+      "id": "2094-142345-0028",
+      "language": "en",
+      "gt_text": "no no no totty ud get her feet wet said missus poyser carrying away her iron",
+      "ref_transcription": "no no no totty 'd get her feet wet said missus poyser carrying away her iron",
+      "recon_transcription": "you ae now now  ha poin derse went said missus poyser suringly ing",
+      "ref": {
+        "WER": 6.25,
+        "CER": 1.32,
+        "UTMOS": 3.25
+      },
+      "reconstructed": {
+        "WER": 81.25,
+        "CER": 47.37
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 75.0,
+        "CER": 46.05,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 17,
+      "id": "5105-28241-0003",
+      "language": "en",
+      "gt_text": "steam up and canvas spread the schooner started eastwards",
+      "ref_transcription": "steam up and canvas spread the schooner started eastwards",
+      "recon_transcription": "steam up  cantats ear thes anders prausments",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 3.06
+      },
+      "reconstructed": {
+        "WER": 77.78,
+        "CER": 49.12
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 77.78,
+        "CER": 49.12,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 18,
+      "id": "4077-13754-0005",
+      "language": "en",
+      "gt_text": "they knew no north no south no east no west they stood positively by the constitution and would have nothing to do in the bloody strife between brothers unless indeed they were summoned by the authority to which they had already once loyally responded to furnish men and arms for their country's need",
+      "ref_transcription": "they knew no north no south no east no west they stood positively by the constitution and would have nothing to do in the bloody strife between brothers unless indeed they were summoned by the authority to which they had already once loyally responded to furnish men and arms for their country's need",
+      "recon_transcription": "i yo ven parson yourself o hest polis its yom positively oacultitution yo might wo think of you or boystra  others uless o meet lo e somo ue for me polea egaarry was moly replonded a cont is oe arms or a country ting",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 2.18
+      },
+      "reconstructed": {
+        "WER": 96.23,
+        "CER": 56.67
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 96.23,
+        "CER": 56.67,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 19,
+      "id": "6930-76324-0012",
+      "language": "en",
+      "gt_text": "we'll come in here this afternoon with old clothes on and have a regular house cleaning",
+      "ref_transcription": "we'll come in here this afternoon with old clothes on and have a regular house cleaning",
+      "recon_transcription": "well yes after you was all the wold time ever thanking our helt craming",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 3.53
+      },
+      "reconstructed": {
+        "WER": 100.0,
+        "CER": 62.07
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 100.0,
+        "CER": 62.07,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 20,
+      "id": "908-31957-0019",
+      "language": "en",
+      "gt_text": "thou canst wait through sorrow and sickness to bring souls to touch and think it soon when others cry too late",
+      "ref_transcription": "thou canst wait through sorrow and sickness to bring souls to touch and think it soon when others cry too late",
+      "recon_transcription": "thou canst wait through sorrow and sinliness and bring souls onition and thik of sipe moag cry too late",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 3.52
+      },
+      "reconstructed": {
+        "WER": 42.86,
+        "CER": 26.36
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 42.86,
+        "CER": 26.36,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 21,
+      "id": "1188-133604-0004",
+      "language": "en",
+      "gt_text": "some of the touches indeed when the tint has been mixed with much water have been laid in little drops or ponds so that the pigment might crystallize hard at the edge",
+      "ref_transcription": "some of the touches indeed when the tint has been mixed with much water have been laid in little drops or ponds so that the pigment might crystallize hard at the edge",
+      "recon_transcription": "some of the purcies and ye when e tanan stoo exoe o loer had been ladn i lots or bons so that the paint man might post er ols har at revenge",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 3.16
+      },
+      "reconstructed": {
+        "WER": 78.12,
+        "CER": 42.77
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 78.12,
+        "CER": 42.77,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 22,
+      "id": "908-157963-0018",
+      "language": "en",
+      "gt_text": "and fearest thou because i vanish and am seen no more",
+      "ref_transcription": "and fearest thou because i vanish and am seen no more",
+      "recon_transcription": "a fears troped as i vanished and i see no more",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 3.3
+      },
+      "reconstructed": {
+        "WER": 63.64,
+        "CER": 32.08
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 63.64,
+        "CER": 32.08,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 23,
+      "id": "61-70968-0029",
+      "language": "en",
+      "gt_text": "the squire helped to thrust them all in and entered swiftly himself",
+      "ref_transcription": "the squire helped to thrust them all in and entered swiftly himself",
+      "recon_transcription": "the squire helped to thrust o moe linen that cads between himself",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 3.12
+      },
+      "reconstructed": {
+        "WER": 50.0,
+        "CER": 35.82
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 50.0,
+        "CER": 35.82,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 24,
+      "id": "4077-13754-0007",
+      "language": "en",
+      "gt_text": "we believe in a literal resurrection and an actual hereafter in which future state shall be recognized every sanctified and authorized relationship existing here on earth of parent and child brother and sister husband and wife",
+      "ref_transcription": "we believe in a literal resurrection and an actual hereafter in which future state shall be recognized every sanctified and authorized relationship existing here on earth of parent and child brother and sister husband and wife",
+      "recon_transcription": "e will give it al te or resirection a act ill he after thin we future state shall be recognized and ey take the five of authorized relationship exsisting here on earth i er the child ehoved sister as my wife",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 2.11
+      },
+      "reconstructed": {
+        "WER": 80.56,
+        "CER": 33.63
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 80.56,
+        "CER": 33.63,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 25,
+      "id": "237-126133-0020",
+      "language": "en",
+      "gt_text": "how did her mother ever let her go",
+      "ref_transcription": "how did her mother ever let her go",
+      "recon_transcription": "i even' lov i ane an ur not",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 2.85
+      },
+      "reconstructed": {
+        "WER": 100.0,
+        "CER": 73.53
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 100.0,
+        "CER": 73.53,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 26,
+      "id": "5142-36377-0025",
+      "language": "en",
+      "gt_text": "silas slunk away without a word of protest ambrose stood his ground evidently bent on making his peace with naomi before he left her seeing that i was in the way i walked aside toward a glass door at the lower end of the room",
+      "ref_transcription": "silas slunk away without a word of protest ambrose stood his ground evidently bent on making his peace with naomi before he left her seeing that i was in the way i walked aside toward a glass door at the lower end of the room",
+      "recon_transcription": "sposi slup away without a word of protest anher's just far avi only viff of e es as myon excaimed lafter jen propsin te la umbot side er clase eloweri o theron",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 2.75
+      },
+      "reconstructed": {
+        "WER": 86.67,
+        "CER": 53.33
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 86.67,
+        "CER": 53.33,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 27,
+      "id": "1284-1181-0014",
+      "language": "en",
+      "gt_text": "he selected a small gold bottle with a pepper box top so that the powder might be sprinkled on any object through the small holes",
+      "ref_transcription": "he selected a small gold bottle with a pepper box top so that the powder might be sprinkled on any object through the small holes",
+      "recon_transcription": "he sliked o small mittle bottl with pecper cock's top to lik about in the pispri moneye in netthroge small holes",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 3.75
+      },
+      "reconstructed": {
+        "WER": 76.0,
+        "CER": 46.51
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 76.0,
+        "CER": 46.51,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 28,
+      "id": "1188-133604-0028",
+      "language": "en",
+      "gt_text": "well then last here is turner's greek school of the highest class and you define his art absolutely as first the displaying intensely and with the sternest intellect of natural form as it is and then the envelopment of it with cloud and fire",
+      "ref_transcription": "well then last here is turner's greek school of the highest class and you define his art absolutely as first the displaying intensely and with the sternest intellect of natural form as it is and then the envelopment of it with cloud and fire",
+      "recon_transcription": "wol then mas hos tes which teg the highest gas an methoght he thoug it absolutely as firstli us roiting intensly in i esternest intelit unatural form as it tangs in the indullopment of it a fain fire",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 2.92
+      },
+      "reconstructed": {
+        "WER": 72.73,
+        "CER": 40.25
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 72.73,
+        "CER": 40.25,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 29,
+      "id": "5683-32866-0004",
+      "language": "en",
+      "gt_text": "by this time lord chelford and wylder returned and disgusted rather with myself i ruminated on my want of general ship",
+      "ref_transcription": "by this time lord chelford and wylder returned and disgusted rather with myself i ruminated on my want of generalship",
+      "recon_transcription": "i ad soing boy sheford and walten returned tan tis a sigraneo for itself i ave elonie on my not with generalship",
+      "ref": {
+        "WER": 9.52,
+        "CER": 0.85,
+        "UTMOS": 3.05
+      },
+      "reconstructed": {
+        "WER": 85.71,
+        "CER": 45.76
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 76.19,
+        "CER": 44.91,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 30,
+      "id": "672-122797-0060",
+      "language": "en",
+      "gt_text": "it is a very stupid story",
+      "ref_transcription": "it is a very stupid story",
+      "recon_transcription": "it is very stupid stumpy",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 3.22
+      },
+      "reconstructed": {
+        "WER": 33.33,
+        "CER": 20.0
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 33.33,
+        "CER": 20.0,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 31,
+      "id": "8455-210777-0066",
+      "language": "en",
+      "gt_text": "they of course must all be altered",
+      "ref_transcription": "they of course must all be otter",
+      "recon_transcription": "i of course was long in author",
+      "ref": {
+        "WER": 14.29,
+        "CER": 11.76,
+        "UTMOS": 3.64
+      },
+      "reconstructed": {
+        "WER": 71.43,
+        "CER": 52.94
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 57.14,
+        "CER": 41.18,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 32,
+      "id": "1320-122612-0011",
+      "language": "en",
+      "gt_text": "if a rock or a rivulet or a bit of earth harder than common severed the links of the clew they followed the true eye of the scout recovered them at a distance and seldom rendered the delay of a single moment necessary",
+      "ref_transcription": "if a rock or a rivulet or a bit of earth harder than common severed the links of the clue they followed the true eye of the scout recovered them at a distance and seldom rendered the delay of a single moment necessary",
+      "recon_transcription": "if a rock ore wigglet were bit acros larder thay frown in cercun the lanks of the cleartey follo but throuh wire the scout recouned te iny distance and slowly rendered the delay if the suitable moment necessary",
+      "ref": {
+        "WER": 2.33,
+        "CER": 0.92,
+        "UTMOS": 2.89
+      },
+      "reconstructed": {
+        "WER": 62.79,
+        "CER": 32.72
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 60.46,
+        "CER": 31.8,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 33,
+      "id": "237-134500-0031",
+      "language": "en",
+      "gt_text": "sometimes i don't want to do anything at all and sometimes i want to pull the four corners of the divide together he threw out his arm and brought it back with a jerk so like a table cloth",
+      "ref_transcription": "sometimes i don't want to do anything at all and sometimes i want to pull the four corners of the divide together he threw out his arm and brought it back with a jerk so like a tablecloth",
+      "recon_transcription": "sometimes i don't like it linken at all and somenine i wont to ull four corners it the i tety he threw up his arms and brought it back wit a jerk so anted gangleclot",
+      "ref": {
+        "WER": 5.13,
+        "CER": 0.53,
+        "UTMOS": 3.05
+      },
+      "reconstructed": {
+        "WER": 46.15,
+        "CER": 26.6
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 41.02,
+        "CER": 26.07,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 34,
+      "id": "1995-1837-0002",
+      "language": "en",
+      "gt_text": "ah the swamp the cruel swamp",
+      "ref_transcription": "ah the swamp the cruel swamp",
+      "recon_transcription": "ah thi snok a andiness mo",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 2.27
+      },
+      "reconstructed": {
+        "WER": 83.33,
+        "CER": 60.71
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 83.33,
+        "CER": 60.71,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 35,
+      "id": "1188-133604-0012",
+      "language": "en",
+      "gt_text": "it may be that a great colorist will use his utmost force of color as a singer his full power of voice but loud or low the virtue is in both cases always in refinement never in loudness",
+      "ref_transcription": "it may be that a great colorlist will use his utmost force of color as a singer his full power of voice but loud or low the virtue is in both cases always in refinement never in loudness",
+      "recon_transcription": "any be man might collourless we used to spend most fingers of color as a simaris full power nmoist and ahwidve a virtu y simbocans is always in refinement minoran roundness",
+      "ref": {
+        "WER": 2.63,
+        "CER": 0.54,
+        "UTMOS": 3.75
+      },
+      "reconstructed": {
+        "WER": 71.05,
+        "CER": 44.32
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 68.42,
+        "CER": 43.78,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 36,
+      "id": "1089-134691-0008",
+      "language": "en",
+      "gt_text": "the uncouth faces passed him two by two stained yellow or red or livid by the sea and as he strove to look at them with ease and indifference a faint stain of personal shame and commiseration rose to his own face",
+      "ref_transcription": "the uncouth faces passed him two by two stained yellow or red or livid by the sea and as he strove to look at them with ease and indifference a faint stain of personal shame and commiseration rose to his own face",
+      "recon_transcription": "heuncooth facees poseder fo my canoe stained yellow o morar wolane that of the sea and as he tron to look at their maeas an igniferance a inkstain of personal shame and commiseration rose from his own face",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 3.87
+      },
+      "reconstructed": {
+        "WER": 52.38,
+        "CER": 26.89
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 52.38,
+        "CER": 26.89,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 37,
+      "id": "4446-2271-0021",
+      "language": "en",
+      "gt_text": "she must care about the theatre a great deal more than she used to",
+      "ref_transcription": "she must care about the theatre a great deal more than she used to",
+      "recon_transcription": "she must faro up lete er fo eta e en she used ho",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 2.8
+      },
+      "reconstructed": {
+        "WER": 71.43,
+        "CER": 43.94
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 71.43,
+        "CER": 43.94,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 38,
+      "id": "4446-2273-0016",
+      "language": "en",
+      "gt_text": "her hair is still like flax and her blue eyes are just like a baby's and she has the same three freckles on her little nose and talks about going back to her bains de mer",
+      "ref_transcription": "her hair is still like flax and her blue eyes are just like a baby's and she has the same three freckles on her little nose and talks about going back to her bande mere",
+      "recon_transcription": "her hair is skinn like flax and her blue eyes are just like a baby's and she has the same thre freckles on her lo nose if ot lot my tack can amandon her",
+      "ref": {
+        "WER": 8.33,
+        "CER": 2.35,
+        "UTMOS": 2.83
+      },
+      "reconstructed": {
+        "WER": 36.11,
+        "CER": 23.53
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 27.78,
+        "CER": 21.18,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 39,
+      "id": "6829-68769-0005",
+      "language": "en",
+      "gt_text": "he was soft hearted and impetuous said beth and being in love he didn't stop to count the cost",
+      "ref_transcription": "he was soft hearted and impetuous said beth and being in love he didn't stop to count the cost",
+      "recon_transcription": "he must have toun e to te pechess said beth and eeen meat in thi dark an tark the fors",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 3.5
+      },
+      "reconstructed": {
+        "WER": 84.21,
+        "CER": 57.45
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 84.21,
+        "CER": 57.45,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 40,
+      "id": "2830-3980-0039",
+      "language": "en",
+      "gt_text": "the terms of grace and peace are common terms with paul and are now pretty well understood",
+      "ref_transcription": "the terms of grace and peace are common terms with paul and are now pretty well understood",
+      "recon_transcription": "the terms are bracive beeath a glon thros o pau and ia not pretty well understood",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 3.82
+      },
+      "reconstructed": {
+        "WER": 64.71,
+        "CER": 33.33
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 64.71,
+        "CER": 33.33,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 41,
+      "id": "1995-1836-0014",
+      "language": "en",
+      "gt_text": "fortunately said mister vanderpool northerners and southerners are arriving at a better mutual understanding on most of these matters",
+      "ref_transcription": "fortunately said mister vanderpool northerners and southerners are arriving at a better mutual understanding on most of these matters",
+      "recon_transcription": "latrete said lustingan in fol goitin us in supping of the o arbie an ounusual understanding on most of these matters",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 3.44
+      },
+      "reconstructed": {
+        "WER": 73.68,
+        "CER": 43.61
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 73.68,
+        "CER": 43.61,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 42,
+      "id": "5142-33396-0038",
+      "language": "en",
+      "gt_text": "he shall not leave you day or night whether you are working or playing or sleeping",
+      "ref_transcription": "he shall not leave you day or night whether you are working or playing or sleeping",
+      "recon_transcription": "you shall not leave you fad mouth weaber working or playing or sleeping",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 3.58
+      },
+      "reconstructed": {
+        "WER": 43.75,
+        "CER": 28.05
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 43.75,
+        "CER": 28.05,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 43,
+      "id": "61-70970-0028",
+      "language": "en",
+      "gt_text": "stuteley was by his side in a flash and then they both began feeling about them to ascertain the shape and character of this vault",
+      "ref_transcription": "stuteley was by his side in a flash and then they both began feeling about them to ascertain the shape and character of this vault",
+      "recon_transcription": "stugley was nigh sigh in a flash and then they both began femiabout em to ascertain hat they could carrater  this bolt",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 3.07
+      },
+      "reconstructed": {
+        "WER": 52.0,
+        "CER": 26.92
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 52.0,
+        "CER": 26.92,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 44,
+      "id": "2300-131720-0038",
+      "language": "en",
+      "gt_text": "he felt he was up against it and that perhaps another kind of a job would suit him better",
+      "ref_transcription": "he felt he was up against it and that perhaps another kind of a job would suit him better",
+      "recon_transcription": "he thought he was up against in and that perhaps another cone at the job would suit him oter",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 3.56
+      },
+      "reconstructed": {
+        "WER": 31.58,
+        "CER": 20.22
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 31.58,
+        "CER": 20.22,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 45,
+      "id": "8455-210777-0038",
+      "language": "en",
+      "gt_text": "therefore i feel myself quite able as president of this republic to receive you with a courtesy due to the servants of a friendly ally",
+      "ref_transcription": "therefore i feel myself quite able as president of this republic to receive you with a courtesy due to the servance of a friendly ally",
+      "recon_transcription": "bert remarked i' feen li cal point nemal vest president of the saint lumblin they reaced a oe aperto saint yuts on the surlus an a frani vale",
+      "ref": {
+        "WER": 4.0,
+        "CER": 1.49,
+        "UTMOS": 3.49
+      },
+      "reconstructed": {
+        "WER": 96.0,
+        "CER": 59.7
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 92.0,
+        "CER": 58.21,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 46,
+      "id": "6829-68771-0034",
+      "language": "en",
+      "gt_text": "i wish i knew myself she cried fiercely",
+      "ref_transcription": "i wish i knew myself she cried fiercely",
+      "recon_transcription": "os i no myself she cried fiercely",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 2.75
+      },
+      "reconstructed": {
+        "WER": 37.5,
+        "CER": 20.51
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 37.5,
+        "CER": 20.51,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 47,
+      "id": "5142-33396-0048",
+      "language": "en",
+      "gt_text": "by the hammer of thor shouted grim here is no stingy coward",
+      "ref_transcription": "by the hammer o thor shouted grim there is no stingy coward",
+      "recon_transcription": "wy la o flor shouted grin there is no stagin cower",
+      "ref": {
+        "WER": 16.67,
+        "CER": 3.39,
+        "UTMOS": 3.58
+      },
+      "reconstructed": {
+        "WER": 75.0,
+        "CER": 35.59
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 58.33,
+        "CER": 32.2,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 48,
+      "id": "7127-75947-0023",
+      "language": "en",
+      "gt_text": "it is too difficult replied mademoiselle de tonnay charente laughing loudly",
+      "ref_transcription": "it is too difficult replied mademoiselle detonecharrant laughing loudly",
+      "recon_transcription": "you tipter re cied mademoiselle micani lear laughing hartly",
+      "ref": {
+        "WER": 27.27,
+        "CER": 10.67,
+        "UTMOS": 2.01
+      },
+      "reconstructed": {
+        "WER": 81.82,
+        "CER": 48.0
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 54.55,
+        "CER": 37.33,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 49,
+      "id": "1089-134691-0011",
+      "language": "en",
+      "gt_text": "their piety would be like their names like their faces like their clothes and it was idle for him to tell himself that their humble and contrite hearts it might be paid a far richer tribute of devotion than his had ever been a gift tenfold more acceptable than his elaborate adoration",
+      "ref_transcription": "their piety would be like their names like their faces like their clothes and it was idle for him to tell himself that their humble and contrite hearts it might be paid a far richer tribute of devotion than his had ever been a gift tenfold more acceptable than his elaborate adoration",
+      "recon_transcription": "ther prietude and pity we ter nams lite ter fistus like their clans it was idle for him to tell himself and therefore mollin an had hearts it might be and with far richer tribute of eosha than hers and eer men a melar tenfold more acceptable than his elaborate admiration",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 3.7
+      },
+      "reconstructed": {
+        "WER": 50.0,
+        "CER": 28.17
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 50.0,
+        "CER": 28.17,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 50,
+      "id": "1284-1180-0017",
+      "language": "en",
+      "gt_text": "at one end stood a great fireplace in which a blue log was blazing with a blue flame and over the fire hung four kettles in a row all bubbling and steaming at a great rate",
+      "ref_transcription": "at one end stood a great fireplace in which a blue log was blazing with a blue flame and over the fire hung four kettles in a row all bubbling and steaming at a great rate",
+      "recon_transcription": "and from him stood a great fireplace in which a blue log was blazing with a blue flame and avene the fire hung four cannels in a row all bubbling and speeling at a great rate",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 3.76
+      },
+      "reconstructed": {
+        "WER": 16.67,
+        "CER": 12.28
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 16.67,
+        "CER": 12.28,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 51,
+      "id": "7729-102255-0035",
+      "language": "en",
+      "gt_text": "the military force partly rabble partly organized had meanwhile moved into the town",
+      "ref_transcription": "the military force partly rabble partly organized had meanwhile moved into the town",
+      "recon_transcription": "ye may care for us coig babl harling orise handing rond e ew to the town",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 3.86
+      },
+      "reconstructed": {
+        "WER": 107.69,
+        "CER": 54.22
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 107.69,
+        "CER": 54.22,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 52,
+      "id": "1284-1180-0010",
+      "language": "en",
+      "gt_text": "unc knocked at the door of the house and a chubby pleasant faced woman dressed all in blue opened it and greeted the visitors with a smile",
+      "ref_transcription": "unc knocked at the door of the house and a chubby pleasant faced woman dressed all in blue opened it and greeted the visitors with a smile",
+      "recon_transcription": "i'll knock at the door of the house see't a chummy poster faced te line and a saw a ne open it and no even his ears with i smol",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 4.08
+      },
+      "reconstructed": {
+        "WER": 70.37,
+        "CER": 39.86
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 70.37,
+        "CER": 39.86,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 53,
+      "id": "7176-92135-0000",
+      "language": "en",
+      "gt_text": "he is a welcome figure at the garden parties of the elect who are always ready to encourage him by accepting free seats for his play actor managers nod to him editors allow him to contribute without charge to a symposium on the price of golf balls",
+      "ref_transcription": "he is a welcome figure at the garden parties of the elect who are always ready to encourage him by accepting free seats for his play actor managers nod to him editors allow him to contribute without charge to a symposium on the price of golf balls",
+      "recon_transcription": "i ye look an figured at the garden paris a helike we're always ready to encorage him bykcept ain fleet seats for is pla i can managers brod ten in an here's a lov in good cin forme without charming hes supposi i o runs for fellofalls",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 3.35
+      },
+      "reconstructed": {
+        "WER": 82.98,
+        "CER": 40.08
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 82.98,
+        "CER": 40.08,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 54,
+      "id": "8455-210777-0013",
+      "language": "en",
+      "gt_text": "jack had been standing in the far corner of the room talking to eva and was now reduced to silence by his praises",
+      "ref_transcription": "jack had been standing in the far corner of the room talking to eva and was now reduced to silence by his praises",
+      "recon_transcription": "a had been standing in a far corner of the room talking to eva and was now reduced to silence by his praises",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 4.07
+      },
+      "reconstructed": {
+        "WER": 8.7,
+        "CER": 5.31
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 8.7,
+        "CER": 5.31,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 55,
+      "id": "1995-1837-0027",
+      "language": "en",
+      "gt_text": "on she hurried until sweeping down to the lagoon and the island lo the cotton lay before her",
+      "ref_transcription": "on she hurried until sweeping down to the lagoon and the island lo the cotton lay before her",
+      "recon_transcription": "on she hurried nsil sweeping down to little bloom henty allen lon ien lay before her",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 3.32
+      },
+      "reconstructed": {
+        "WER": 50.0,
+        "CER": 31.52
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 50.0,
+        "CER": 31.52,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 56,
+      "id": "61-70968-0039",
+      "language": "en",
+      "gt_text": "and mine is will stuteley shall we be comrades",
+      "ref_transcription": "and mine is will stuteley shall we be comrades",
+      "recon_transcription": "and mi was wells celpey she o e oun rinistip",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 3.73
+      },
+      "reconstructed": {
+        "WER": 100.0,
+        "CER": 54.35
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 100.0,
+        "CER": 54.35,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 57,
+      "id": "5639-40744-0008",
+      "language": "en",
+      "gt_text": "who touches me am i in bed",
+      "ref_transcription": "who touches me am i in bed",
+      "recon_transcription": "fashes me an i ya bid",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 2.83
+      },
+      "reconstructed": {
+        "WER": 71.43,
+        "CER": 46.15
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 71.43,
+        "CER": 46.15,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 58,
+      "id": "237-134500-0012",
+      "language": "en",
+      "gt_text": "in a few moments he heard the cherries dropping smartly into the pail and he began to swing his scythe with that long even stroke that few american boys ever learn",
+      "ref_transcription": "in a few moments he heard the cherries dropping smartly into the pail and he began to swing his scythe with that long even stroke that few american boys ever learn",
+      "recon_transcription": "in a few moments heran the cheries falcon's tagger into the vail and he began to swiyn heir side anwith that long even stroke like a new american oisn o e eearth",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 3.21
+      },
+      "reconstructed": {
+        "WER": 54.84,
+        "CER": 28.83
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 54.84,
+        "CER": 28.83,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 59,
+      "id": "121-127105-0013",
+      "language": "en",
+      "gt_text": "you'll easily judge why when you hear because the thing had been such a scare he continued to fix me",
+      "ref_transcription": "you'll easily judge why when you hear because the thing had been such a scare he continued to fix me",
+      "recon_transcription": "of dase yo wul tarton in here tefes iav in such a sinder hecontined anton",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 3.01
+      },
+      "reconstructed": {
+        "WER": 90.0,
+        "CER": 58.0
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 90.0,
+        "CER": 58.0,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 60,
+      "id": "672-122797-0057",
+      "language": "en",
+      "gt_text": "yes in reality those were happy times",
+      "ref_transcription": "yes in reality those were happy times",
+      "recon_transcription": "yes in reality those were happy tis",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 1.62
+      },
+      "reconstructed": {
+        "WER": 14.29,
+        "CER": 5.41
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 14.29,
+        "CER": 5.41,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 61,
+      "id": "1320-122617-0032",
+      "language": "en",
+      "gt_text": "keep silent as long as may be and it would be wise when you do speak to break out suddenly in one of your shoutings which will serve to remind the indians that you are not altogether as responsible as men should be",
+      "ref_transcription": "keep silent as long as may be and it would be wise when you do speak to break out suddenly in one of your shoutings which will serve to remind the indians that you are not altogether as responsible as men should be",
+      "recon_transcription": "ep sillent as long as may be anit would be locky for you bich to pick up the nik up suddenly and then ter shining which will serve her emind te inmians that you are not looking aherous responsible osd mad should be",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 3.06
+      },
+      "reconstructed": {
+        "WER": 60.47,
+        "CER": 30.37
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 60.47,
+        "CER": 30.37,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 62,
+      "id": "2961-960-0015",
+      "language": "en",
+      "gt_text": "the style and plan of the timaeus differ greatly from that of any other of the platonic dialogues",
+      "ref_transcription": "the style and plan of the times differ greatly from that of any other of the platonic dialogues",
+      "recon_transcription": "the style of it nnt off its muse wich fer greatly for the honer of being aother at the devin wiles",
+      "ref": {
+        "WER": 5.56,
+        "CER": 2.06,
+        "UTMOS": 3.21
+      },
+      "reconstructed": {
+        "WER": 88.89,
+        "CER": 50.52
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 83.33,
+        "CER": 48.46,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 63,
+      "id": "61-70968-0006",
+      "language": "en",
+      "gt_text": "but then the picture was gone as quickly as it came",
+      "ref_transcription": "but then the picture was gone as quickly as it came",
+      "recon_transcription": "let's see ta picture mstime as like g as a teap",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 3.96
+      },
+      "reconstructed": {
+        "WER": 81.82,
+        "CER": 52.94
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 81.82,
+        "CER": 52.94,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 64,
+      "id": "908-157963-0001",
+      "language": "en",
+      "gt_text": "o life of this our spring",
+      "ref_transcription": "o life of this our spring",
+      "recon_transcription": "who likes a bit of uarspring",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 3.43
+      },
+      "reconstructed": {
+        "WER": 100.0,
+        "CER": 52.0
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 100.0,
+        "CER": 52.0,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 65,
+      "id": "3729-6852-0001",
+      "language": "en",
+      "gt_text": "without saying it positively she made me understand that being herself an illustrious member of the republic of letters she was well aware that she was speaking to an insect",
+      "ref_transcription": "without saying it positively she made me understand that being herself an illustrious member of the republic of letters she was well aware that she was speaking to an insect",
+      "recon_transcription": "without saying it positively she made me understand that being herself an the les fase number of the rebellion of writers she was i little atter as she was speaking in to inean sanit",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 3.55
+      },
+      "reconstructed": {
+        "WER": 43.33,
+        "CER": 25.43
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 43.33,
+        "CER": 25.43,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 66,
+      "id": "7021-79740-0013",
+      "language": "en",
+      "gt_text": "put these playthings all away quick and carefully and we will not let them know any thing about your leaving them out",
+      "ref_transcription": "put these playthings all away quick and carefully and we will not let them know anything about your leaving them out",
+      "recon_transcription": "but this litin's all we thik an every and we wll not let them mob anything ao shoul livin e o",
+      "ref": {
+        "WER": 9.09,
+        "CER": 0.85,
+        "UTMOS": 3.46
+      },
+      "reconstructed": {
+        "WER": 72.73,
+        "CER": 35.04
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 63.64,
+        "CER": 34.19,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 67,
+      "id": "2094-142345-0030",
+      "language": "en",
+      "gt_text": "totty however had descended from her chair with great swiftness and was already in retreat towards the dairy with a sort of waddling run and an amount of fat on the nape of her neck which made her look like the metamorphosis of a white suckling pig",
+      "ref_transcription": "totty however had descended from her chair with great swiftness and was already in retreat towards the dairy with a sort of waddling run and an amount of fat on the nape of her neck which made her look like the metamorphosis of a white suckling pig",
+      "recon_transcription": "i hower a senti for arciern borsh swoftess and snalred ricury wors cnary with a sort of rumbling run and he oer fe on the meater neck as making her look like a metamorphosis o a riht serping hang",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 3.81
+      },
+      "reconstructed": {
+        "WER": 68.09,
+        "CER": 43.15
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 68.09,
+        "CER": 43.15,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 68,
+      "id": "1995-1826-0007",
+      "language": "en",
+      "gt_text": "find some cresswells there big plantations rated at two hundred and fifty thousand dollars",
+      "ref_transcription": "find some cres wells there big plantations rated at two hundred and fifty thousand dollars",
+      "recon_transcription": "sis an pass wills tea in plantations teer two hundred and fifty thousand dollars",
+      "ref": {
+        "WER": 14.29,
+        "CER": 1.11,
+        "UTMOS": 3.02
+      },
+      "reconstructed": {
+        "WER": 57.14,
+        "CER": 25.56
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 42.85,
+        "CER": 24.45,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 69,
+      "id": "4446-2271-0006",
+      "language": "en",
+      "gt_text": "he's been wanting to marry hilda these three years and more",
+      "ref_transcription": "he's been wanting to marry hilda these three years and more",
+      "recon_transcription": "as a mi  ever do les pehers on more",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 3.22
+      },
+      "reconstructed": {
+        "WER": 90.91,
+        "CER": 59.32
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 90.91,
+        "CER": 59.32,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 70,
+      "id": "5683-32866-0026",
+      "language": "en",
+      "gt_text": "i boldly lighted my cheroot",
+      "ref_transcription": "i boldly lighted my charoot",
+      "recon_transcription": "i m ol goo li in rancer",
+      "ref": {
+        "WER": 20.0,
+        "CER": 3.7,
+        "UTMOS": 2.95
+      },
+      "reconstructed": {
+        "WER": 120.0,
+        "CER": 66.67
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 100.0,
+        "CER": 62.97,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 71,
+      "id": "5105-28241-0004",
+      "language": "en",
+      "gt_text": "although only a moderate breeze was blowing the sea was rough a circumstance to be accounted for only by the diminution in the force of the earth's attraction rendering the liquid particles so buoyant that by the mere effect of oscillation they were carried to a height that was quite unprecedented",
+      "ref_transcription": "although only a moderate breeze was blowing the sea was rough a circumstance to be accounted for only by the diminution in the force of the earth's attraction rendering the liquid particles so buoyant that by the mere effect of oscillation they were carried to a height that was quite unprecedented",
+      "recon_transcription": "although whn te moderd thees as blowing the stang was rough a circumstance of the catafor hungin by illumination in the forst of the earth's tracin rendering tlinthn particles so boyant that duganarifact oscillation thar appeared to heighten the poit of pers enter",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 3.26
+      },
+      "reconstructed": {
+        "WER": 62.75,
+        "CER": 34.23
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 62.75,
+        "CER": 34.23,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 72,
+      "id": "2300-131720-0005",
+      "language": "en",
+      "gt_text": "why if we erect a station at the falls it is a great economy to get it up to the city",
+      "ref_transcription": "why if we erect a station at the falls it is a great economy to get it up togh the city",
+      "recon_transcription": "mar then we erect his nation of the fallws here's a bumingan colony of te derima inistely",
+      "ref": {
+        "WER": 4.76,
+        "CER": 2.35,
+        "UTMOS": 3.61
+      },
+      "reconstructed": {
+        "WER": 80.95,
+        "CER": 56.47
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 76.19,
+        "CER": 54.12,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 73,
+      "id": "6829-68769-0027",
+      "language": "en",
+      "gt_text": "whose name did you sign to the check asked kenneth",
+      "ref_transcription": "whose name did you sign to the chequ asked kenneth",
+      "recon_transcription": "wut wan di she say a hap asd ennoth",
+      "ref": {
+        "WER": 10.0,
+        "CER": 4.0,
+        "UTMOS": 3.57
+      },
+      "reconstructed": {
+        "WER": 100.0,
+        "CER": 56.0
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 90.0,
+        "CER": 52.0,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 74,
+      "id": "5142-33396-0040",
+      "language": "en",
+      "gt_text": "and these shall follow your thralls in the same way",
+      "ref_transcription": "and these shall follow your thralls in the same way",
+      "recon_transcription": "and tach your father your fowls in the same way",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 3.84
+      },
+      "reconstructed": {
+        "WER": 40.0,
+        "CER": 37.25
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 40.0,
+        "CER": 37.25,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 75,
+      "id": "8463-294828-0004",
+      "language": "en",
+      "gt_text": "but now nothing could hold me back",
+      "ref_transcription": "but now nothing could hold me back",
+      "recon_transcription": "and sounds think te hold the tat",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 3.79
+      },
+      "reconstructed": {
+        "WER": 85.71,
+        "CER": 58.82
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 85.71,
+        "CER": 58.82,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 76,
+      "id": "121-127105-0028",
+      "language": "en",
+      "gt_text": "the awkward thing was that they had practically no other relations and that his own affairs took up all his time",
+      "ref_transcription": "the awkward thing was that they had practically no other relations and that his own affairs took up all his time",
+      "recon_transcription": "me lon a thing mus a be a bed they know o relations ha the tit t affairs wo hem ol tis iron",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 3.11
+      },
+      "reconstructed": {
+        "WER": 95.24,
+        "CER": 50.0
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 95.24,
+        "CER": 50.0,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 77,
+      "id": "4077-13754-0014",
+      "language": "en",
+      "gt_text": "the people contested these measures one by one in the courts presenting in case after case the different phases of the subject and urging the unconstitutionality of the measure",
+      "ref_transcription": "the people contested these measures one by one in the courts presenting in case after case the different phases of the subject and urging the unconstitutionality of the measure",
+      "recon_transcription": "the lapal cantesof these vegures among my moten recorts as nomthing  exact case they giv ther pases on the subject and erging  iimporsi pito poli the measure",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 2.67
+      },
+      "reconstructed": {
+        "WER": 72.41,
+        "CER": 40.91
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 72.41,
+        "CER": 40.91,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 78,
+      "id": "1188-133604-0009",
+      "language": "en",
+      "gt_text": "now you will see in these studies that the moment the white is inclosed properly and harmonized with the other hues it becomes somehow more precious and pearly than the white paper and that i am not afraid to leave a whole field of untreated white paper all round it being sure that even the little diamonds in the round window will tell as jewels if they are gradated justly",
+      "ref_transcription": "now you will see in these studies that the moment the white is enclosed properly and harmonized with the other hues it becomes somehow more precious and pearly than the white paper and that i am not afraid to leave a whole field of untreated white paper all round it being sure that even the little diamonds in the round window will tell as jewels if they are gradated justly",
+      "recon_transcription": "i heror see in these studies that that i wan polite his influence pawpaly cand harmaize with the other hes and e have so rowa preshness and partly in the white paper and that i am not afraid to leave a whole field of unse of whet paper all round it make sure that even the little darmens on the round won wi talo is jewels a eer canadian fesiman",
+      "ref": {
+        "WER": 1.43,
+        "CER": 0.27,
+        "UTMOS": 3.48
+      },
+      "reconstructed": {
+        "WER": 51.43,
+        "CER": 30.67
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 50.0,
+        "CER": 30.4,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 79,
+      "id": "2300-131720-0036",
+      "language": "en",
+      "gt_text": "the meter continued in general service during eighteen ninety nine and probably up to the close of the century",
+      "ref_transcription": "the meter continued in general service during eighteen ninety nine and probably up to the close of the century",
+      "recon_transcription": "the ligger continued hin general service dring a mighty mine i follim wight up to the close of the sengery",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 3.47
+      },
+      "reconstructed": {
+        "WER": 52.63,
+        "CER": 30.0
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 52.63,
+        "CER": 30.0,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 80,
+      "id": "8230-279154-0013",
+      "language": "en",
+      "gt_text": "in an image of a well known face for example some parts may feel more familiar than others when this happens we have more belief in the accuracy of the familiar parts than in that of the unfamiliar parts",
+      "ref_transcription": "in an image of a well known face for example some parts may feel more familiar than others when this happens we have more belief in the accuracy of the familiar parts than in that of the unfamiliar parts",
+      "recon_transcription": "here imag of a well known face or for example some parts may feel more familiar than others in the apments we have moraly from the accuracy of the familiar parts and in that of the unfamiliar parts",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 3.29
+      },
+      "reconstructed": {
+        "WER": 28.21,
+        "CER": 14.29
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 28.21,
+        "CER": 14.29,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 81,
+      "id": "3570-5696-0004",
+      "language": "en",
+      "gt_text": "the salient features of this development of domestic service have already been indicated",
+      "ref_transcription": "the salient features of this development of domestic service have already been indicated",
+      "recon_transcription": "the sere features of this development a limas en soundas athl may haveen indicated",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 2.91
+      },
+      "reconstructed": {
+        "WER": 61.54,
+        "CER": 34.09
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 61.54,
+        "CER": 34.09,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 82,
+      "id": "4077-13754-0001",
+      "language": "en",
+      "gt_text": "but a word further concerning the expedition in general",
+      "ref_transcription": "but a word further concerning the expedition in general",
+      "recon_transcription": "and  went further concerning the expedition e carroll",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 2.88
+      },
+      "reconstructed": {
+        "WER": 55.56,
+        "CER": 27.27
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 55.56,
+        "CER": 27.27,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 83,
+      "id": "1284-134647-0001",
+      "language": "en",
+      "gt_text": "the edict of milan the great charter of toleration had confirmed to each individual of the roman world the privilege of choosing and professing his own religion",
+      "ref_transcription": "the edict of milan the great charter of toleration had confirmed to each individual of the roman world the privilege of choosing and professing his own religion",
+      "recon_transcription": "enich of man the great carr of toleration and confirmed tegic individual of the monly world a eelegof chimsay and professing his own religion",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 3.57
+      },
+      "reconstructed": {
+        "WER": 44.44,
+        "CER": 23.12
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 44.44,
+        "CER": 23.12,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 84,
+      "id": "2830-3980-0010",
+      "language": "en",
+      "gt_text": "either he calls ministers through the agency of men or he calls them directly as he called the prophets and apostles",
+      "ref_transcription": "either he calls ministers through the agency of men or he calls them directly as he called the prophets and apostles",
+      "recon_transcription": "hen e calls ministers to the ating sas men wer i cals enserap icanpolitan prophets in the process",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 3.54
+      },
+      "reconstructed": {
+        "WER": 76.19,
+        "CER": 48.28
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 76.19,
+        "CER": 48.28,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 85,
+      "id": "2961-960-0008",
+      "language": "en",
+      "gt_text": "we do not know how plato would have arranged his own dialogues or whether the thought of arranging any of them besides the two trilogies which he has expressly connected was ever present to his mind",
+      "ref_transcription": "we do not know how plato would have arranged his own dialogues or whether the thought of arranging any of them besides the two trilogies which he has expressly connected was ever present to his mind",
+      "recon_transcription": "theese yo hot know how the plate ol wen heve aranged his way the ilands remember that the fark augt ou angea ad who besides tiftin he nos at such times strits in e nae id better clas lestons behind",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 2.9
+      },
+      "reconstructed": {
+        "WER": 97.22,
+        "CER": 58.59
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 97.22,
+        "CER": 58.59,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 86,
+      "id": "7127-75947-0003",
+      "language": "en",
+      "gt_text": "yes the character which your royal highness assumed is in perfect harmony with your own",
+      "ref_transcription": "yes the character which your royal highness assumed is in perfect harmony with your own",
+      "recon_transcription": "yes the character which donvaa highnes is te lis in perfect harmony with her own",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 2.64
+      },
+      "reconstructed": {
+        "WER": 40.0,
+        "CER": 20.69
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 40.0,
+        "CER": 20.69,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 87,
+      "id": "4446-2273-0036",
+      "language": "en",
+      "gt_text": "alexander unclenched the two hands at his sides",
+      "ref_transcription": "alexander clenched the two hands at his sides",
+      "recon_transcription": "doningar clutched the two hands ates sides",
+      "ref": {
+        "WER": 12.5,
+        "CER": 4.26,
+        "UTMOS": 3.33
+      },
+      "reconstructed": {
+        "WER": 50.0,
+        "CER": 29.79
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 37.5,
+        "CER": 25.53,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 88,
+      "id": "908-157963-0011",
+      "language": "en",
+      "gt_text": "which thou dost scatter on every little blade of grass that springs revives the milked cow and tames the fire breathing steed",
+      "ref_transcription": "which thou dost scatter on every little blade of grass that springs revives the milked cow and tames the fire breathing steed",
+      "recon_transcription": "which thou dost scelter on every little lea of bracksat strings revive the nok calalhoon in its eaves the fier bathing steed",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 3.44
+      },
+      "reconstructed": {
+        "WER": 59.09,
+        "CER": 29.6
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 59.09,
+        "CER": 29.6,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 89,
+      "id": "908-31957-0023",
+      "language": "en",
+      "gt_text": "i love thee freely as men strive for right i love thee purely as they turn from praise",
+      "ref_transcription": "i love thee freely as men strive for right i love thee purely as they turn from praise",
+      "recon_transcription": "i love ye freely as men strive for night i love thee pumorly as they turn for praze",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 3.11
+      },
+      "reconstructed": {
+        "WER": 27.78,
+        "CER": 12.79
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 27.78,
+        "CER": 12.79,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 90,
+      "id": "7729-102255-0040",
+      "language": "en",
+      "gt_text": "in this incident contrasting the creative and the destructive spirit of the factions the emigrant aid society of massachusetts finds its most honorable and triumphant vindication",
+      "ref_transcription": "in this incident contrasting the creative and destructive spirit of the factions the emigrant aid society of massachusetts finds its most honorable and triumphant vindication",
+      "recon_transcription": "bless me sir fonfarstin had created nearly the therpic spirit of the factions a innoge mean society in massachusits a againsmith's lotrable and triumphant litivagent",
+      "ref": {
+        "WER": 3.85,
+        "CER": 2.25,
+        "UTMOS": 3.44
+      },
+      "reconstructed": {
+        "WER": 69.23,
+        "CER": 44.94
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 65.38,
+        "CER": 42.69,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 91,
+      "id": "8455-210777-0062",
+      "language": "en",
+      "gt_text": "when do you intend that the john bright shall start",
+      "ref_transcription": "when do you intend that the john bright shall start",
+      "recon_transcription": "when you consaden the cabike shall start",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 3.56
+      },
+      "reconstructed": {
+        "WER": 50.0,
+        "CER": 43.14
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 50.0,
+        "CER": 43.14,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 92,
+      "id": "61-70968-0004",
+      "language": "en",
+      "gt_text": "also there was a stripling page who turned into a maid",
+      "ref_transcription": "also there was a stripling page who turned into a maid",
+      "recon_transcription": "also you sister king page returned that mummaid",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 3.63
+      },
+      "reconstructed": {
+        "WER": 81.82,
+        "CER": 46.3
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 81.82,
+        "CER": 46.3,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 93,
+      "id": "1089-134686-0003",
+      "language": "en",
+      "gt_text": "hello bertie any good in your mind",
+      "ref_transcription": "hello bertie any good in your mind",
+      "recon_transcription": "a netona e lude o mai",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 3.57
+      },
+      "reconstructed": {
+        "WER": 100.0,
+        "CER": 70.59
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 100.0,
+        "CER": 70.59,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 94,
+      "id": "6829-68769-0031",
+      "language": "en",
+      "gt_text": "as regards my robbing the company i'll say that i saved them a heavy loss one day",
+      "ref_transcription": "as regards my robbing the company i'll say that i saved him a heavy loss one day",
+      "recon_transcription": "thos yer words in bloding te talcony o'l sa tha i sa i ma heavy lass on nagt",
+      "ref": {
+        "WER": 5.88,
+        "CER": 2.47,
+        "UTMOS": 2.79
+      },
+      "reconstructed": {
+        "WER": 94.12,
+        "CER": 44.44
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 88.24,
+        "CER": 41.97,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 95,
+      "id": "2300-131720-0023",
+      "language": "en",
+      "gt_text": "i think he was perhaps more appreciative than i was of the discipline of the edison construction department and thought it would be well for us to wait until the morning of the fourth before we started up",
+      "ref_transcription": "i think he was perhaps more appreciative that i was of the discipline of the edison construction department and thought it would be well for us to wait until the morning of the fourth before we started up",
+      "recon_transcription": "that's the kingst nimes more cretion in it that i was on the discipline of the medison prisoner kinleburn ad thought it ould be willl for us to wait until themorning before if we' miseder nough",
+      "ref": {
+        "WER": 2.63,
+        "CER": 0.49,
+        "UTMOS": 3.32
+      },
+      "reconstructed": {
+        "WER": 65.79,
+        "CER": 39.22
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 63.16,
+        "CER": 38.73,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 96,
+      "id": "4507-16021-0004",
+      "language": "en",
+      "gt_text": "what is slang",
+      "ref_transcription": "what is slang",
+      "recon_transcription": "itbe i slang",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 3.07
+      },
+      "reconstructed": {
+        "WER": 66.67,
+        "CER": 38.46
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 66.67,
+        "CER": 38.46,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 97,
+      "id": "121-121726-0009",
+      "language": "en",
+      "gt_text": "hotel a place where a guest often gives up good dollars for poor quarters",
+      "ref_transcription": "hotel a place where a guest often gives up good dollars for poor quarters",
+      "recon_transcription": "he ganplace i guess often fix up ami dolors an all quarters",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 3.02
+      },
+      "reconstructed": {
+        "WER": 78.57,
+        "CER": 41.1
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 78.57,
+        "CER": 41.1,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 98,
+      "id": "8463-294828-0030",
+      "language": "en",
+      "gt_text": "i asked for commander farragut",
+      "ref_transcription": "i asked for commander farragut",
+      "recon_transcription": "a hasper comander therabi",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 3.03
+      },
+      "reconstructed": {
+        "WER": 100.0,
+        "CER": 46.67
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 100.0,
+        "CER": 46.67,
+        "UTMOS": null
+      }
+    },
+    {
+      "index": 99,
+      "id": "1089-134686-0001",
+      "language": "en",
+      "gt_text": "stuff it into you his belly counselled him",
+      "ref_transcription": "stuff it into you his belly counselled him",
+      "recon_transcription": "stifigan to you miss manli patolton",
+      "ref": {
+        "WER": 0.0,
+        "CER": 0.0,
+        "UTMOS": 3.26
+      },
+      "reconstructed": {
+        "WER": 87.5,
+        "CER": 61.9
+      },
+      "consistency": {
+        "WER": null,
+        "CER": null
+      },
+      "delta": {
+        "WER": 87.5,
+        "CER": 61.9,
+        "UTMOS": null
+      }
+    }
+  ],
+  "aggregates": {
+    "all": {
+      "ref": {
+        "WER": 2.17,
+        "CER": 0.62,
+        "UTMOS": null
+      },
+      "reconstructed": {
+        "WER": 67.3,
+        "CER": 39.2,
+        "UTMOS": null
+      },
+      "delta": {
+        "WER": 65.13,
+        "CER": 38.58,
+        "UTMOS": null
+      }
+    }
+  }
+}

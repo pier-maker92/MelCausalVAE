@@ -15,9 +15,118 @@ class BPEOutput:
     durations: torch.LongTensor
     semantic_embeddings: Optional[torch.FloatTensor] = None
 
+import torch
+import torch.nn as nn
+import torchaudio.transforms as T
+from torchaudio_filters import LowPass, Pad, BandPass
+import random
+
+
+class AudioAugmenter(nn.Module):
+    def __init__(
+        self,
+        p_gain=.7,
+        p_gaussian=.7,
+        p_colored=.6,
+        p_clipping=.8,
+        p_dropout=1.0,
+        p_lowpass=.4,
+        p_bandpass=.4
+    ):
+        super().__init__()
+
+        self.p_gain = p_gain
+        self.p_gaussian = p_gaussian
+        self.p_colored = p_colored
+        self.p_clipping = p_clipping
+        self.p_dropout = p_dropout
+        self.p_lowpass = p_lowpass
+        self.p_bandpass = p_bandpass
+
+    # -------------------------
+    # augmentations
+    # -------------------------
+    def add_gaussian_noise(self, audio, std):
+        noise = torch.randn_like(audio) * std
+        return audio + noise
+
+    def add_colored_noise(self, audio, std, alpha):
+        noise = torch.randn_like(audio)
+
+        freqs = torch.fft.rfftfreq(audio.shape[-1], d=1.0).to(audio.device)
+        freqs[0] = 1e-6
+
+        spectrum = torch.fft.rfft(noise)
+        spectrum = spectrum / (freqs ** (alpha / 2))
+
+        colored = torch.fft.irfft(spectrum, n=audio.shape[-1])
+        return audio + std * colored
+
+    def random_gain(self, audio):
+        gain = random.uniform(0.7, 1.3)
+        return audio * gain
+
+    def random_clipping(self, audio):
+        threshold = random.uniform(0.3, 0.9)
+        audio = torch.clamp(audio, -threshold, threshold) / threshold
+        return audio
+
+    def time_dropout(self, audio):
+        T_len = audio.shape[-1]
+        width = int(T_len * random.uniform(0.005, 0.02))
+
+        if width > 0:
+            start = random.randint(0, max(0, T_len - width))
+            audio[..., start:start + width] = 0
+
+        return audio
+
+    def lowpass(self, audio, sr):
+        cutoff = random.uniform(3000, 8000)
+        return LowPass(cutoff, sr)(audio)
+
+    def bandpass(self, audio, sr):
+        low = random.uniform(100,400)
+        high = random.uniform(7000,12000)
+        bp = BandPass(low, high, sr)
+        return bp(audio)
+
+    # -------------------------
+    # forward
+    # -------------------------
+    def forward(self, audio: torch.Tensor, sr: int):
+        """
+        audio: (B, T) or (1, T)
+        """
+
+        if random.random() < self.p_gain:
+            audio = self.random_gain(audio)
+
+        if random.random() < self.p_gaussian:
+            std = random.uniform(0.001, 0.002)
+            audio = self.add_gaussian_noise(audio, std)
+
+        if random.random() < self.p_colored:
+            alpha = random.uniform(0.001, 0.002)
+            std = random.uniform(0.0001, 0.0005)
+            audio = self.add_colored_noise(audio, std=std, alpha=alpha)
+
+        if random.random() < self.p_clipping:
+            audio = self.random_clipping(audio)
+
+        if random.random() < .5:
+            if random.random() < self.p_bandpass:
+                audio = self.bandpass(audio, sr)
+        else:
+            if random.random() < self.p_lowpass:
+                audio = self.lowpass(audio, sr)
+
+        return audio
+
 
 class SimpleAudioDataset(Dataset):
     def __init__(self):
+        self.augmenter = AudioAugmenter()
         pass
 
     def _process_audio(self, audio: torch.Tensor, sr: int, target_sr: int):
@@ -40,11 +149,18 @@ class SimpleAudioDataset(Dataset):
     def __len__(self):
         return len(self.train_dataset)
 
-    def _process_audio_output(self, data_dict, audio_data, target_sr=24000):
+    def _process_audio_output(self, data_dict, audio_data):
         audio_output, sr_output = self._process_audio_component(
+<<<<<<< HEAD
+            audio_data,
+            target_sr=24000,  # FIXME: hardcoded
+=======
             audio_data, target_sr=target_sr, max_duration=None  # FIXME hardcoded duration
+>>>>>>> origin/main
         )
         data_dict.update({"audio_output": [audio_output], "audio_output_sr": [sr_output]})
+        corrupted = self.augmenter(audio_output, sr_output)
+        data_dict.update({"corrupted_audio": [corrupted], "corrupted_audio_sr": [sr_output]})
 
 
 @dataclass
@@ -62,10 +178,15 @@ class DataCollator(object):
         batch_transcription = [None] * len(instances)
         batch_language = [None] * len(instances)
         batch_ids = [None] * len(instances)
+<<<<<<< HEAD
+        batch_corrupted_audios_srs = [None] * len(instances)
+        batch_phoneme_alignments = [None] * len(instances)
+=======
         batch_tokenized_units = [None] * len(instances)
         batch_tokenized_units_durations = [None] * len(instances)
         batch_transcriptions = [None] * len(instances)
         batch_phonemes = [None] * len(instances)
+>>>>>>> origin/main
         for i, instance in enumerate(instances):
             if "audio_input" in instance:
                 batch_input_audios_srs[i] = (
@@ -82,6 +203,13 @@ class DataCollator(object):
                     instance["audio_condition"][0],
                     instance["audio_condition_sr"][0],
                 )
+            if "corrupted_audio" in instance:
+                batch_corrupted_audios_srs[i] = (
+                    instance["corrupted_audio"][0],
+                    instance["corrupted_audio_sr"][0],
+                )
+            if "phoneme_alignments" in instance:
+                batch_phoneme_alignments[i] = instance["phoneme_alignments"]
             if "transcription_ids" in instance:
                 batch_transcription_ids[i] = instance["transcription_ids"]
             if "aligned_transcription_ids" in instance:
@@ -92,6 +220,8 @@ class DataCollator(object):
                 batch_language[i] = instance["language"]
             if "ids" in instance:
                 batch_ids[i] = instance["ids"]
+<<<<<<< HEAD
+=======
             if "tokenized_units" in instance:
                 batch_tokenized_units[i] = torch.LongTensor(instance["tokenized_units"])
             if "tokenized_units_durations" in instance:
@@ -100,6 +230,7 @@ class DataCollator(object):
                 batch_transcriptions[i] = instance["transcription"]
             if "phonemes" in instance:
                 batch_phonemes[i] = instance["phonemes"]
+>>>>>>> origin/main
 
         # if not all none add to the batch
         def all_none(batch):
@@ -121,6 +252,12 @@ class DataCollator(object):
             batch["language"] = batch_language
         if not all_none(batch_ids):
             batch["ids"] = batch_ids
+<<<<<<< HEAD
+        if not all_none(batch_corrupted_audios_srs):
+            batch["corrupted_audios_srs"] = batch_corrupted_audios_srs
+        if not all_none(batch_phoneme_alignments):
+            batch["phoneme_alignments"] = batch_phoneme_alignments
+=======
         if not all_none(batch_tokenized_units) and not all_none(batch_tokenized_units_durations):
             # pad the tokenized units to the same length using rnn padding
             tokenized_units = torch.nn.utils.rnn.pad_sequence(
@@ -138,6 +275,7 @@ class DataCollator(object):
             batch["transcriptions"] = batch_transcriptions
         if not all_none(batch_phonemes):
             batch["phonemes"] = batch_phonemes
+>>>>>>> origin/main
         return batch
 
 
@@ -157,6 +295,11 @@ class TrainDatasetWrapper(SimpleAudioDataset):
     def __getitem__(self, idx):
         data_dict = {}
         data = self.dataset[idx]
+<<<<<<< HEAD
+        self._process_audio_output(data_dict, data["audio"])
+        data_dict["ids"] = data.get("id")
+        data_dict["phoneme_alignments"] = data.get("phonemes", None)
+=======
         self._process_audio_output(data_dict, data["audio"], target_sr=24000)
         data_dict["ids"] = data.get("id")
         data_dict["language"] = data.get("language", "en-us")
@@ -189,6 +332,7 @@ class HubertDatasetWrapper(SimpleAudioDataset):
         data = self.dataset[idx]
         data_dict["audio_codes"] = data.get("audio_codes", None)
         data_dict["audio_codes"] = self.tokenizer.encode_batch([data_dict["audio_codes"]])
+>>>>>>> origin/main
         return data_dict
 
 
@@ -205,8 +349,17 @@ class TestDatasetWrapper(SimpleAudioDataset):
         data_dict = {}
         data = self.dataset[idx]
         self._process_audio_output(data_dict, data["audio"])
-        self._process_transcription(data_dict, data.get("text_normalized", "transcript"))
+
+        # Robust transcription field lookup
+        transcription = (
+            data.get("text_normalized")
+            or data.get("transcript")
+            or "transcript"
+        )
+        self._process_transcription(data_dict, transcription)
+
         data_dict["language"] = data.get("language", "en")
+        data_dict["ids"] = data.get("id")
         return data_dict
 
     def _process_transcription(self, data_dict, transcription):

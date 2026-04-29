@@ -1,0 +1,16 @@
+[
+  {
+    "checkpoint": "/home/ec2-user/MelCausalVAE/checkpoints/MelCausalVAE/libritts-ft-logvar-downsample8X/checkpoint-10000/model.safetensors",
+    "gpu_index": 0,
+    "hyperparams": {
+      "n_steps": 12,
+      "temperature": 0.8,
+      "guidance_scale": 2.3
+    },
+    "status": "success",
+    "duration": 42.492589712142944,
+    "metrics_path": "/home/ec2-user/MelCausalVAE/evaluation/libriTTS_eval/checkpoint-10000/gpu0_n12_t0.8_g2.3/metrics.json",
+    "work_dir": "/home/ec2-user/MelCausalVAE/evaluation/libriTTS_eval/checkpoint-10000/gpu0_n12_t0.8_g2.3",
+    "error": null
+  }
+]

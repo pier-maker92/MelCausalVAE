@@ -1,0 +1,52 @@
+# Global VAE parameters that override configs/main.yaml defaults
+compress_factor: 4
+
+# Training configuration
+training:
+  num_train_epochs: 1
+  dataset_name: librispeech_aligned
+  output_dir: checkpoints/qformer-NAR-AE-phoneme-fusion-post-bottleneck-residual
+  learning_rate: 1e-4
+  min_learning_rate: 5e-5
+  per_device_train_batch_size: 12
+  per_device_eval_batch_size: 4
+  report_to: wandb
+  wandb_project: CaDiT-VAE-exps
+  wandb_run_name: qformer-NAR-AE-phoneme-fusion-post-bottleneck-residual
+  fp16: false
+  bf16: true
+  save_steps: 1000
+  eval_steps: 500
+  save_total_limit: 1
+  gradient_accumulation_steps: 1
+  dataloader_num_workers: 4
+  # from_pretrained: /home/ec2-user/MelCausalVAE/checkpoints/...
+  # resume_from_checkpoint: /home/ec2-user/MelCausalVAE/checkpoints/...
+
+# Encoder configuration (replaces convformer)
+encoder:
+  d_model: 1024
+  tf_heads: 8
+  tf_layers: 4
+  n_residual_blocks: 3
+  logvar_layer: false
+  target_std: 0.3
+  kl_loss_warmup_steps: 1000
+  kl_loss_weight: 5e-4
+  
+  # NOTE: legacy parameters like use_aligner, residual, use_1d_encoder, use_sofplus have been removed 
+  # as they are no longer supported by EncoderConfig in configs.py.
+
+# Decoder configuration (replaces cfm)
+decoder:
+  dit_dim: 768       # (was unet_dim)
+  dit_depth: 6       # (was unet_depth)
+  dit_heads: 12      # (was unet_heads)
+  dit_dropout_rate: 0.1 # (was unet_dropout_rate)
+  use_conv_layer: true
+  uncond_prob: 0.15
+  is_causal: false
+  use_window_attention: true
+  window_attention_seconds: 3.0
+  
+  # NOTE: legacy parameters like learned_prior and audio_latent_dim have been removed.

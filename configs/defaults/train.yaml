@@ -1,3 +1,4 @@
+# @package _global_
 training:
   output_dir: outputs/ConvformerMelVae
   num_train_epochs: 10
@@ -11,8 +12,6 @@ training:
   eval_strategy: "steps"
   logging_steps: 1
   seed: 42
-  fp16: false
-  bf16: false
   dataloader_num_workers: 4
   dataloader_pin_memory: false
   dataloader_drop_last: true
@@ -20,11 +19,14 @@ training:
   wandb_project: convformer-mel-vae-warmup
   wandb_run_name: null
   lr_scheduler_type: "cosine"
+<<<<<<< HEAD
+  min_learning_rate: 0.0
+=======
+>>>>>>> origin/main
   bf16: true
   fp16: false
   resume_from_checkpoint: null
-  per_device_eval_batch_size: 4
-  gradient_accumulation_steps: 1
+  per_device_eval_batch_size: 1
   from_pretrained: null
   dataset_name: null
   min_learning_rate: 1e-6

@@ -1,0 +1,13 @@
+# @package _global_
+decoder:
+  dit_dim: 512
+  dit_depth: 6
+  dit_heads: 8
+  dit_dropout_rate: 0.0
+  use_conv_layer: false
+  sigma: 1.0e-5
+  uncond_prob: 0.0
+  is_causal: false
+  use_window_attention: false
+  window_attention_seconds: 3.0
+  use_group_bidirectional: false

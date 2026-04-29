@@ -1,0 +1,16 @@
+defaults:
+  - defaults/train
+  - defaults/encoder
+  - defaults/decoder
+  - settings: null
+  - _self_
+
+# --- Global VAE Parameters ---
+mel_dim: 100
+latent_dim: 64
+sample_rate: 24000
+compress_factor: 8
+use_bigvgan_mel: false
+
+# The _self_ target ensures that any keys added directly in this file
+# will override the defaults loaded above.

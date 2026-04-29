@@ -1,0 +1,68 @@
+# Single-file config for Mel VAE VQ inference (no merging with defaults/).
+# Derived from configs/settings/exps/vq.yaml with defaults/convformer.yaml and defaults/cfm.yaml filled in.
+
+use_classic_decoder: false
+
+convformer:
+  compress_factor_C: 4
+  tf_heads: 8
+  tf_layers: 4
+  drop_p: 0.1
+  latent_dim: 64
+  n_residual_blocks: 3
+  logvar_layer: false
+  use_sofplus: false
+  kl_loss_weight: 5.0e-4
+  target_std: 0.3
+  kl_loss_warmup_steps: 1000
+  semantic_regulation: true
+  use_bigvgan_mel: false
+  use_1d_encoder: true
+  use_aligner: false
+  residual: false
+  use_vq: true
+  vq_num_embeddings: 128
+  vq_commit_weight: 0.25
+  vq_reset_dead_codes: true
+  vq_reset_max_per_step: null
+  vq_reset_every_forward: 100
+  vq_residual_dropout: 0.2
+  vq_use_ema_codebook: false
+  vq_ema_decay: 0.99
+  vq_ema_epsilon: 1.0e-5
+  vq_quant_dim: 32
+  vq_kl_zero_chunks: 16
+  vq_kl_tail_weight_start: 1.0e-6
+  vq_kl_tail_weight_end: 1.0e-4
+  d_model: 1024
+  use_similarity: false
+  similarity_threshold: 0.9
+  similarity_threshold_in_01: false
+  freeze_encoder_before_latent_heads: false
+  latent_chunk_ablate_dropout: true
+  latent_chunk_ablate_kl: true
+  latent_chunk_size: 2
+  latent_chunk_dropout_start: 0.0
+  latent_chunk_dropout_end: 0.4
+  latent_chunk_dropout_hierarchical: false
+  latent_chunk_kl_weight_start: 1.0e-10
+  latent_chunk_kl_weight_end: 1.0e-2
+
+cfm:
+  audio_latent_dim: 64
+  unet_dim: 768
+  unet_depth: 6
+  unet_heads: 12
+  unet_dropout_rate: 0.1
+  use_conv_layer: true
+  use_sos_token: false
+  sigma: 1.0e-5
+  expansion_factor: 4
+  mel_channels: 100
+  uncond_prob: 0.15
+  learned_prior: false
+  use_vp_schedule: false
+  is_causal: false
+  use_window_attention: true
+  window_attention_seconds: 3.0
+  use_group_bidirectional: false

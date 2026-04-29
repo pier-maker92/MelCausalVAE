@@ -9,16 +9,21 @@ from tqdm import tqdm
 from collections import defaultdict
 from torch.utils.data import DataLoader
 from datasets import load_dataset, concatenate_datasets
-from modules.melspecEncoder import MelSpectrogramEncoder, MelSpectrogramConfig
+from modules.feature_extractor import FeatureExtractor, MelSpectrogramConfig
 from data.audio_dataset import SimpleAudioDataset, DataCollator, TrainDatasetWrapper
 
+<<<<<<< HEAD
+# Specify custom cache directory
+parquet_dir = "/home/ec2-user/data"
+=======
 # set the HF_HOME environment variable
 # os.environ["HF_HOME"] = "/Volumes/Crucial X6/HF_HOME"
 cache_dir = "/Users/pierfrancescomelucci/Research/Playground/data_cache"
 
 
+>>>>>>> origin/main
 # import mel spec encoder
-mel_spec_encoder = MelSpectrogramEncoder(config=MelSpectrogramConfig())
+mel_spec_encoder = FeatureExtractor(config=MelSpectrogramConfig())
 
 
 def simple_collate_fn(batch):
@@ -29,22 +34,18 @@ class LibriTTS(SimpleAudioDataset):
     def __init__(self):
         super().__init__()
         # Load the two datasets
-        datasets = []
-        for subset in ["clean", "other"]:
-            ds = load_dataset(
-                "parler-tts/libritts_r_filtered",
-                subset,
-                cache_dir=cache_dir,
-                num_proc=min(
-                    os.cpu_count(),
-                    16,
-                ),
-            )
-            datasets.append(ds)
+        dataset = load_dataset(
+            "parquet",
+            data_dir=f"{parquet_dir}/libritts",
+        )
         partitions_per_destination = defaultdict(list)
-        for dataset in datasets:
-            for partition in dataset:
-                partitions_per_destination[self._partition_to_destination(partition)].append(dataset[partition])
+        for partition in dataset:
+            print(
+                f"partition: {partition}, destination: {self._partition_to_destination(partition)}"
+            )
+            partitions_per_destination[
+                self._partition_to_destination(partition)
+            ].append(dataset[partition])
 
         for destination in partitions_per_destination:
             setattr(
@@ -54,9 +55,9 @@ class LibriTTS(SimpleAudioDataset):
             )
 
     def _partition_to_destination(self, partition_name):
-        if "train" in partition_name:
+        if partition_name in ["train", "validation"]:
             return "train"
-        elif "dev" in partition_name or "test" in partition_name:
+        elif partition_name in ["test"]:
             return "test"
 
 
@@ -68,7 +69,11 @@ class LibriTTS(SimpleAudioDataset):
 # if __name__ == "__main__":
 #     # data collator
 #     data_collator = DataCollator()
+<<<<<<< HEAD
+#     dataset = DatasetWrapper(LibriTTS(), "train")
+=======
 #     dataset = TrainDatasetWrapper(LibriTTS(), "train")
+>>>>>>> origin/main
 #     dataloader = DataLoader(
 #         dataset,
 #         batch_size=args.batch_size,

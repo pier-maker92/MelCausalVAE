@@ -1,0 +1,46 @@
+# Only specify values that override defaults in configs/defaults/*.yaml
+training:
+  dataset_name: librispeech_aligned
+  output_dir: checkpoints/MelCausalVAE/downsample8X-resume-window-attention-bidirectional
+  num_train_epochs: 10
+  learning_rate: 1e-4
+  per_device_train_batch_size: 6
+  per_device_eval_batch_size: 1
+  report_to: wandb
+  wandb_project: CaDiT-VAE
+  wandb_run_name: downsample8X-resume-window-attention-bidirectional
+  fp16: false
+  bf16: true
+  save_steps: 1000
+  eval_steps: 500
+  save_total_limit: 1
+  gradient_accumulation_steps: 1
+  dataloader_num_workers: 4
+  from_pretrained: /home/ec2-user/MelCausalVAE/checkpoints/MelCausalVAE/restored-downsample8X/checkpoint-16000/model.safetensors
+  #resume_from_checkpoint: /home/ec2-user/MelCausalVAE/checkpoints/MelCausalVAE/restored-downsample8X/checkpoint-16000
+convformer:
+  compress_factor_C: 8
+  tf_heads: 8
+  tf_layers: 4
+  latent_dim: 64
+  n_residual_blocks: 3
+  logvar_layer: false
+  use_sofplus: false
+  target_std: 0.3
+  kl_loss_warmup_steps: 10
+  kl_loss_weight: 5e-4
+  use_bigvgan_mel: false
+
+cfm:
+  unet_dim: 1024
+  unet_depth: 8
+  unet_heads: 16
+  unet_dropout_rate: 0.1
+  use_conv_layer: true
+  audio_latent_dim: 64
+  uncond_prob: 0.15
+  learned_prior: false
+  is_causal: true
+  use_window_attention: true
+  window_attention_seconds: 3.0
+  use_group_bidirectional: true
