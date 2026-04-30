@@ -17,10 +17,6 @@ class DropoutRegularizer(nn.Module):
         self.dropout_end = config.dropout_end
         self.chunk_size = config.chunk_size
         self.dropout_hierarchical = config.dropout_hierarchical
-        self.training = True
-
-    def set_training(self, training: bool) -> None:
-        self.training = training
 
     def _latent_chunk_dropout_probs_per_chunk(
         self, num_chunks: int, device: torch.device, dtype: torch.dtype
@@ -51,6 +47,7 @@ class DropoutRegularizer(nn.Module):
         probability ``p_i`` linear in chunk index (``dropout_start`` .. ``dropout_end``).
         """
         if not self.training:
+            print("DropoutRegularizer: not training")
             return z
         B, T, D = z.shape
         _assert_latent_chunks_divisible(D, self.chunk_size)
@@ -113,10 +110,6 @@ class KLChunkRegularizer(nn.Module):
         self.kl_end = config.kl_weight_end
         self.chunk_size = config.chunk_size
         self.vq_quant_dim = vq_quant_dim
-        self.training = True
-
-    def set_training(self, training: bool) -> None:
-        self.training = training
 
     def latent_chunk_kl_weights(
         self,

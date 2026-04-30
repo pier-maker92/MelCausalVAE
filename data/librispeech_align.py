@@ -14,7 +14,7 @@ from data.audio_dataset import SimpleAudioDataset, DataCollator, TrainDatasetWra
 from modules.feature_extractor import FeatureExtractor, MelSpectrogramConfig
 
 # Specify custom cache directory
-parquet_dir = "/workspace/data"
+parquet_dir = "dataset/librispeech-aligned"
 # import mel spec encoder
 mel_spec_encoder = FeatureExtractor(config=MelSpectrogramConfig())
 
@@ -27,9 +27,13 @@ class LibriSpeechAlignDataset(SimpleAudioDataset):
     def __init__(self, languages: Optional[List[str]] = None):
         super().__init__()
         # Load the two datasets
+        # dataset = load_dataset(
+        #     "parquet",
+        #     data_dir=f"{parquet_dir}/librispeech-aligned",
+        # )
         dataset = load_dataset(
             "parquet",
-            data_dir=f"{parquet_dir}/librispeech-aligned",
+            data_files={"train": f"{parquet_dir}/train_clean_100/*.parquet"},
         )
         partitions_per_destination = defaultdict(list)
         for partition in dataset:

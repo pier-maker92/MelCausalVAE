@@ -119,7 +119,9 @@ class Encoder(SigmaVAEEncoder):
         padding_mask: Optional[torch.BoolTensor] = None,
         **kwargs,
     ):
-        drop_res_and_tail = random.random() < self.residual_and_tail_dropout_p
+        drop_res_and_tail = (
+            random.random() < self.residual_and_tail_dropout_p and self.training
+        )
         # x: [B, T, 100]
         x = x.transpose(1, 2)  # [B, 100, T]
         x = self.in_proj(x)  # [B, d_model//2, T]
@@ -162,8 +164,9 @@ class Encoder(SigmaVAEEncoder):
 
             mu_stoch = torch.cat([vq_out.residual, mu_tail], dim=-1)
 
+            vq_quantized_ste = mu_head + (vq_out.quantized - mu_head).detach()
             z_quantized = torch.cat(
-                [vq_out.quantized.detach(), torch.zeros_like(mu_tail)], dim=-1
+                [vq_quantized_ste, torch.zeros_like(mu_tail)], dim=-1
             )
 
         z_stoch = self.reparameterize(mu_stoch, logvar)
@@ -192,7 +195,15 @@ class Encoder(SigmaVAEEncoder):
         }
 
         if hasattr(self, "vq"):
-            out["vq_output"] = vq_out
+            out["vq_stats"] = vq_out.stats
+            out["vq_loss"] = vq_out.loss
+            out["quantized"] = z_quantized
+            out["residual"] = torch.cat(
+                [vq_out.residual, torch.zeros_like(mu_tail)], dim=-1
+            )
+            out["tail"] = torch.cat(
+                [torch.zeros_like(vq_out.residual), mu_tail], dim=-1
+            )
 
         return EncoderOutput(**out)
 

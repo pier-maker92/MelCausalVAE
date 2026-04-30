@@ -1,16 +1,12 @@
-import os
-import sys
-
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import torch
-import safetensors
+import safetensors.torch
 from typing import Optional
 from .decoder.cfm import DiT
 from .configs import VAEConfig
 from .encoder.encoder import Encoder
-from .output_dataclasses import VAEOutput
 from .utils import count_parameters_by_module
 from .feature_extractor import FeatureExtractor
+from .output_dataclasses import VAEOutput, DecoderOutput, FeatureExtractorOutput
 
 
 class VAE(torch.nn.Module):
@@ -47,13 +43,17 @@ class VAE(torch.nn.Module):
         return encoder_output
 
     def forward(self, audios_srs, **kwargs):
+        # extract features
         features, padding_mask = self.extract_features(audios_srs, **kwargs)
+        # encode to latent space
         encoder_output = self.encode(features, padding_mask, **kwargs)
+        # decode from latent space
         audio_loss = self.decoder(
             target=features,
             target_padding_mask=padding_mask,
             context_vector=encoder_output.z,
         ).loss
+
         mu_mean = encoder_output.mu[~encoder_output.padding_mask].mean()
         mu_var = encoder_output.mu[~encoder_output.padding_mask].var()
         out = {
@@ -62,9 +62,9 @@ class VAE(torch.nn.Module):
             "mu_mean": mu_mean,
             "mu_var": mu_var,
         }
-        vq_output = getattr(encoder_output, "vq_output", None)
-        if vq_output is not None:
-            out.update({"vq_loss": vq_output.loss, "vq_stats": vq_output.stats})
+        vq_stats = getattr(encoder_output, "vq_stats", None)
+        if vq_stats is not None:
+            out.update({"vq_loss": encoder_output.vq_loss, "vq_stats": vq_stats})
 
         return VAEOutput(**out)
 
@@ -119,18 +119,24 @@ class VAE(torch.nn.Module):
     ):
         """
         Encode audio to latent space and generate mel spectrogram.
-        If transcriptions are provided, CTC boundaries are computed and returned for visualization.
         """
 
         # Encode audio to mel spectrogram
         features, padding_mask = self.extract_features(audios_srs, **kwargs)
         encoder_output = self.encode(features, padding_mask, **kwargs)
+        context_vector = torch.zeros_like(encoder_output.z)
+        if kwargs.get("quantized", True):
+            context_vector += encoder_output.quantized
+        if kwargs.get("residual", True):
+            context_vector += encoder_output.residual
+        if kwargs.get("tail", True):
+            context_vector += encoder_output.tail
 
         reconstructed_mel, reconstructed_padding_mask = self.sample(
             num_steps=num_steps,
             temperature=temperature,
             guidance_scale=guidance_scale,
-            z=encoder_output.z,
+            z=context_vector,
             generator=generator,
             padding_mask=encoder_output.padding_mask,
         )
@@ -138,11 +144,15 @@ class VAE(torch.nn.Module):
             features = self.denormalize_mel(features)
 
         return {
-            "original_mel": features,
-            "reconstructed_mel": reconstructed_mel,
-            "context_vector": encoder_output.z,
-            "padding_mask": reconstructed_padding_mask,
-            "original_padding_mask": padding_mask,
+            "decoder_output": DecoderOutput(
+                audio_features=reconstructed_mel,
+                padding_mask=reconstructed_padding_mask,
+            ),
+            "encoder_output": encoder_output,
+            "feature_extractor_output": FeatureExtractorOutput(
+                audio_features=features,
+                padding_mask=padding_mask,
+            ),
         }
 
     @property

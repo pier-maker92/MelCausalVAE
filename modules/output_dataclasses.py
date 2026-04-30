@@ -26,8 +26,12 @@ class EncoderOutput:
     kl_loss: Optional[torch.FloatTensor] = None
     padding_mask: Optional[torch.BoolTensor] = None
     mu: Optional[torch.FloatTensor] = None
-    vq_output: Optional[VQVAEOutput] = None
+    vq_stats: Optional[VQStats] = None
+    vq_loss: Optional[torch.FloatTensor] = None
     mu_pre_vq: Optional[torch.FloatTensor] = None
+    quantized: Optional[torch.FloatTensor] = None
+    residual: Optional[torch.FloatTensor] = None
+    tail: Optional[torch.FloatTensor] = None
 
 
 @dataclass
@@ -36,8 +40,11 @@ class VAEOutput:
     kl_loss: Optional[torch.FloatTensor] = None
     mu_mean: Optional[torch.FloatTensor] = None
     mu_var: Optional[torch.FloatTensor] = None
-    vq_stats: Optional[VQStats] = None
     vq_loss: Optional[torch.FloatTensor] = None
+    vq_stats: Optional[VQStats] = None
+    quantized: Optional[torch.FloatTensor] = None
+    residual: Optional[torch.FloatTensor] = None
+    tail: Optional[torch.FloatTensor] = None
 
 
 @dataclass

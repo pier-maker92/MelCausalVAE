@@ -19,18 +19,10 @@ training:
   wandb_project: convformer-mel-vae-warmup
   wandb_run_name: null
   lr_scheduler_type: "cosine"
-<<<<<<< HEAD
   min_learning_rate: 0.0
-=======
->>>>>>> origin/main
   bf16: true
   fp16: false
   resume_from_checkpoint: null
   per_device_eval_batch_size: 1
   from_pretrained: null
   dataset_name: null
-  min_learning_rate: 1e-6
-  hubert_guidance: false
-  phonemes: false
-  phoneme_parsing_mode: "phoneme"
-  vocab_path: "data/vocab.json"

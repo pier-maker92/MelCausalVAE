@@ -8,8 +8,6 @@ from omegaconf import DictConfig, OmegaConf
 from vocos import Vocos
 from typing import Dict, List
 import matplotlib.pyplot as plt
-from modules.VAE import VAE, VAEConfig
-from modules.feature_extractor import MelSpectrogramConfig
 from transformers import (
     Trainer,
     TrainingArguments,
@@ -18,24 +16,12 @@ from transformers import (
     TrainerState,
     set_seed,
 )
-from transformers.optimization import get_cosine_schedule_with_warmup
-from torch.optim.lr_scheduler import LambdaLR
 
 # data
-from data.mls import MLSDataset
 import torch.distributed as dist
-from data.libri_tts import LibriTTS
 from data.audio_dataset import DataCollator
 from data.audio_dataset import TrainDatasetWrapper
-from data.librispeech_align import LibriSpeechAlignDataset
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from modules.configs import (
-    EncoderConfig,
-    VQConfig,
-    DropoutConfig,
-    KLChunkRegularizer,
-    DiTConfig,
-)
 
 # Set up logging
 logging.basicConfig(
@@ -203,7 +189,7 @@ class VAEtrainer(Trainer):
             self._globalstep_last_logged = self.state.global_step
             self.store_flos()
 
-            self.log(logs, start_time=start_time)
+            self.log(logs)
 
         metrics = None
         if self.control.should_evaluate:
@@ -233,7 +219,10 @@ class VAEtrainer(Trainer):
         return metrics
 
     def _generate_and_log_samples(self):
-        logger.info("Generating reconstruction samples...")
+        """
+        Generate mel spectrogram reconstructions and log to wandb.
+        """
+        logger.info(f"Generating reconstruction samples...")
 
         if getattr(self.model.config.mel_spectrogram_config, "use_bigvgan_mel", False):
             try:
@@ -325,7 +314,6 @@ class VAEtrainer(Trainer):
                     reconstructed_padding_mask=results["padding_mask"][idx],
                     sample_idx=idx,
                     device_id=device_id,
-                    mel_mask=results["padding_mask"],
                 )
 
                 # Convert matplotlib figure to wandb Image
@@ -347,10 +335,7 @@ class VAEtrainer(Trainer):
 
                 # Shape for Vocos/BigVGAN: [B, F, T]
                 features = (
-                    valid_mel.unsqueeze(0)
-                    .permute(0, 2, 1)
-                    .float()
-                    .to(self.args.device)
+                    valid_mel.unsqueeze(0).permute(0, 2, 1).float().to(self.args.device)
                 )
 
                 if vocoder_type == "bigvgan":
@@ -372,7 +357,6 @@ class VAEtrainer(Trainer):
                         caption=f"Sample {idx} - Step {self.state.global_step} - Device {device_id}",
                     )
                 )
-                plt.close(fig)
 
             # Log to wandb as a gallery
             if wandb.run is not None:
@@ -389,16 +373,8 @@ class VAEtrainer(Trainer):
                     f"Successfully logged {len(images)} reconstruction samples to wandb"
                 )
 
-        if wandb.run is not None:
-            to_log = {
-                "reconstructions": images,
-                "reconstructions_audio": audios,
-                "step": self.state.global_step,
-            }
-            if boundaries_images:
-                to_log["boundaries"] = boundaries_images
-            wandb.log(to_log)
-            logger.info(f"Logged {len(images)} reconstruction samples to wandb")
+        except Exception as e:
+            logger.error(f"Failed to generate samples: {e}", exc_info=True)
 
     def _create_mel_comparison_plot(
         self,
@@ -408,7 +384,6 @@ class VAEtrainer(Trainer):
         reconstructed_padding_mask: torch.Tensor,
         sample_idx: int,
         device_id: int,
-        boundaries_mel=None,
     ):
         """
         Create a side-by-side comparison plot of original and reconstructed mel spectrograms.
@@ -437,16 +412,8 @@ class VAEtrainer(Trainer):
         original = original[~om]
         reconstructed = reconstructed[~rm]
 
-        # Original mel
-        ax_orig.imshow(
-            original.T,
-            aspect="auto",
-            origin="lower",
-            interpolation="nearest",
-            cmap="viridis",
-        )
-        ax_orig.set_title(f"Original - Sample {sample_idx} - Device {device_id}")
-        ax_orig.set_ylabel("Mel Bin")
+        # Create figure with 2 subplots
+        fig, axes = plt.subplots(2, 1, figsize=(12, 8))
 
         # Plot original
         im1 = axes[0].imshow(
@@ -495,21 +462,32 @@ def main(cfg: DictConfig):
     set_seed(training_cfg.get("seed", 42))
 
     # Setup device
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    elif torch.backends.mps.is_available():
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
     logger.info(f"Using device: {device}")
 
     # Create AudioDataset
     dataset_name = training_cfg.pop("dataset_name", None)
     if dataset_name == "mls":
+        from data.mls import MLSDataset
+
         dataset = MLSDataset()
     elif dataset_name == "libritts":
+        from data.libri_tts import LibriTTS
+
         dataset = LibriTTS()
     elif dataset_name == "librispeech_aligned":
+        from data.librispeech_align import LibriSpeechAlignDataset
+
         dataset = LibriSpeechAlignDataset()
     else:
         raise ValueError(f"Dataset {dataset_name} not supported")
     train_dataset = TrainDatasetWrapper(dataset, "train")
-    test_dataset = TestDatasetWrapper(dataset, "test")
+    test_dataset = TestDatasetWrapper(dataset, "train")
     # handle wandb - only initialize on main process (rank 0)
     wandb_project = training_cfg.pop("wandb_project", None)
     wandb_run_name = training_cfg.pop("wandb_run_name", None)
@@ -523,45 +501,12 @@ def main(cfg: DictConfig):
         )
         logger.info(f"Initialized W&B on rank {local_rank}")
 
-    decoder_config = DiTConfig(**decoder_cfg)
-
-    vq_dict = encoder_cfg.pop("vq_config", None)
-    vq_config = VQConfig(**vq_dict) if vq_dict else None
-
-    dropout_dict = encoder_cfg.pop("dropout_regularizer_config", None)
-    dropout_config = DropoutConfig(**dropout_dict) if dropout_dict else None
-
-    kl_dict = encoder_cfg.pop("kl_chunk_regularizer_config", None)
-    kl_config = KLChunkRegularizer(**kl_dict) if kl_dict else None
-
-    use_bigvgan_mel = cfg_dict.get("use_bigvgan_mel", False)
-
-    encoder_config = EncoderConfig(
-        vq_config=vq_config,
-        dropout_regularizer_config=dropout_config,
-        kl_chunk_regularizer_config=kl_config,
-        **encoder_cfg,
-    )
+    from modules.builder import build_model
 
     logger.info("Creating VAE model...")
-    mel_spec_config = MelSpectrogramConfig(
-        use_bigvgan_mel=use_bigvgan_mel,
-    )
-    if mel_spec_config.use_bigvgan_mel:
+    model = build_model(cfg_dict)
+    if getattr(model.config.mel_spectrogram_config, "use_bigvgan_mel", False):
         logger.info("Using BigVGAN-compatible mel spectrogram")
-
-    # Initialize VAEConfig with global parameters (falling back to defaults)
-    vae_config = VAEConfig(
-        mel_dim=cfg_dict.get("mel_dim", 100),
-        latent_dim=cfg_dict.get("latent_dim", 64),
-        sample_rate=cfg_dict.get("sample_rate", 24000),
-        compress_factor=cfg_dict.get("compress_factor", 4),
-        encoder_config=encoder_config,
-        decoder_config=decoder_config,
-        mel_spectrogram_config=mel_spec_config,
-    )
-
-    model = VAE(config=vae_config)
 
     training_cfg["learning_rate"] = float(training_cfg.get("learning_rate"))
     min_learning_rate = float(training_cfg.pop("min_learning_rate", 0.0))
@@ -574,17 +519,6 @@ def main(cfg: DictConfig):
     if from_pretrained:
         model.from_pretrained(from_pretrained)
         logger.info(f"Loaded pretrained model from {from_pretrained}")
-
-    # Warm-up phonemizer in the main process so espeak is loaded once (evita "failed to find
-    # espeak library" in evaluation o in step successivi per differenze di ambiente/fork).
-    if phonemes and hasattr(model.encoder, "ctc"):
-        try:
-            model.encoder.ctc.get_phonemes(["test"])
-        except RuntimeError as e:
-            if "espeak" in str(e).lower():
-                logger.error(str(e))
-                raise
-        logger.info("Phonemizer (espeak) warm-up OK")
 
     # Setup training arguments
     training_args = TrainingArguments(
@@ -614,3 +548,5 @@ def main(cfg: DictConfig):
 
 if __name__ == "__main__":
     main()
+
+# python train.py -m train settings=exps/vq.yaml
