@@ -11,9 +11,6 @@ from .output_dataclasses import FeatureExtractorOutput
 
 
 # TODO fix implementation for bigvgan
-sys.path.append("/home/ec2-user/MelCausalVAE/bigvgan/bigvgan_v2_24khz_100band_256x")
-
-
 # from meldataset import get_mel_spectrogram as get_mel_spectrogram_bigvgan
 class AttrDict(dict):
     def __init__(self, *args, **kwargs):
@@ -43,44 +40,30 @@ class FeatureExtractor(nn.Module):
         self.use_bigvgan_mel = config.use_bigvgan_mel
 
         if self.use_bigvgan_mel:
-            # BigVGAN uses librosa's mel filterbank (slaney norm, htk=False)
-            import librosa
+            raise NotImplementedError("BigVGAN mel not implemented yet")
 
-            mel_basis = librosa.filters.mel(
-                sr=self.sampling_rate,
-                n_fft=self.n_fft,
-                n_mels=self.n_mels,
-                fmin=0,
-                fmax=None,
-            )
-            self.register_buffer("mel_basis", torch.from_numpy(mel_basis).float())
-            self.register_buffer("hann_window", torch.hann_window(self.n_fft))
-            self.mel_transform = None
-        else:
-            self.mel_transform = MelSpectrogram(
-                sample_rate=self.sampling_rate,
-                n_fft=self.n_fft,
-                win_length=self.n_fft,
-                hop_length=self.hop_length,
-                n_mels=self.n_mels,
-                center=self.padding == "center",
-                power=1,
-            )
+        self.mel_transform = MelSpectrogram(
+            sample_rate=self.sampling_rate,
+            n_fft=self.n_fft,
+            win_length=self.n_fft,
+            hop_length=self.hop_length,
+            n_mels=self.n_mels,
+            center=self.padding == "center",
+            power=1,
+        )
 
-        if self.use_bigvgan_mel:
-            self.std = 2.10
-            self.mean = -5.0
-            self.h = load_hparams_from_json(
-                "/home/ec2-user/MelCausalVAE/bigvgan/bigvgan_v2_24khz_100band_256x/config.json"
-            )
-        else:
-            self.std = 2.080231189727783
-            self.mean = -1.0173088312149048
+        self.register_buffer("std", torch.tensor(2.080231189727783))
+        self.register_buffer("mean", torch.tensor(-1.0173088312149048))
 
-    def _update_std_mean_with_momentum(self, mel_spec: torch.Tensor):
-        self.std = self.std * 0.99 + mel_spec.std() * 0.01
-        self.mean = self.mean * 0.99 + mel_spec.mean() * 0.01
-        return mel_spec.std(), mel_spec.mean()
+    @torch.no_grad()
+    def _update_std_mean_with_momentum(
+        self, mel_spec: torch.Tensor, padding_mask: torch.BoolTensor
+    ):
+        # mel_spec: (B, T, C), padding_mask: (B, T)
+        valid_mel = mel_spec[~padding_mask]
+        if valid_mel.numel() > 0:
+            self.std.copy_(self.std * 0.99 + valid_mel.std() * 0.01)
+            self.mean.copy_(self.mean * 0.99 + valid_mel.mean() * 0.01)
 
     def forward(self, audios_srs: List[Tuple[torch.FloatTensor, int]], **kwargs):
         audios, sampling_rates = zip(*audios_srs)
@@ -126,37 +109,35 @@ class FeatureExtractor(nn.Module):
                 dtype=torch.bool,
                 device=audios[0].device,
             )
-        if self.use_bigvgan_mel:
-            # BigVGAN logic: manual reflection padding + stft(center=False)
-            mel_spec = get_mel_spectrogram_bigvgan(
-                padded_audios.to(torch.float32), self.h
-            ).to(dtype=dtype)
-        else:
-            self.mel_transform.to(device=device, dtype=torch.float32)
-            mel_spec = self.mel_transform(padded_audios.to(torch.float32))
-            # Keep in fp32 for log operation to avoid fp16 underflow
-            mel_spec = torch.log(mel_spec + 1e-6)
+
+        self.mel_transform.to(device=device, dtype=torch.float32)
+        mel_spec = self.mel_transform(padded_audios.to(torch.float32))
+        # Keep in fp32 for log operation to avoid fp16 underflow
+        mel_spec = torch.log(mel_spec + 1e-6)
 
         mel_spec = einops.rearrange(mel_spec, "b c t -> b t c")
         # Convert to target dtype after log operation
         mel_spec = mel_spec.to(dtype)
 
+        # Interpolate padding mask to match mel_spec temporal dimension
+        # padding_mask is (B, L), we want (B, T)
         padding_mask = (
             torch.nn.functional.interpolate(
-                padding_mask.unsqueeze(0).unsqueeze(0).to(mel_spec.dtype),
-                size=(mel_spec.shape[:2]),
-                mode="bicubic",
-                align_corners=False,
+                padding_mask.unsqueeze(1).to(torch.float32),
+                size=mel_spec.shape[1],
+                mode="nearest",
             )
-            .to(dtype=torch.bool)
-            .squeeze(0)
-            .squeeze(0)
-        )  # 93.75Hz @ 24000 sampling rate
+            .squeeze(1)
+            .to(torch.bool)
+        )
 
         assert padding_mask.shape[1] == mel_spec.shape[1], (
             f"Temporal dimensions mismatch: padding_mask {padding_mask.shape[1]} vs "
             f"mel_spec {mel_spec.shape[1]}"
         )
+
+        if self.training:
+            self._update_std_mean_with_momentum(mel_spec, padding_mask)
 
         if self.normalize:
             mel_spec = (mel_spec - self.mean) / self.std

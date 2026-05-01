@@ -87,10 +87,10 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--checkpoint_dir", type=str, default="checkpoints/vq-refactored"
+        "-c", "--checkpoint_dir", type=str, default="checkpoints/vq-refactored"
     )
-    parser.add_argument("--audio_path", type=str, default="ablations/male.wav")
-    parser.add_argument("--output_path", type=str, default=None)
+    parser.add_argument("-i", "--audio_path", type=str, default="ablations/male.wav")
+    parser.add_argument("-o", "--output_path", type=str, default=None)
     parser.add_argument("--num_steps", type=int, default=16)
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--guidance_scale", type=float, default=1.3)
