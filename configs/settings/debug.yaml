@@ -1,3 +1,4 @@
+
 # @package _global_
 # Global VAE parameters that override configs/main.yaml defaults
 compress_factor: 8
@@ -7,19 +8,19 @@ sample_rate: 24000
 
 # Training configuration
 training:
-  num_train_epochs: 1
+  num_train_epochs: 3
   dataset_name: libritts
-  output_dir: checkpoints/exps/vq-refactored
+  output_dir: checkpoints/exps/debug
   learning_rate: 1e-4
-  min_learning_rate: 8e-5
+  min_learning_rate: 5e-5
   per_device_train_batch_size: 8
   per_device_eval_batch_size: 2
   report_to: wandb
   wandb_project: speech-vae
-  wandb_run_name: vq-refactored
+  wandb_run_name: debug
   fp16: false
   bf16: true
-  save_steps: 1000
+  save_steps: 10
   eval_strategy: "no"
   save_total_limit: 1
   gradient_accumulation_steps: 2
@@ -29,9 +30,9 @@ training:
 
 # Encoder configuration
 encoder:
-  d_model: 1024
-  tf_heads: 8
-  tf_layers: 4
+  d_model: 512
+  tf_heads: 4
+  tf_layers: 2
   n_residual_blocks: 3
   logvar_layer: false
   target_std: 0.3
@@ -65,9 +66,9 @@ encoder:
 
 # Decoder configuration
 decoder:
-  dit_dim: 768            # (was unet_dim)
-  dit_depth: 6            # (was unet_depth)
-  dit_heads: 12           # (was unet_heads)
+  dit_dim: 512            # (was unet_dim)
+  dit_depth: 4            # (was unet_depth)
+  dit_heads: 8           # (was unet_heads)
   dit_dropout_rate: 0.1   # (was unet_dropout_rate)
   use_conv_layer: true
   uncond_prob: 0.15

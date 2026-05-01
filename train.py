@@ -105,7 +105,7 @@ class VAEtrainer(Trainer):
             output = model(
                 audios_srs=audios_srs,
                 training_step=self.state.global_step,
-                phoneme_alignments=inputs["phoneme_alignments"],
+                phoneme_alignments=inputs.get("phoneme_alignments", None),
             )
             audio_loss = output.audio_loss
             kl_loss = output.kl_loss
@@ -308,10 +308,10 @@ class VAEtrainer(Trainer):
             segmentation_plots = []
             for idx in range(len(audios_srs)):
                 fig = self._create_mel_comparison_plot(
-                    original=results["original_mel"][idx],
-                    reconstructed=results["reconstructed_mel"][idx],
-                    original_padding_mask=results["original_padding_mask"][idx],
-                    reconstructed_padding_mask=results["padding_mask"][idx],
+                    original=results["feature_extractor_output"].audio_features[idx],
+                    reconstructed=results["decoder_output"].audio_features[idx],
+                    original_padding_mask=results["feature_extractor_output"].padding_mask[idx],
+                    reconstructed_padding_mask=results["decoder_output"].padding_mask[idx],
                     sample_idx=idx,
                     device_id=device_id,
                 )
@@ -326,8 +326,8 @@ class VAEtrainer(Trainer):
                 plt.close(fig)
 
                 # Decode reconstructed mel to audio
-                mel = results["reconstructed_mel"][idx]  # [T, F]
-                pad_mask = results["padding_mask"][idx]  # [T] True = padded
+                mel = results["decoder_output"].audio_features[idx]  # [T, F]
+                pad_mask = results["decoder_output"].padding_mask[idx]  # [T] True = padded
                 T = min(mel.shape[0], pad_mask.shape[0])
                 mel = mel[:T]
                 pad_mask = pad_mask[:T]
@@ -358,17 +358,14 @@ class VAEtrainer(Trainer):
                     )
                 )
 
-            # Log to wandb as a gallery
+            # Log to wandb as a table for better visualization
+            # Log to wandb as simple lists (reverting to what worked before but with correct data)
             if wandb.run is not None:
-                log_dict = {
+                wandb.log({
                     "reconstructions": images,
                     "reconstructions_audio": audios,
-                    "reconstructions_audio_paths": audio_paths,
-                    "step": self.state.global_step,
-                }
-                if segmentation_plots:
-                    log_dict["segmentation_plots"] = segmentation_plots
-                wandb.log(log_dict)
+                }, step=self.state.global_step)
+                
                 logger.info(
                     f"Successfully logged {len(images)} reconstruction samples to wandb"
                 )
