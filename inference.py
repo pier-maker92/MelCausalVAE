@@ -8,6 +8,7 @@ import torchaudio.transforms as T
 from modules.builder import build_model
 
 
+# TODO: move to utils
 def load_wav_mono_resampled(path: str, target_sr: int) -> torch.Tensor:
     wav, sr = torchaudio.load(path)
     if wav.shape[0] > 1:
