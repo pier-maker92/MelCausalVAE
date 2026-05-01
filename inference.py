@@ -59,6 +59,7 @@ def main(args):
             params["quantized"] = False
             params["residual"] = False
             params["tail"] = False
+
         if args.quantized:
             params["quantized"] = True
         if args.residual:
