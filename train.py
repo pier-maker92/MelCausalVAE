@@ -24,6 +24,7 @@ import torch.distributed as dist
 from data.audio_dataset import DataCollator
 from data.audio_dataset import TrainDatasetWrapper
 from torch.optim.lr_scheduler import CosineAnnealingLR
+from accelerate import Accelerator
 from evaluate import run_evaluation
 
 # Set up logging
@@ -69,6 +70,8 @@ class VAEtrainer(Trainer):
         self.decoder_warmup_ratio = kwargs.pop("decoder_warmup_ratio", None)
         super().__init__(**kwargs)
         self.dataset_name = dataset_name
+        self._vocoder = None
+        self._vocoder_type = None
         # Register granular losses
         granular_losses = [
             "audio_loss",
@@ -304,13 +307,12 @@ class VAEtrainer(Trainer):
         metrics = {}
 
         # 1. Original reconstruction samples (Mels + Audio)
-        # All processes must call this to avoid deadlock in distributed training
-        if self.generate_and_log_samples:
-            self._generate_and_log_samples()
-
         # 2. Run detailed metrics (UTMOS, WER, CER) on 100 samples
         # Only run on main process to avoid redundant computation and file conflicts
         if self.args.process_index == 0:
+            if self.generate_and_log_samples:
+                self._generate_and_log_samples()
+
             eval_dataloader = self.get_eval_dataloader(
                 eval_dataset or self.eval_dataset
             )
@@ -341,7 +343,10 @@ class VAEtrainer(Trainer):
         return metrics
 
     def _get_vocoder(self):
-        """Helper to get vocoder and its type."""
+        """Helper to get vocoder and its type with caching."""
+        if self._vocoder is not None:
+            return self._vocoder, self._vocoder_type
+
         if getattr(self.model.config.mel_spectrogram_config, "use_bigvgan_mel", False):
             import sys
             import os
@@ -369,6 +374,9 @@ class VAEtrainer(Trainer):
             vocoder_type = "vocos"
 
         vocoder.to(self.args.device)
+        vocoder.eval()
+        self._vocoder = vocoder
+        self._vocoder_type = vocoder_type
         return vocoder, vocoder_type
 
     def _generate_and_log_samples(self):
@@ -585,14 +593,8 @@ def main(cfg: DictConfig):
     # Set seed for reproducibility
     set_seed(training_cfg.get("seed", 42))
 
-    # Setup device
-    if torch.cuda.is_available():
-        device = torch.device("cuda")
-    elif torch.backends.mps.is_available():
-        device = torch.device("mps")
-    else:
-        device = torch.device("cpu")
-    logger.info(f"Using device: {device}")
+    accelerator = Accelerator()
+    logger.info(f"Using device: {accelerator.device}")
 
     # Create AudioDataset
     dataset_name = training_cfg.pop("dataset_name", None)
@@ -612,18 +614,15 @@ def main(cfg: DictConfig):
         raise ValueError(f"Dataset {dataset_name} not supported")
     train_dataset = TrainDatasetWrapper(dataset, "train")
     test_dataset = TestDatasetWrapper(dataset, "test")
-    # handle wandb - only initialize on main process (rank 0)
+    # handle wandb - only initialize on main process
     wandb_project = training_cfg.pop("wandb_project", None)
     wandb_run_name = training_cfg.pop("wandb_run_name", None)
-    local_rank = int(os.environ.get("LOCAL_RANK", -1))
-    if training_cfg.get("report_to", "none") == "wandb" and (
-        local_rank == -1 or local_rank == 0
-    ):
+    if training_cfg.get("report_to", "none") == "wandb" and accelerator.is_main_process:
         wandb.init(
             project=wandb_project,
             name=wandb_run_name,
         )
-        logger.info(f"Initialized W&B on rank {local_rank}")
+        logger.info(f"Initialized W&B on main process")
 
     from modules.builder import build_model
 

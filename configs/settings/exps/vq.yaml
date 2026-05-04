@@ -23,6 +23,7 @@ training:
   fp16: false
   bf16: true
   save_steps: 1000
+  logging_steps: 10
   eval_strategy: "steps"
   eval_steps: 1000
   save_total_limit: 3
@@ -31,10 +32,10 @@ training:
   greater_is_better: false
   early_stopping_patience: 5
   gradient_accumulation_steps: 1
-  dataloader_num_workers: 0
+  dataloader_num_workers: 8
   eval_num_samples: 100
   #from_pretrained: /home/ec2-user/MelCausalVAE/checkpoints/MelCausalVAE/restored-downsample8X/checkpoint-16000/model.safetensors
-  #resume_from_checkpoint: /home/ec2-user/MelCausalVAE/checkpoints/MelCausalVAE/restored-downsample8X/checkpoint-16000
+  resume_from_checkpoint: /home/piermel/links/scratch/MelCausalVAE/checkpoints/exps/vq-refactored/checkpoint-5000
 
 # Encoder configuration
 encoder:
