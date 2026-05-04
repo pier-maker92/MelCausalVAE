@@ -17,7 +17,7 @@ training:
   encoder_warmup_ratio: 0.01
   decoder_warmup_ratio: 0.1
   min_learning_rate: 5e-5
-  per_device_train_batch_size: 8
+  per_device_train_batch_size: 16
   per_device_eval_batch_size: 4
   report_to: wandb
   wandb_project: speech-vae
@@ -25,14 +25,14 @@ training:
   fp16: false
   bf16: true
   save_steps: 1000
-  eval_steps: 10
+  eval_steps: 100
   save_total_limit: 3
   load_best_model_at_end: true
   metric_for_best_model: "avg_WER"
   greater_is_better: false
   early_stopping_patience: 2
   gradient_accumulation_steps: 1
-  dataloader_num_workers: 0
+  dataloader_num_workers: 8
   eval_num_samples: 4
   #from_pretrained: /home/ec2-user/MelCausalVAE/checkpoints/MelCausalVAE/restored-downsample8X/checkpoint-16000/model.safetensors
   #resume_from_checkpoint: /home/ec2-user/MelCausalVAE/checkpoints/MelCausalVAE/restored-downsample8X/checkpoint-16000
@@ -56,7 +56,7 @@ encoder:
     reset_dead_codes: true
     reset_every_forward: 10
     residual_and_tail_dropout_p: 0.2  # (was vq_residual_dropout)
-    dim_to_quantize: 32
+    dim_to_quantize: 64
     use_ema_codebook: false
 
   # --- Dropout Config ---

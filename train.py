@@ -595,6 +595,7 @@ def main(cfg: DictConfig):
 
     accelerator = Accelerator()
     logger.info(f"Using device: {accelerator.device}")
+    logger.info(f"Mixed precision: {accelerator.state.mixed_precision}")
 
     # Create AudioDataset
     dataset_name = training_cfg.pop("dataset_name", None)
@@ -617,12 +618,15 @@ def main(cfg: DictConfig):
     # handle wandb - only initialize on main process
     wandb_project = training_cfg.pop("wandb_project", None)
     wandb_run_name = training_cfg.pop("wandb_run_name", None)
+    wandb_id = training_cfg.pop("wandb_id", None)
     if training_cfg.get("report_to", "none") == "wandb" and accelerator.is_main_process:
         wandb.init(
             project=wandb_project,
             name=wandb_run_name,
+            id=wandb_id,
+            resume="allow" if wandb_id else None,
         )
-        logger.info(f"Initialized W&B on main process")
+        logger.info(f"Initialized W&B on main process (id: {wandb_id})")
 
     from modules.builder import build_model
 
@@ -670,6 +674,7 @@ def main(cfg: DictConfig):
         remove_unused_columns=False,  # Don't let Trainer auto-remove columns
         **training_cfg,
     )
+    logger.info(f"TrainingArgs bf16 enabled: {training_args.bf16}")
 
     # Create trainer
     data_collator = DataCollator()
