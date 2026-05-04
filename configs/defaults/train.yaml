@@ -4,25 +4,44 @@ training:
   num_train_epochs: 10
   per_device_train_batch_size: 8
   gradient_accumulation_steps: 1
+  
+  # Learning Rates
   learning_rate: 1e-4
+  encoder_lr: null
+  decoder_lr: null
+  min_learning_rate: 0.0
+  
+  # Scheduler
+  lr_scheduler_type: "constant"
+  warmup_ratio: 0.0
+  warmup_steps: 0
+  encoder_warmup_ratio: null
+  decoder_warmup_ratio: null
+  
+  # Training loop
   max_grad_norm: 1.0
-  warmup_ratio: 0.01
   save_steps: null
   eval_steps: null
   eval_strategy: "steps"
   logging_steps: 1
   seed: 42
+  
+  # Hardware / Data
+  bf16: true
+  fp16: false
   dataloader_num_workers: 4
   dataloader_pin_memory: false
   dataloader_drop_last: true
+  per_device_eval_batch_size: 1
+  
+  # WandB / Logging
   report_to: none
   wandb_project: convformer-mel-vae-warmup
   wandb_run_name: null
-  lr_scheduler_type: "cosine"
-  min_learning_rate: 0.0
-  bf16: true
-  fp16: false
+  
+  # Dataset / VAE specifics
   resume_from_checkpoint: null
-  per_device_eval_batch_size: 1
   from_pretrained: null
   dataset_name: null
+  generate_and_log_samples: false
+  eval_num_samples: 100

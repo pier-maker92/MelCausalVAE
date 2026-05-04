@@ -36,8 +36,8 @@ from MelCausalVAE.data.librispeech_align_test import LibriSpeechAlignTestDataset
 from MelCausalVAE.data.audio_dataset import DataCollator, TestDatasetWrapper
 from MelCausalVAE.baseline_models import BaselineAudioCodec
 
-# HuBERT-Large ASR for WER/CER
-from transformers import Wav2Vec2Processor, HubertForCTC
+# Whisper ASR for WER/CER
+from transformers import WhisperProcessor, WhisperForConditionalGeneration
 from jiwer import wer as compute_wer, cer as compute_cer
 
 from datasets import load_dataset, concatenate_datasets
@@ -114,15 +114,15 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-class HuBERTASR:
-    """HuBERT-Large-LS960-ft based ASR for WER/CER computation."""
+class WhisperASR:
+    """Whisper based ASR for WER/CER computation."""
 
     def __init__(
-        self, device: torch.device, model_name: str = "facebook/hubert-large-ls960-ft"
+        self, device: torch.device, model_name: str = "openai/whisper-medium"
     ):
-        logger.info(f"Loading HuBERT ASR model: {model_name}")
-        self.processor = Wav2Vec2Processor.from_pretrained(model_name)
-        self.model = HubertForCTC.from_pretrained(model_name).to(device)
+        logger.info(f"Loading Whisper ASR model: {model_name}")
+        self.processor = WhisperProcessor.from_pretrained(model_name)
+        self.model = WhisperForConditionalGeneration.from_pretrained(model_name).to(device)
         self.model.eval()
         self.device = device
 
@@ -130,18 +130,21 @@ class HuBERTASR:
     def transcribe(self, audio_path: str) -> str:
         """Transcribe an audio file and return lowercase text."""
         audio, sr = torchaudio.load(audio_path)
-        # HuBERT expects 16kHz mono
+        # Whisper expects 16kHz mono
         if audio.shape[0] > 1:
             audio = audio.mean(dim=0, keepdim=True)
         if sr != 16000:
             audio = torchaudio.functional.resample(audio, sr, 16000)
-        inputs = self.processor(
+        
+        input_features = self.processor(
             audio.squeeze().cpu().numpy(), sampling_rate=16000, return_tensors="pt"
-        )
-        logits = self.model(inputs.input_values.to(self.device)).logits
-        predicted_ids = torch.argmax(logits, dim=-1)
-        transcription = self.processor.batch_decode(predicted_ids)[0]
-        return transcription.lower()
+        ).input_features.to(self.device).to(self.model.dtype)
+        
+        # Generate transcription
+        predicted_ids = self.model.generate(input_features)
+        transcription = self.processor.batch_decode(predicted_ids, skip_special_tokens=True)[0]
+        
+        return transcription.lower().strip()
 
 
 def set_seed(seed: int):
@@ -274,7 +277,7 @@ def evaluate_dataset(
     device: torch.device,
     work_dir: Path,
     evaluator: Optional[UTMOSPredictor],
-    hubert_asr: HuBERTASR,
+    whisper_asr: WhisperASR,
     log_images: bool,
     max_images: int,
     keep_wavs: bool,
@@ -425,18 +428,18 @@ def evaluate_dataset(
                 save_wav(recon_wav, reconstructed_audio, sr)
                 prompt_txt.write_text(gt_text[idx])
 
-            # --- Compute WER and CER using HuBERT-Large ASR ---
+            # --- Compute WER and CER using Whisper ASR ---
             ref_text_normalized = gt_text[idx].lower().strip()
             if original_audio_only:
-                ref_hyp = hubert_asr.transcribe(str(orig_wav))
+                ref_hyp = whisper_asr.transcribe(str(orig_wav))
                 recon_hyp = ref_hyp
             else:
                 if not skip_ref_metrics:
-                    ref_hyp = hubert_asr.transcribe(str(orig_wav))
+                    ref_hyp = whisper_asr.transcribe(str(orig_wav))
                 else:
                     ref_info = gt_metrics_map.get(str(sample_id))
                     ref_hyp = ref_info.get("ref_transcription", "")
-                recon_hyp = hubert_asr.transcribe(str(recon_wav))
+                recon_hyp = whisper_asr.transcribe(str(recon_wav))
 
             # WER / CER for original (reference audio)
             if ref_text_normalized and (original_audio_only or not skip_ref_metrics):
@@ -724,8 +727,8 @@ def run_single_eval(
             base_args["config_dict"], checkpoint, device
         )
 
-    # HuBERT-Large ASR for WER/CER
-    hubert_asr = HuBERTASR(device)
+    # Whisper ASR for WER/CER
+    whisper_asr = WhisperASR(device)
 
     # Standalone UTMOS Predictor
     evaluator = None
@@ -791,7 +794,7 @@ def run_single_eval(
             device=device,
             work_dir=work_dir,
             evaluator=evaluator,
-            hubert_asr=hubert_asr,
+            whisper_asr=whisper_asr,
             log_images=log_images,
             max_images=wandb_max_images,
             keep_wavs=base_args.get("keep_wavs", False),

@@ -9,30 +9,39 @@ sample_rate: 24000
 # Training configuration
 training:
   num_train_epochs: 3
-  dataset_name: libritts
+  dataset_name: librispeech_aligned
   output_dir: checkpoints/exps/debug
   learning_rate: 1e-4
+  encoder_lr: 1e-3
+  decoder_lr: 1e-4
+  encoder_warmup_ratio: 0.01
+  decoder_warmup_ratio: 0.1
   min_learning_rate: 5e-5
   per_device_train_batch_size: 8
-  per_device_eval_batch_size: 2
+  per_device_eval_batch_size: 4
   report_to: wandb
   wandb_project: speech-vae
   wandb_run_name: debug
   fp16: false
   bf16: true
-  save_steps: 10
-  eval_strategy: "no"
-  save_total_limit: 1
-  gradient_accumulation_steps: 2
+  save_steps: 1000
+  eval_steps: 10
+  save_total_limit: 3
+  load_best_model_at_end: true
+  metric_for_best_model: "avg_WER"
+  greater_is_better: false
+  early_stopping_patience: 2
+  gradient_accumulation_steps: 1
   dataloader_num_workers: 0
+  eval_num_samples: 4
   #from_pretrained: /home/ec2-user/MelCausalVAE/checkpoints/MelCausalVAE/restored-downsample8X/checkpoint-16000/model.safetensors
   #resume_from_checkpoint: /home/ec2-user/MelCausalVAE/checkpoints/MelCausalVAE/restored-downsample8X/checkpoint-16000
 
 # Encoder configuration
 encoder:
-  d_model: 512
-  tf_heads: 4
-  tf_layers: 2
+  d_model: 1024
+  tf_heads: 8
+  tf_layers: 4
   n_residual_blocks: 3
   logvar_layer: false
   target_std: 0.3
@@ -66,9 +75,9 @@ encoder:
 
 # Decoder configuration
 decoder:
-  dit_dim: 512            # (was unet_dim)
-  dit_depth: 4            # (was unet_depth)
-  dit_heads: 8           # (was unet_heads)
+  dit_dim: 768            # (was unet_dim)
+  dit_depth: 6            # (was unet_depth)
+  dit_heads: 12           # (was unet_heads)
   dit_dropout_rate: 0.1   # (was unet_dropout_rate)
   use_conv_layer: true
   uncond_prob: 0.15

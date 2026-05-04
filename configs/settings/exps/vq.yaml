@@ -1,29 +1,38 @@
 # @package _global_
 # Global VAE parameters that override configs/main.yaml defaults
-compress_factor: 8
+compress_factor: 4
 mel_dim: 100
 latent_dim: 64
 sample_rate: 24000
 
 # Training configuration
 training:
-  num_train_epochs: 1
-  dataset_name: libritts
+  num_train_epochs: 10
+  dataset_name: librispeech_aligned
   output_dir: checkpoints/exps/vq-refactored
-  learning_rate: 1e-4
-  min_learning_rate: 8e-5
-  per_device_train_batch_size: 8
-  per_device_eval_batch_size: 2
+  learning_rate: 1e-3
+  encoder_lr: 1e-3
+  decoder_lr: 1e-4
+  encoder_warmup_ratio: 0.01
+  decoder_warmup_ratio: 0.1
+  per_device_train_batch_size: 16
+  per_device_eval_batch_size: 4
   report_to: wandb
   wandb_project: speech-vae
   wandb_run_name: vq-refactored
   fp16: false
   bf16: true
   save_steps: 1000
-  eval_strategy: "no"
-  save_total_limit: 1
-  gradient_accumulation_steps: 2
+  eval_strategy: "steps"
+  eval_steps: 1000
+  save_total_limit: 3
+  load_best_model_at_end: true
+  metric_for_best_model: "avg_WER"
+  greater_is_better: false
+  early_stopping_patience: 5
+  gradient_accumulation_steps: 1
   dataloader_num_workers: 0
+  eval_num_samples: 100
   #from_pretrained: /home/ec2-user/MelCausalVAE/checkpoints/MelCausalVAE/restored-downsample8X/checkpoint-16000/model.safetensors
   #resume_from_checkpoint: /home/ec2-user/MelCausalVAE/checkpoints/MelCausalVAE/restored-downsample8X/checkpoint-16000
 
@@ -34,9 +43,9 @@ encoder:
   tf_layers: 4
   n_residual_blocks: 3
   logvar_layer: false
-  target_std: 0.3
+  target_std: 1.0
   kl_loss_warmup_steps: 1000
-  kl_loss_weight: 5e-4
+  kl_loss_weight: 1e-4
   # NOTE: legacy parameters like use_sofplus, use_1d_encoder have been removed.
 
   # --- VQ Config ---

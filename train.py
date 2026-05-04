@@ -2,6 +2,7 @@ from data.audio_dataset import TestDatasetWrapper
 import os
 import wandb
 import torch
+import datetime
 import logging
 import hydra
 from omegaconf import DictConfig, OmegaConf
@@ -15,6 +16,7 @@ from transformers import (
     TrainerControl,
     TrainerState,
     set_seed,
+    EarlyStoppingCallback,
 )
 
 # data
@@ -22,6 +24,7 @@ import torch.distributed as dist
 from data.audio_dataset import DataCollator
 from data.audio_dataset import TrainDatasetWrapper
 from torch.optim.lr_scheduler import CosineAnnealingLR
+from evaluate import run_evaluation
 
 # Set up logging
 logging.basicConfig(
@@ -52,9 +55,20 @@ class AddGranularLossesToTrainerState(TrainerCallback):
 
 
 class VAEtrainer(Trainer):
-    def __init__(self, min_learning_rate: float = 0.0, **kwargs):
+    def __init__(self, dataset_name: str = "dataset", **kwargs):
+        self.generate_and_log_samples = kwargs.pop("generate_and_log_samples", False)
+        self.min_learning_rate = kwargs.pop("min_learning_rate", 0.0)
+        eval_num_samples = kwargs.pop("eval_num_samples", 100)
+        self.eval_num_samples = (
+            eval_num_samples if eval_num_samples is not None else float("inf")
+        )
+        self.run_id = kwargs.pop("run_id", "default_run")
+        self.encoder_lr = kwargs.pop("encoder_lr", None)
+        self.decoder_lr = kwargs.pop("decoder_lr", None)
+        self.encoder_warmup_ratio = kwargs.pop("encoder_warmup_ratio", None)
+        self.decoder_warmup_ratio = kwargs.pop("decoder_warmup_ratio", None)
         super().__init__(**kwargs)
-        self.min_learning_rate = min_learning_rate
+        self.dataset_name = dataset_name
         # Register granular losses
         granular_losses = [
             "audio_loss",
@@ -73,7 +87,77 @@ class VAEtrainer(Trainer):
             )
         self.add_callback(AddGranularLossesToTrainerState(granular_losses))
 
+    def create_optimizer(self):
+        """
+        Setup the optimizer with different learning rates for encoder and decoder if specified.
+        """
+        if self.optimizer is None:
+            # Use specific LRs if provided, otherwise fallback to the global learning_rate
+            encoder_lr = self.encoder_lr if self.encoder_lr is not None else self.args.learning_rate
+            decoder_lr = self.decoder_lr if self.decoder_lr is not None else self.args.learning_rate
+
+            logger.info(f"Setting up optimizer with encoder_lr: {encoder_lr}, decoder_lr: {decoder_lr}")
+
+            # Define parameter groups
+            # We group encoder and feature_extractor together, and decoder separately.
+            encoder_params = []
+            decoder_params = []
+            
+            for n, p in self.model.named_parameters():
+                if not p.requires_grad:
+                    continue
+                if "encoder" in n or "feature_extractor" in n:
+                    encoder_params.append(p)
+                elif "decoder" in n:
+                    decoder_params.append(p)
+                else:
+                    # Fallback for any other parameters (e.g. at root level)
+                    encoder_params.append(p)
+
+            optimizer_grouped_parameters = [
+                {"params": encoder_params, "lr": encoder_lr},
+                {"params": decoder_params, "lr": decoder_lr},
+            ]
+
+            optimizer_cls, optimizer_kwargs = Trainer.get_optimizer_cls_and_kwargs(self.args)
+            self.optimizer = optimizer_cls(optimizer_grouped_parameters, **optimizer_kwargs)
+
+        return self.optimizer
+
     def create_scheduler(self, num_training_steps: int, optimizer=None):
+        """
+        Setup the scheduler. Support for differential warmup ratios for encoder and decoder.
+        """
+        if self.encoder_warmup_ratio is not None or self.decoder_warmup_ratio is not None:
+            logger.info(
+                f"Setting up differential warmup scheduler: "
+                f"encoder_warmup_ratio: {self.encoder_warmup_ratio}, "
+                f"decoder_warmup_ratio: {self.decoder_warmup_ratio}"
+            )
+            
+            enc_warmup_steps = int(num_training_steps * (self.encoder_warmup_ratio or 0.0))
+            dec_warmup_steps = int(num_training_steps * (self.decoder_warmup_ratio or 0.0))
+
+            def enc_lambda(current_step):
+                if current_step < enc_warmup_steps:
+                    return float(current_step) / float(max(1, enc_warmup_steps))
+                return 1.0
+
+            def dec_lambda(current_step):
+                if current_step < dec_warmup_steps:
+                    return float(current_step) / float(max(1, dec_warmup_steps))
+                return 1.0
+
+            self.lr_scheduler = torch.optim.lr_scheduler.LambdaLR(
+                optimizer, [enc_lambda, dec_lambda]
+            )
+            return self.lr_scheduler
+
+        # Default to Trainer's native scheduler (which will be 'constant' by default now)
+        # unless 'cosine' is explicitly requested.
+        if self.args.lr_scheduler_type != "cosine":
+            return super().create_scheduler(num_training_steps, optimizer)
+
         if optimizer is None:
             optimizer = self.optimizer
         self.lr_scheduler = CosineAnnealingLR(
@@ -178,7 +262,13 @@ class VAEtrainer(Trainer):
                     else:
                         logs[k] = round(avg_val, 4)
 
-            logs["learning_rate"] = self._get_learning_rate()
+            # Log separate learning rates for encoder and decoder
+            if self.optimizer is not None:
+                for i, group in enumerate(self.optimizer.param_groups):
+                    name = "lr_encoder" if i == 0 else "lr_decoder"
+                    logs[name] = group["lr"]
+            else:
+                logs["learning_rate"] = self._get_learning_rate()
 
             if grad_norm is not None:
                 logs["grad_norm"] = (
@@ -212,45 +302,81 @@ class VAEtrainer(Trainer):
         Run evaluation and generate sample reconstructions.
         """
         metrics = {}
-        # Generate samples and log to wandb
+
+        # 1. Original reconstruction samples (Mels + Audio)
         # All processes must call this to avoid deadlock in distributed training
-        self._generate_and_log_samples()
+        if self.generate_and_log_samples:
+            self._generate_and_log_samples()
+
+        # 2. Run detailed metrics (UTMOS, WER, CER) on 100 samples
+        # Only run on main process to avoid redundant computation and file conflicts
+        if self.args.process_index == 0:
+            eval_dataloader = self.get_eval_dataloader(
+                eval_dataset or self.eval_dataset
+            )
+
+            # We need the vocoder for evaluate.py
+            # Reusing the loading logic from _generate_and_log_samples or assuming it's available
+            vocoder, vocoder_type = self._get_vocoder()
+
+            eval_metrics = run_evaluation(
+                model=self.model,
+                vocoder=vocoder,
+                vocoder_type=vocoder_type,
+                eval_dataloader=eval_dataloader,
+                device=self.args.device,
+                step=self.state.global_step,
+                dataset_name=self.dataset_name,
+                num_samples=self.eval_num_samples,
+                run_id=getattr(self, "run_id", "default_run"),
+            )
+            metrics.update(eval_metrics)
+
+        # Broadcast metrics from rank 0 to all other ranks in distributed setup
+        if dist.is_available() and dist.is_initialized():
+            broadcast_list = [metrics]
+            dist.broadcast_object_list(broadcast_list, src=0)
+            metrics = broadcast_list[0]
 
         return metrics
+
+    def _get_vocoder(self):
+        """Helper to get vocoder and its type."""
+        if getattr(self.model.config.mel_spectrogram_config, "use_bigvgan_mel", False):
+            import sys
+            import os
+
+            # Try to find bigvgan in the current workspace first
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            bigvgan_path = os.path.join(
+                current_dir, "bigvgan/bigvgan_v2_24khz_100band_256x"
+            )
+
+            # Fallback to the hardcoded path if it doesn't exist locally
+            if not os.path.exists(bigvgan_path):
+                bigvgan_path = "/home/piermel/links/scratch/MelCausalVAE/bigvgan/bigvgan_v2_24khz_100band_256x"
+
+            if bigvgan_path not in sys.path:
+                sys.path.append(bigvgan_path)
+            import bigvgan
+
+            vocoder = bigvgan.BigVGAN.from_pretrained(
+                bigvgan_path, use_cuda_kernel=False
+            )
+            vocoder_type = "bigvgan"
+        else:
+            vocoder = Vocos.from_pretrained("charactr/vocos-mel-24khz")
+            vocoder_type = "vocos"
+
+        vocoder.to(self.args.device)
+        return vocoder, vocoder_type
 
     def _generate_and_log_samples(self):
         """
         Generate mel spectrogram reconstructions and log to wandb.
         """
         logger.info(f"Generating reconstruction samples...")
-
-        if getattr(self.model.config.mel_spectrogram_config, "use_bigvgan_mel", False):
-            try:
-                import sys
-                import os
-
-                bigvgan_path = (
-                    "/home/ec2-user/MelCausalVAE/bigvgan/bigvgan_v2_24khz_100band_256x"
-                )
-                if bigvgan_path not in sys.path:
-                    sys.path.append(bigvgan_path)
-                import bigvgan
-
-                vocoder = bigvgan.BigVGAN.from_pretrained(
-                    bigvgan_path, use_cuda_kernel=False
-                )
-                vocoder_type = "bigvgan"
-            except Exception as e:
-                logger.error(
-                    f"Failed to load BigVGAN vocoder: {e}. Falling back to Vocos."
-                )
-                vocoder = Vocos.from_pretrained("charactr/vocos-mel-24khz")
-                vocoder_type = "vocos"
-        else:
-            vocoder = Vocos.from_pretrained("charactr/vocos-mel-24khz")
-            vocoder_type = "vocos"
-
-        vocoder.to(self.args.device)
+        vocoder, vocoder_type = self._get_vocoder()
 
         # Get some samples from the eval dataset using its dataloader
         eval_dataloader = self.get_eval_dataloader(self.eval_dataset)
@@ -286,92 +412,93 @@ class VAEtrainer(Trainer):
             return
 
         # Generate reconstructions
-        try:
-            with torch.no_grad():
-                results = self.model.encode_decode(
-                    audios_srs=audios_srs,
-                    num_steps=16,
-                    temperature=0.2,
-                    guidance_scale=1.3,
-                    phoneme_alignments=phoneme_alignments,
+        with torch.no_grad():
+            results = self.model.encode_decode(
+                audios_srs=audios_srs,
+                num_steps=16,
+                temperature=0.2,
+                guidance_scale=1.3,
+                phoneme_alignments=phoneme_alignments,
+            )
+        # Create visualizations
+        images = []
+        # Resolve device id safely for distributed/non-distributed
+        if dist.is_available() and dist.is_initialized():
+            device_id = dist.get_rank()
+        else:
+            device_id = 0
+
+        audios = []
+        audio_paths = []
+        segmentation_plots = []
+        for idx in range(len(audios_srs)):
+            fig = self._create_mel_comparison_plot(
+                original=results["feature_extractor_output"].audio_features[idx],
+                reconstructed=results["decoder_output"].audio_features[idx],
+                original_padding_mask=results["feature_extractor_output"].padding_mask[
+                    idx
+                ],
+                reconstructed_padding_mask=results["decoder_output"].padding_mask[idx],
+                sample_idx=idx,
+                device_id=device_id,
+            )
+
+            # Convert matplotlib figure to wandb Image
+            images.append(
+                wandb.Image(
+                    fig,
+                    caption=f"Sample {idx} - Step {self.state.global_step} - Device {device_id}",
                 )
-            # Create visualizations
-            images = []
-            # Resolve device id safely for distributed/non-distributed
-            if dist.is_available() and dist.is_initialized():
-                device_id = dist.get_rank()
+            )
+            plt.close(fig)
+
+            # Decode reconstructed mel to audio
+            mel = results["decoder_output"].audio_features[idx]  # [T, F]
+            pad_mask = results["decoder_output"].padding_mask[idx]  # [T] True = padded
+            T = min(mel.shape[0], pad_mask.shape[0])
+            mel = mel[:T]
+            pad_mask = pad_mask[:T]
+            valid_mel = mel[~pad_mask]
+
+            # Shape for Vocos/BigVGAN: [B, F, T]
+            features = (
+                valid_mel.unsqueeze(0).permute(0, 2, 1).float().to(self.args.device)
+            )
+
+            if vocoder_type == "bigvgan":
+                # BigVGAN expects exp(mel)
+                # features = torch.exp(features.float())
+                waveform = vocoder(features)
             else:
-                device_id = 0
+                waveform = vocoder.decode(features)  # [1, samples]
 
-            audios = []
-            audio_paths = []
-            segmentation_plots = []
-            for idx in range(len(audios_srs)):
-                fig = self._create_mel_comparison_plot(
-                    original=results["feature_extractor_output"].audio_features[idx],
-                    reconstructed=results["decoder_output"].audio_features[idx],
-                    original_padding_mask=results["feature_extractor_output"].padding_mask[idx],
-                    reconstructed_padding_mask=results["decoder_output"].padding_mask[idx],
-                    sample_idx=idx,
-                    device_id=device_id,
+            waveform = waveform.float().squeeze().detach().cpu()
+            # normalize waveform to -1 to 1
+            waveform = waveform / (waveform.abs().max() + 1e-8)
+            sr = audios_srs[idx][1]
+            # Log as wandb audio as well
+            audios.append(
+                wandb.Audio(
+                    waveform.numpy(),
+                    sample_rate=sr,
+                    caption=f"Sample {idx} - Step {self.state.global_step} - Device {device_id}",
                 )
+            )
 
-                # Convert matplotlib figure to wandb Image
-                images.append(
-                    wandb.Image(
-                        fig,
-                        caption=f"Sample {idx} - Step {self.state.global_step} - Device {device_id}",
-                    )
-                )
-                plt.close(fig)
-
-                # Decode reconstructed mel to audio
-                mel = results["decoder_output"].audio_features[idx]  # [T, F]
-                pad_mask = results["decoder_output"].padding_mask[idx]  # [T] True = padded
-                T = min(mel.shape[0], pad_mask.shape[0])
-                mel = mel[:T]
-                pad_mask = pad_mask[:T]
-                valid_mel = mel[~pad_mask]
-
-                # Shape for Vocos/BigVGAN: [B, F, T]
-                features = (
-                    valid_mel.unsqueeze(0).permute(0, 2, 1).float().to(self.args.device)
-                )
-
-                if vocoder_type == "bigvgan":
-                    # BigVGAN expects exp(mel)
-                    # features = torch.exp(features.float())
-                    waveform = vocoder(features)
-                else:
-                    waveform = vocoder.decode(features)  # [1, samples]
-
-                waveform = waveform.float().squeeze().detach().cpu()
-                # normalize waveform to -1 to 1
-                waveform = waveform / (waveform.abs().max() + 1e-8)
-                sr = audios_srs[idx][1]
-                # Log as wandb audio as well
-                audios.append(
-                    wandb.Audio(
-                        waveform.numpy(),
-                        sample_rate=sr,
-                        caption=f"Sample {idx} - Step {self.state.global_step} - Device {device_id}",
-                    )
-                )
-
-            # Log to wandb as a table for better visualization
-            # Log to wandb as simple lists (reverting to what worked before but with correct data)
-            if wandb.run is not None:
-                wandb.log({
+        # Log to wandb as a table for better visualization
+        # Log to wandb as simple lists (reverting to what worked before but with correct data)
+        if wandb.run is not None:
+            wandb.log(
+                {
                     "reconstructions": images,
                     "reconstructions_audio": audios,
-                }, step=self.state.global_step)
-                
-                logger.info(
-                    f"Successfully logged {len(images)} reconstruction samples to wandb"
-                )
+                },
+                step=self.state.global_step,
+            )
 
-        except Exception as e:
-            logger.error(f"Failed to generate samples: {e}", exc_info=True)
+            logger.info(
+                f"Successfully logged {len(images)} reconstruction samples to wandb"
+            )
 
     def _create_mel_comparison_plot(
         self,
@@ -477,14 +604,14 @@ def main(cfg: DictConfig):
         from data.libri_tts import LibriTTS
 
         dataset = LibriTTS()
-    elif dataset_name == "librispeech_aligned":
+    elif dataset_name in ["librispeech_aligned", "librispeech-aligned"]:
         from data.librispeech_align import LibriSpeechAlignDataset
 
         dataset = LibriSpeechAlignDataset()
     else:
         raise ValueError(f"Dataset {dataset_name} not supported")
     train_dataset = TrainDatasetWrapper(dataset, "train")
-    test_dataset = TestDatasetWrapper(dataset, "train")
+    test_dataset = TestDatasetWrapper(dataset, "test")
     # handle wandb - only initialize on main process (rank 0)
     wandb_project = training_cfg.pop("wandb_project", None)
     wandb_run_name = training_cfg.pop("wandb_run_name", None)
@@ -507,6 +634,9 @@ def main(cfg: DictConfig):
 
     training_cfg["learning_rate"] = float(training_cfg.get("learning_rate"))
     min_learning_rate = float(training_cfg.pop("min_learning_rate", 0.0))
+    early_stopping_patience = training_cfg.pop("early_stopping_patience", None)
+    generate_and_log_samples = training_cfg.pop("generate_and_log_samples", True)
+    eval_num_samples = training_cfg.pop("eval_num_samples", 100)
 
     # Check for DeepSpeed config in training_cfg
     if "deepspeed" in training_cfg and training_cfg["deepspeed"]:
@@ -516,6 +646,25 @@ def main(cfg: DictConfig):
     if from_pretrained:
         model.from_pretrained(from_pretrained)
         logger.info(f"Loaded pretrained model from {from_pretrained}")
+
+    if "lr_scheduler_type" not in training_cfg:
+        training_cfg["lr_scheduler_type"] = "constant"
+
+    # Extract optional differential learning rates and warmup ratios
+    encoder_lr = training_cfg.pop("encoder_lr", None)
+    decoder_lr = training_cfg.pop("decoder_lr", None)
+    encoder_warmup_ratio = training_cfg.pop("encoder_warmup_ratio", None)
+    decoder_warmup_ratio = training_cfg.pop("decoder_warmup_ratio", None)
+    
+    if encoder_lr is not None: encoder_lr = float(encoder_lr)
+    if decoder_lr is not None: decoder_lr = float(decoder_lr)
+    if encoder_warmup_ratio is not None: encoder_warmup_ratio = float(encoder_warmup_ratio)
+    if decoder_warmup_ratio is not None: decoder_warmup_ratio = float(decoder_warmup_ratio)
+
+    # Create unique run ID for evaluation outputs
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_name = wandb_run_name or "run"
+    run_id = f"{run_name}_{timestamp}"
 
     # Setup training arguments
     training_args = TrainingArguments(
@@ -532,7 +681,22 @@ def main(cfg: DictConfig):
         eval_dataset=test_dataset,
         data_collator=data_collator,
         min_learning_rate=min_learning_rate,
+        dataset_name=dataset_name or "librispeech",
+        generate_and_log_samples=generate_and_log_samples,
+        eval_num_samples=eval_num_samples,
+        run_id=run_id,
+        encoder_lr=encoder_lr,
+        decoder_lr=decoder_lr,
+        encoder_warmup_ratio=encoder_warmup_ratio,
+        decoder_warmup_ratio=decoder_warmup_ratio,
     )
+
+    # Add Early Stopping if enabled
+    if training_args.load_best_model_at_end and early_stopping_patience is not None:
+        trainer.add_callback(
+            EarlyStoppingCallback(early_stopping_patience=early_stopping_patience)
+        )
+        logger.info(f"Enabled Early Stopping with patience {early_stopping_patience}")
 
     # Start training
     logger.info("Starting training...")

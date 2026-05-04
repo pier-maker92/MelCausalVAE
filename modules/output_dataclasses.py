@@ -1,28 +1,28 @@
-from pandas.core.internals.construction import dataclasses_to_dicts
+from transformers.utils import ModelOutput
 import torch
 from typing import Optional
 from dataclasses import dataclass
 
 
 @dataclass
-class VQStats:
-    perplexity: torch.Tensor
-    codes_used: torch.Tensor
-    codes_used_frac: torch.Tensor
+class VQStats(ModelOutput):
+    perplexity: Optional[torch.Tensor] = None
+    codes_used: Optional[torch.Tensor] = None
+    codes_used_frac: Optional[torch.Tensor] = None
 
 
 @dataclass
-class VQVAEOutput:
-    indices: torch.LongTensor
-    quantized: torch.FloatTensor
-    residual: torch.FloatTensor
-    stats: VQStats
+class VQVAEOutput(ModelOutput):
+    indices: Optional[torch.LongTensor] = None
+    quantized: Optional[torch.FloatTensor] = None
+    residual: Optional[torch.FloatTensor] = None
+    stats: Optional[VQStats] = None
     loss: Optional[torch.FloatTensor] = None
 
 
 @dataclass
-class EncoderOutput:
-    z: torch.FloatTensor
+class EncoderOutput(ModelOutput):
+    z: Optional[torch.FloatTensor] = None
     kl_loss: Optional[torch.FloatTensor] = None
     padding_mask: Optional[torch.BoolTensor] = None
     mu: Optional[torch.FloatTensor] = None
@@ -35,7 +35,7 @@ class EncoderOutput:
 
 
 @dataclass
-class VAEOutput:
+class VAEOutput(ModelOutput):
     audio_loss: Optional[torch.FloatTensor] = None
     kl_loss: Optional[torch.FloatTensor] = None
     mu_mean: Optional[torch.FloatTensor] = None
@@ -48,13 +48,13 @@ class VAEOutput:
 
 
 @dataclass
-class DecoderOutput:
+class DecoderOutput(ModelOutput):
     loss: Optional[torch.FloatTensor] = None
     audio_features: Optional[torch.FloatTensor] = None
     padding_mask: Optional[torch.BoolTensor] = None
 
 
 @dataclass
-class FeatureExtractorOutput:
-    audio_features: torch.FloatTensor
-    padding_mask: torch.BoolTensor
+class FeatureExtractorOutput(ModelOutput):
+    audio_features: Optional[torch.FloatTensor] = None
+    padding_mask: Optional[torch.BoolTensor] = None
