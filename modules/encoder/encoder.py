@@ -139,9 +139,6 @@ class Encoder(SigmaVAEEncoder):
 
         mu_pre_vq = self.mu(h)
 
-        if hasattr(self, "dropout_regularizer"):
-            mu_pre_vq = self.dropout_regularizer(mu_pre_vq)
-
         logvar = None
         if hasattr(self, "logvar"):
             logvar = self.logvar(h)
@@ -172,12 +169,16 @@ class Encoder(SigmaVAEEncoder):
         else:
             z_stoch = self.reparameterize(mu_stoch, logvar)
 
+        if hasattr(self, "dropout_regularizer"):
+            z_stoch = self.dropout_regularizer(z_stoch)
+
         # dropout per sample
         if self.training and getattr(self, "residual_and_tail_dropout_p", 0.0) > 0.0:
             B = z_stoch.shape[0]
-            keep_mask = (torch.rand(B, 1, 1, device=z_stoch.device) >= self.residual_and_tail_dropout_p).to(
-                z_stoch.dtype
-            )
+            keep_mask = (
+                torch.rand(B, 1, 1, device=z_stoch.device)
+                >= self.residual_and_tail_dropout_p
+            ).to(z_stoch.dtype)
             z = z_quantized + z_stoch * keep_mask
         else:
             z = z_quantized + z_stoch

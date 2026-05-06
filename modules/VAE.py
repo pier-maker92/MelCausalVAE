@@ -54,8 +54,12 @@ class VAE(torch.nn.Module):
             context_vector=encoder_output.z,
         ).loss
 
-        mu_mean = encoder_output.mu[~encoder_output.padding_mask].mean()
-        mu_var = encoder_output.mu[~encoder_output.padding_mask].var()
+        mu_mean = encoder_output.mu[
+            ~encoder_output.padding_mask
+        ].mean()  # whatever is not quantized
+        mu_var = encoder_output.mu[
+            ~encoder_output.padding_mask
+        ].var()  # whatever is not quantized
         out = {
             "audio_loss": audio_loss,
             "kl_loss": encoder_output.kl_loss,
@@ -126,7 +130,11 @@ class VAE(torch.nn.Module):
         encoder_output = self.encode(features, padding_mask, **kwargs)
 
         # Handle cases where VQ is disabled or parts are missing
-        if encoder_output.quantized is None and encoder_output.residual is None and encoder_output.tail is None:
+        if (
+            encoder_output.quantized is None
+            and encoder_output.residual is None
+            and encoder_output.tail is None
+        ):
             context_vector = encoder_output.z
         else:
             context_vector = torch.zeros_like(encoder_output.z)
