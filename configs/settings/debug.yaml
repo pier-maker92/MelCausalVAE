@@ -56,7 +56,7 @@ encoder:
     reset_dead_codes: true
     reset_every_forward: 10
     residual_and_tail_dropout_p: 0.2  # (was vq_residual_dropout)
-    dim_to_quantize: 64
+    dim_to_quantize: 32
     use_ema_codebook: false
 
   # --- Dropout Config ---

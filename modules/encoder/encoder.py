@@ -119,9 +119,6 @@ class Encoder(SigmaVAEEncoder):
         padding_mask: Optional[torch.BoolTensor] = None,
         **kwargs,
     ):
-        drop_res_and_tail = (
-            random.random() < self.residual_and_tail_dropout_p and self.training
-        )
         # x: [B, T, 100]
         x = x.transpose(1, 2)  # [B, 100, T]
         x = self.in_proj(x)  # [B, d_model//2, T]
@@ -162,15 +159,28 @@ class Encoder(SigmaVAEEncoder):
                 global_step=kwargs.get("step", None),
             )
 
-            mu_stoch = torch.cat([vq_out.residual, mu_tail], dim=-1)
+            mu_stoch = torch.cat([torch.zeros_like(mu_head), mu_tail], dim=-1)
 
             vq_quantized_ste = mu_head + (vq_out.quantized - mu_head).detach()
             z_quantized = torch.cat(
                 [vq_quantized_ste, torch.zeros_like(mu_tail)], dim=-1
             )
 
-        z_stoch = self.reparameterize(mu_stoch, logvar)
-        z = z_quantized if drop_res_and_tail else z_quantized + z_stoch
+            logvar_tail = logvar[..., qd:] if logvar is not None else None
+            z_stoch_tail = self.reparameterize(mu_tail, logvar_tail)
+            z_stoch = torch.cat([torch.zeros_like(mu_head), z_stoch_tail], dim=-1)
+        else:
+            z_stoch = self.reparameterize(mu_stoch, logvar)
+
+        # dropout per sample
+        if self.training and getattr(self, "residual_and_tail_dropout_p", 0.0) > 0.0:
+            B = z_stoch.shape[0]
+            keep_mask = (torch.rand(B, 1, 1, device=z_stoch.device) >= self.residual_and_tail_dropout_p).to(
+                z_stoch.dtype
+            )
+            z = z_quantized + z_stoch * keep_mask
+        else:
+            z = z_quantized + z_stoch
 
         mu = mu_stoch
         kl_loss = None
@@ -178,12 +188,23 @@ class Encoder(SigmaVAEEncoder):
             if hasattr(self, "kl_chunk_regularizer"):
                 kl_term = self.kl_chunk_regularizer(mu, logvar, padding_mask)
             else:
-                kl_term = self.kl_divergence(
-                    mu,
-                    logvar,
-                    padding_mask,
-                    dtype=z.dtype,
-                )
+                if hasattr(self, "vq"):
+                    qd = self.config.vq_config.dim_to_quantize
+                    mu_tail = mu[..., qd:]
+                    logvar_tail = logvar[..., qd:] if logvar is not None else None
+                    kl_term = self.kl_divergence(
+                        mu_tail,
+                        logvar_tail,
+                        padding_mask,
+                        dtype=z.dtype,
+                    )
+                else:
+                    kl_term = self.kl_divergence(
+                        mu,
+                        logvar,
+                        padding_mask,
+                        dtype=z.dtype,
+                    )
             kl_loss = kl_term * self.get_kl_cosine_schedule(kwargs["step"])
 
         out = {
@@ -198,12 +219,8 @@ class Encoder(SigmaVAEEncoder):
             out["vq_stats"] = vq_out.stats
             out["vq_loss"] = vq_out.loss
             out["quantized"] = z_quantized
-            out["residual"] = torch.cat(
-                [vq_out.residual, torch.zeros_like(mu_tail)], dim=-1
-            )
-            out["tail"] = torch.cat(
-                [torch.zeros_like(vq_out.residual), mu_tail], dim=-1
-            )
+            out["residual"] = torch.zeros_like(z_quantized)
+            out["tail"] = torch.cat([torch.zeros_like(mu_head), mu_tail], dim=-1)
 
         return EncoderOutput(**out)
 

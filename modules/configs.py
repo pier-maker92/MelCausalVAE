@@ -14,6 +14,7 @@ class SigmaVAEencoderConfig:
     logvar_layer: bool = False
     kl_loss_weight: float = 1e-5
     kl_loss_warmup_steps: Optional[int] = None
+    kl_loss_warmup_ratio: Optional[float] = None
     use_sofplus: bool = False
 
 
@@ -27,12 +28,18 @@ class DropoutConfig(RegularizationConfig):
     dropout_start: float = 0.0
     dropout_end: float = 0.8
     dropout_hierarchical: bool = False  # independent dropout for each chunk
+    strategy: str = "linear"  # linear | sigmoid
+    k: float = 1.0
+    x0: float = 0.0
 
 
 @dataclass
 class KLChunkRegularizer(RegularizationConfig):
     kl_weight_start: float = 1e-10
     kl_weight_end: float = 1e-4
+    strategy: str = "linear"  # linear | sigmoid
+    k: float = 1.0
+    x0: float = 0.0
 
 
 @dataclass

@@ -8,12 +8,13 @@ import numpy as np
 from tqdm import tqdm
 from collections import defaultdict
 from torch.utils.data import DataLoader
-from datasets import load_dataset, concatenate_datasets
+from datasets import load_dataset, concatenate_datasets, Audio
 from modules.feature_extractor import FeatureExtractor, MelSpectrogramConfig
 from data.audio_dataset import SimpleAudioDataset, DataCollator, TrainDatasetWrapper
 
-# Specify custom cache directory
-parquet_dir = "/home/ec2-user/data"
+# Determine dataset root from SLURM_TMPDIR or fallback
+slurm_tmpdir = os.environ.get("SLURM_TMPDIR", "/home/ec2-user/data")
+dataset_root = os.path.join(slurm_tmpdir, "datasets/libritts")
 # import mel spec encoder
 mel_spec_encoder = FeatureExtractor(config=MelSpectrogramConfig())
 
@@ -25,19 +26,61 @@ def simple_collate_fn(batch):
 class LibriTTS(SimpleAudioDataset):
     def __init__(self):
         super().__init__()
-        # Load the two datasets
-        dataset = load_dataset(
-            "parquet",
-            data_dir=f"{parquet_dir}/libritts",
-        )
+        
+        # Standard LibriTTS extraction usually creates a LibriTTS/ subdirectory
+        global dataset_root
+        current_dataset_root = dataset_root
+        if os.path.exists(os.path.join(current_dataset_root, "LibriTTS")):
+            current_dataset_root = os.path.join(current_dataset_root, "LibriTTS")
+            
+        print(f"Loading LibriTTS from: {current_dataset_root}")
+        
+        if not os.path.exists(current_dataset_root):
+            raise FileNotFoundError(f"Dataset directory not found: {current_dataset_root}")
+
+        # Find available subsets (folders like train-clean-100, dev-clean, test-clean, etc.)
+        subsets = [d for d in os.listdir(current_dataset_root) 
+                  if os.path.isdir(os.path.join(current_dataset_root, d)) 
+                  and not d.startswith(".")]
+        
+        dataset_dict = {}
+        if not subsets:
+            print("No subdirectories found, attempting to load as a single audiofolder dataset.")
+            dataset_dict["train"] = load_dataset("audiofolder", data_dir=current_dataset_root, split="train")
+        else:
+            for subset in subsets:
+                if subset == "test-other":
+                    continue             
+                destination = self._partition_to_destination(subset)
+                if destination:
+                    print(f"Loading subset: {subset} -> destination: {destination}")
+                    ds = load_dataset(
+                        "audiofolder",
+                        data_dir=os.path.join(current_dataset_root, subset),
+                        split="train"
+                    )
+                    # Remove 'label' column (speaker IDs) to avoid concatenation errors
+                    if "label" in ds.column_names:
+                        ds = ds.remove_columns("label")
+
+                    # Add an 'id' field if it's missing, using the filename
+                    if "id" not in ds.column_names:
+                        # Disable decoding temporarily: this avoids 'torchcodec' errors and saves RAM
+                        ds = ds.cast_column("audio", Audio(decode=False))
+                        ds = ds.map(
+                            lambda x: {"id": os.path.basename(x["audio"]["path"])}, 
+                            num_proc=min(os.cpu_count(), 8)
+                        )
+                        # Re-enable decoding for training
+                        ds = ds.cast_column("audio", Audio(decode=True))
+                    dataset_dict[subset] = ds
+
         partitions_per_destination = defaultdict(list)
-        for partition in dataset:
-            print(
-                f"partition: {partition}, destination: {self._partition_to_destination(partition)}"
-            )
-            partitions_per_destination[
-                self._partition_to_destination(partition)
-            ].append(dataset[partition])
+        for partition in dataset_dict:
+            destination = self._partition_to_destination(partition)
+            if destination:
+                print(f"partition: {partition}, destination: {destination}")
+                partitions_per_destination[destination].append(dataset_dict[partition])
 
         for destination in partitions_per_destination:
             setattr(
@@ -47,10 +90,12 @@ class LibriTTS(SimpleAudioDataset):
             )
 
     def _partition_to_destination(self, partition_name):
-        if partition_name in ["train", "validation"]:
+        # Map original LibriTTS subset names to our train/test splits
+        if "train" in partition_name or "dev" in partition_name or partition_name == "validation":
             return "train"
-        elif partition_name in ["test"]:
+        elif "test" in partition_name:
             return "test"
+        return None
 
 
 # parser = argparse.ArgumentParser()
@@ -61,11 +106,7 @@ class LibriTTS(SimpleAudioDataset):
 # if __name__ == "__main__":
 #     # data collator
 #     data_collator = DataCollator()
-<<<<<<< HEAD
-#     dataset = DatasetWrapper(LibriTTS(), "train")
-=======
 #     dataset = TrainDatasetWrapper(LibriTTS(), "train")
->>>>>>> origin/main
 #     dataloader = DataLoader(
 #         dataset,
 #         batch_size=args.batch_size,

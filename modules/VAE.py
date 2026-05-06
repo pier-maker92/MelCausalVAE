@@ -124,13 +124,18 @@ class VAE(torch.nn.Module):
         # Encode audio to mel spectrogram
         features, padding_mask = self.extract_features(audios_srs, **kwargs)
         encoder_output = self.encode(features, padding_mask, **kwargs)
-        context_vector = torch.zeros_like(encoder_output.z)
-        if kwargs.get("quantized", True):
-            context_vector += encoder_output.quantized
-        if kwargs.get("residual", True):
-            context_vector += encoder_output.residual
-        if kwargs.get("tail", True):
-            context_vector += encoder_output.tail
+
+        # Handle cases where VQ is disabled or parts are missing
+        if encoder_output.quantized is None and encoder_output.residual is None and encoder_output.tail is None:
+            context_vector = encoder_output.z
+        else:
+            context_vector = torch.zeros_like(encoder_output.z)
+            if kwargs.get("quantized", True) and encoder_output.quantized is not None:
+                context_vector += encoder_output.quantized
+            if kwargs.get("residual", True) and encoder_output.residual is not None:
+                context_vector += encoder_output.residual
+            if kwargs.get("tail", True) and encoder_output.tail is not None:
+                context_vector += encoder_output.tail
 
         reconstructed_mel, reconstructed_padding_mask = self.sample(
             num_steps=num_steps,

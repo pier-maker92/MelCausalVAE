@@ -17,6 +17,9 @@ class DropoutRegularizer(nn.Module):
         self.dropout_end = config.dropout_end
         self.chunk_size = config.chunk_size
         self.dropout_hierarchical = config.dropout_hierarchical
+        self.strategy = getattr(config, "strategy", "linear")
+        self.k = getattr(config, "k", 1.0)
+        self.x0 = getattr(config, "x0", 0.0)
 
     def _latent_chunk_dropout_probs_per_chunk(
         self, num_chunks: int, device: torch.device, dtype: torch.dtype
@@ -26,13 +29,38 @@ class DropoutRegularizer(nn.Module):
             raise ValueError("num_chunks must be positive")
         if num_chunks == 1:
             return torch.tensor([self.dropout_start], device=device, dtype=dtype)
-        return torch.linspace(
-            self.dropout_start,
-            self.dropout_end,
-            num_chunks,
-            device=device,
-            dtype=dtype,
-        )
+
+        if self.strategy == "linear":
+            return torch.linspace(
+                self.dropout_start,
+                self.dropout_end,
+                num_chunks,
+                device=device,
+                dtype=dtype,
+            )
+        elif self.strategy == "sigmoid":
+            x = torch.linspace(0.0, 1.0, num_chunks, device=device, dtype=dtype)
+            # Raw sigmoid
+            s = 1.0 / (1.0 + torch.exp(-self.k * (x - self.x0)))
+            # Normalize s to [0, 1]
+            s0 = 1.0 / (
+                1.0
+                + torch.exp(torch.tensor(self.k * self.x0, device=device, dtype=dtype))
+            )
+            s1 = 1.0 / (
+                1.0
+                + torch.exp(
+                    -torch.tensor(self.k * (1.0 - self.x0), device=device, dtype=dtype)
+                )
+            )
+            s = (s - s0) / (s1 - s0)
+            probs = self.dropout_start + (self.dropout_end - self.dropout_start) * s
+        else:
+            raise ValueError(f"Unknown strategy: {self.strategy!r}")
+
+        # Ensure first chunk is NEVER dropped
+        probs[0] = 0.0
+        return probs
 
     def forward(self, z: torch.FloatTensor) -> torch.Tensor:
         """
@@ -71,9 +99,31 @@ class DropoutRegularizer(nn.Module):
         if n_starts == 1:
             w = torch.tensor([1.0], device=device, dtype=torch.float32)
         else:
-            # s = 1 + k for k = 0 .. n_starts-1; weight linear in k
-            k = torch.arange(n_starts, device=device, dtype=torch.float32)
-            t = k / max(n_starts - 1, 1)
+            # s = 1 + k for k = 0 .. n_starts-1; weight linear or sigmoid in k
+            k_idx = torch.arange(n_starts, device=device, dtype=torch.float32)
+            if self.strategy == "linear":
+                t = k_idx / max(n_starts - 1, 1)
+            elif self.strategy == "sigmoid":
+                x_norm = k_idx / max(n_starts - 1, 1)
+                # Raw sigmoid
+                s_raw = 1.0 / (
+                    1.0
+                    + torch.exp(
+                        -torch.tensor(self.k, device=device) * (x_norm - self.x0)
+                    )
+                )
+                # Normalize s to [0, 1]
+                s0 = 1.0 / (
+                    1.0 + torch.exp(torch.tensor(self.k * self.x0, device=device))
+                )
+                s1 = 1.0 / (
+                    1.0
+                    + torch.exp(-torch.tensor(self.k * (1.0 - self.x0), device=device))
+                )
+                t = (s_raw - s0) / (s1 - s0)
+            else:
+                raise ValueError(f"Unknown strategy: {self.strategy!r}")
+
             w = self.dropout_start + (self.dropout_end - self.dropout_start) * t
             w = torch.clamp(w, min=0.0)
 
@@ -110,6 +160,9 @@ class KLChunkRegularizer(nn.Module):
         self.kl_end = config.kl_weight_end
         self.chunk_size = config.chunk_size
         self.vq_quant_dim = vq_quant_dim
+        self.strategy = getattr(config, "strategy", "linear")
+        self.k = getattr(config, "k", 1.0)
+        self.x0 = getattr(config, "x0", 0.0)
 
     def latent_chunk_kl_weights(
         self,
@@ -117,7 +170,12 @@ class KLChunkRegularizer(nn.Module):
         device: torch.device,
         dtype: torch.dtype,
     ) -> torch.Tensor:
-        """[latent_dim] KL weights: first `zero_chunks` are 0, then linear from `weight_start` to `weight_end`."""
+        """[latent_dim] KL weights: first `zero_chunks` are 0, then scaled from `weight_start` to `weight_end`.
+
+        - strategy='linear': weights grow linearly from kl_start to kl_end over the active chunks.
+        - strategy='sigmoid': weights follow a sigmoid over x in [0, 1] (normalized chunk position
+          within the active region), scaled to [kl_start, kl_end]. k controls steepness, x0 the inflection point.
+        """
         _assert_latent_chunks_divisible(latent_dim, self.chunk_size)
         n_chunks = latent_dim // self.chunk_size
         zero_chunks = (
@@ -130,9 +188,41 @@ class KLChunkRegularizer(nn.Module):
             raise ValueError(
                 f"zero_chunks ({zero_chunks}) must be less than n_chunks ({n_chunks})"
             )
-        weights[zero_chunks:] = torch.linspace(
-            self.kl_start, self.kl_end, n_active, device=device, dtype=dtype
-        )
+        if self.strategy == "linear":
+            weights[zero_chunks:] = torch.linspace(
+                self.kl_start, self.kl_end, n_active, device=device, dtype=dtype
+            )
+        elif self.strategy == "sigmoid":
+            # x normalized in [0, 1] over the active (non-VQ) chunks
+            if n_active > 1:
+                x = torch.linspace(0.0, 1.0, n_active, device=device, dtype=dtype)
+                # Raw sigmoid
+                s = 1.0 / (1.0 + torch.exp(-self.k * (x - self.x0)))
+                # Normalize s to [0, 1]
+                s0 = 1.0 / (
+                    1.0
+                    + torch.exp(
+                        torch.tensor(self.k * self.x0, device=device, dtype=dtype)
+                    )
+                )
+                s1 = 1.0 / (
+                    1.0
+                    + torch.exp(
+                        -torch.tensor(
+                            self.k * (1.0 - self.x0), device=device, dtype=dtype
+                        )
+                    )
+                )
+                s = (s - s0) / (s1 - s0)
+            else:
+                x = torch.zeros(1, device=device, dtype=dtype)
+                s = torch.zeros(1, device=device, dtype=dtype)
+
+            weights[zero_chunks:] = self.kl_start + (self.kl_end - self.kl_start) * s
+        else:
+            raise ValueError(
+                f"Unknown strategy: {self.strategy!r}. Choose 'linear' or 'sigmoid'."
+            )
 
         return weights.repeat_interleave(self.chunk_size)
 

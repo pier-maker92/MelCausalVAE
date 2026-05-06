@@ -1,4 +1,5 @@
 from data.audio_dataset import TestDatasetWrapper
+import math
 import os
 import wandb
 import torch
@@ -55,6 +56,32 @@ class AddGranularLossesToTrainerState(TrainerCallback):
         return control
 
 
+class KLWarmupRatioCallback(TrainerCallback):
+    """Resolves kl_loss_warmup_ratio into kl_loss_warmup_steps at training start."""
+
+    def on_train_begin(
+        self,
+        args: TrainingArguments,
+        state: TrainerState,
+        control: TrainerControl,
+        **kwargs,
+    ):
+        model = kwargs.get("model", None)
+        if model is None or not hasattr(model, "encoder"):
+            return control
+
+        enc_cfg = model.encoder.config
+        ratio = getattr(enc_cfg, "kl_loss_warmup_ratio", None)
+        if ratio is not None:
+            warmup_steps = int(state.max_steps * ratio)
+            enc_cfg.kl_loss_warmup_steps = warmup_steps
+            logger.info(
+                f"KLWarmupRatioCallback: kl_loss_warmup_ratio={ratio} "
+                f"-> kl_loss_warmup_steps={warmup_steps} (max_steps={state.max_steps})"
+            )
+        return control
+
+
 class VAEtrainer(Trainer):
     def __init__(self, dataset_name: str = "dataset", **kwargs):
         self.generate_and_log_samples = kwargs.pop("generate_and_log_samples", False)
@@ -66,8 +93,12 @@ class VAEtrainer(Trainer):
         self.run_id = kwargs.pop("run_id", "default_run")
         self.encoder_lr = kwargs.pop("encoder_lr", None)
         self.decoder_lr = kwargs.pop("decoder_lr", None)
+        self.encoder_min_lr = kwargs.pop("encoder_min_lr", None)
+        self.decoder_min_lr = kwargs.pop("decoder_min_lr", None)
         self.encoder_warmup_ratio = kwargs.pop("encoder_warmup_ratio", None)
         self.decoder_warmup_ratio = kwargs.pop("decoder_warmup_ratio", None)
+        self.vq_collapse_threshold = kwargs.pop("vq_collapse_threshold", 0.5)
+        self.vq_collapse_patience = kwargs.pop("vq_collapse_patience", None)
         super().__init__(**kwargs)
         self.dataset_name = dataset_name
         self._vocoder = None
@@ -89,6 +120,7 @@ class VAEtrainer(Trainer):
                 ]
             )
         self.add_callback(AddGranularLossesToTrainerState(granular_losses))
+        self.add_callback(KLWarmupRatioCallback())
 
     def create_optimizer(self):
         """
@@ -129,49 +161,66 @@ class VAEtrainer(Trainer):
 
     def create_scheduler(self, num_training_steps: int, optimizer=None):
         """
-        Setup the scheduler. Support for differential warmup ratios for encoder and decoder.
+        Setup the scheduler. Support for differential warmup ratios and cosine annealing
+        with different minimum learning rates for encoder and decoder.
         """
-        if self.encoder_warmup_ratio is not None or self.decoder_warmup_ratio is not None:
+        if optimizer is None:
+            optimizer = self.optimizer
+
+        use_cosine = self.args.lr_scheduler_type == "cosine"
+        has_warmup = self.encoder_warmup_ratio is not None or self.decoder_warmup_ratio is not None
+
+        if has_warmup or use_cosine:
             logger.info(
-                f"Setting up differential warmup scheduler: "
-                f"encoder_warmup_ratio: {self.encoder_warmup_ratio}, "
-                f"decoder_warmup_ratio: {self.decoder_warmup_ratio}"
+                f"Setting up differential LambdaLR scheduler (cosine: {use_cosine}): "
+                f"encoder_warmup: {self.encoder_warmup_ratio}, "
+                f"decoder_warmup: {self.decoder_warmup_ratio}"
             )
             
             enc_warmup_steps = int(num_training_steps * (self.encoder_warmup_ratio or 0.0))
             dec_warmup_steps = int(num_training_steps * (self.decoder_warmup_ratio or 0.0))
 
-            def enc_lambda(current_step):
-                if current_step < enc_warmup_steps:
-                    return float(current_step) / float(max(1, enc_warmup_steps))
-                return 1.0
+            encoder_lr = self.encoder_lr if self.encoder_lr is not None else self.args.learning_rate
+            decoder_lr = self.decoder_lr if self.decoder_lr is not None else self.args.learning_rate
 
-            def dec_lambda(current_step):
-                if current_step < dec_warmup_steps:
-                    return float(current_step) / float(max(1, dec_warmup_steps))
-                return 1.0
+            enc_min_lr = self.encoder_min_lr if self.encoder_min_lr is not None else self.min_learning_rate
+            dec_min_lr = self.decoder_min_lr if self.decoder_min_lr is not None else self.min_learning_rate
+
+            def get_lr_lambda(current_step, warmup_steps, initial_lr, min_lr):
+                # 1. Warmup phase
+                if current_step < warmup_steps:
+                    return float(current_step) / float(max(1, warmup_steps))
+                
+                # 2. Constant phase if no cosine decay
+                if not use_cosine:
+                    return 1.0
+                    
+                # 3. Cosine annealing phase
+                progress = float(current_step - warmup_steps) / float(max(1, num_training_steps - warmup_steps))
+                progress = min(1.0, max(0.0, progress))
+                
+                min_lr_ratio = min_lr / initial_lr if initial_lr > 0 else 0.0
+                cosine_decay = 0.5 * (1.0 + math.cos(math.pi * progress))
+                
+                return min_lr_ratio + (1.0 - min_lr_ratio) * cosine_decay
+
+            enc_lambda = lambda step: get_lr_lambda(step, enc_warmup_steps, encoder_lr, enc_min_lr)
+            dec_lambda = lambda step: get_lr_lambda(step, dec_warmup_steps, decoder_lr, dec_min_lr)
 
             self.lr_scheduler = torch.optim.lr_scheduler.LambdaLR(
                 optimizer, [enc_lambda, dec_lambda]
             )
             return self.lr_scheduler
 
-        # Default to Trainer's native scheduler (which will be 'constant' by default now)
-        # unless 'cosine' is explicitly requested.
-        if self.args.lr_scheduler_type != "cosine":
-            return super().create_scheduler(num_training_steps, optimizer)
-
-        if optimizer is None:
-            optimizer = self.optimizer
-        self.lr_scheduler = CosineAnnealingLR(
-            optimizer,
-            T_max=num_training_steps,
-            eta_min=self.min_learning_rate,
-        )
-        return self.lr_scheduler
+        # Default fallback
+        return super().create_scheduler(num_training_steps, optimizer)
 
     def save_model(self, output_dir=None, _internal_call=False):
         super().save_model(output_dir, _internal_call)
+
+        # Solo il processo principale (Rank 0) deve salvare il file di configurazione
+        if not self.args.should_save:
+            return
 
         # Save VAEConfig alongside the model
         if output_dir is None:
@@ -278,6 +327,9 @@ class VAEtrainer(Trainer):
                     grad_norm if isinstance(grad_norm, float) else grad_norm.item()
                 )
 
+            if "vq_codes_used_frac" in logs:
+                self.state.latest_vq_codes_used_frac = logs["vq_codes_used_frac"]
+
             self._total_loss_scalar += tr_loss_scalar
             self._globalstep_last_logged = self.state.global_step
             self.store_flos()
@@ -289,8 +341,34 @@ class VAEtrainer(Trainer):
             metrics = self.evaluate(ignore_keys=ignore_keys_for_eval)
             self._report_to_hp_search(trial, self.state.global_step, metrics)
 
+            # Check for collapse
+            vq_frac = getattr(self.state, "latest_vq_codes_used_frac", 1.0)
+            if vq_frac < self.vq_collapse_threshold:
+                if not hasattr(self.state, "vq_collapse_counter"):
+                    self.state.vq_collapse_counter = 0
+                self.state.vq_collapse_counter += 1
+                
+                if self.args.process_index == 0:
+                    logger.warning(
+                        f"VQ Collapse detected (fraction {vq_frac} < {self.vq_collapse_threshold}). "
+                        f"Patience: {self.state.vq_collapse_counter}/{self.vq_collapse_patience or 'Infinity'}"
+                    )
+                
+                if self.vq_collapse_patience is not None and self.state.vq_collapse_counter >= self.vq_collapse_patience:
+                    if self.args.process_index == 0:
+                        logger.error(f"Training stopped due to VQ collapse after {self.vq_collapse_patience} evaluations.")
+                    self.control.should_training_stop = True
+            else:
+                self.state.vq_collapse_counter = 0
+
         if self.control.should_save:
-            self._save_checkpoint(model, trial)  # metrics=metrics
+            vq_frac = getattr(self.state, "latest_vq_codes_used_frac", 1.0)
+            if vq_frac < self.vq_collapse_threshold:
+                if self.args.process_index == 0:
+                    logger.warning(f"Skipping save! vq_codes_used_frac ({vq_frac}) is below threshold ({self.vq_collapse_threshold}).")
+            else:
+                self._save_checkpoint(model, trial)  # metrics=metrics
+                
             self.control = self.callback_handler.on_save(
                 self.args, self.state, self.control
             )
@@ -593,7 +671,11 @@ def main(cfg: DictConfig):
     # Set seed for reproducibility
     set_seed(training_cfg.get("seed", 42))
 
-    accelerator = Accelerator()
+    from accelerate import InitProcessGroupKwargs
+
+    # Increase timeout to 2 hours for lengthy evaluation on Rank 0
+    kwargs = InitProcessGroupKwargs(timeout=datetime.timedelta(seconds=7200))
+    accelerator = Accelerator(kwargs_handlers=[kwargs])
     logger.info(f"Using device: {accelerator.device}")
     logger.info(f"Mixed precision: {accelerator.state.mixed_precision}")
 
@@ -640,6 +722,10 @@ def main(cfg: DictConfig):
     early_stopping_patience = training_cfg.pop("early_stopping_patience", None)
     generate_and_log_samples = training_cfg.pop("generate_and_log_samples", True)
     eval_num_samples = training_cfg.pop("eval_num_samples", 100)
+    vq_collapse_threshold = float(training_cfg.pop("vq_collapse_threshold", 0.5))
+    vq_collapse_patience = training_cfg.pop("vq_collapse_patience", None)
+    if vq_collapse_patience is not None:
+        vq_collapse_patience = int(vq_collapse_patience)
 
     # Check for DeepSpeed config in training_cfg
     if "deepspeed" in training_cfg and training_cfg["deepspeed"]:
@@ -656,22 +742,30 @@ def main(cfg: DictConfig):
     # Extract optional differential learning rates and warmup ratios
     encoder_lr = training_cfg.pop("encoder_lr", None)
     decoder_lr = training_cfg.pop("decoder_lr", None)
+    encoder_min_lr = training_cfg.pop("encoder_min_lr", None)
+    decoder_min_lr = training_cfg.pop("decoder_min_lr", None)
     encoder_warmup_ratio = training_cfg.pop("encoder_warmup_ratio", None)
     decoder_warmup_ratio = training_cfg.pop("decoder_warmup_ratio", None)
     
     if encoder_lr is not None: encoder_lr = float(encoder_lr)
     if decoder_lr is not None: decoder_lr = float(decoder_lr)
+    if encoder_min_lr is not None: encoder_min_lr = float(encoder_min_lr)
+    if decoder_min_lr is not None: decoder_min_lr = float(decoder_min_lr)
     if encoder_warmup_ratio is not None: encoder_warmup_ratio = float(encoder_warmup_ratio)
     if decoder_warmup_ratio is not None: decoder_warmup_ratio = float(decoder_warmup_ratio)
 
     # Create unique run ID for evaluation outputs
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_name = wandb_run_name or "run"
-    run_id = f"{run_name}_{timestamp}"
+    # If run_id is provided via command line (run_job.sh), use it.
+    run_id = training_cfg.pop("run_id", None)
+    if run_id is None:
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        run_name = wandb_run_name or "run"
+        run_id = f"{run_name}_{timestamp}"
 
     # Setup training arguments
     training_args = TrainingArguments(
         remove_unused_columns=False,  # Don't let Trainer auto-remove columns
+        ddp_timeout=7200,             # 2 hours timeout for long evaluation on Rank 0
         **training_cfg,
     )
     logger.info(f"TrainingArgs bf16 enabled: {training_args.bf16}")
@@ -691,8 +785,12 @@ def main(cfg: DictConfig):
         run_id=run_id,
         encoder_lr=encoder_lr,
         decoder_lr=decoder_lr,
+        encoder_min_lr=encoder_min_lr,
+        decoder_min_lr=decoder_min_lr,
         encoder_warmup_ratio=encoder_warmup_ratio,
         decoder_warmup_ratio=decoder_warmup_ratio,
+        vq_collapse_threshold=vq_collapse_threshold,
+        vq_collapse_patience=vq_collapse_patience,
     )
 
     # Add Early Stopping if enabled

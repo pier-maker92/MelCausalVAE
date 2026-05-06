@@ -45,3 +45,4 @@ training:
   dataset_name: null
   generate_and_log_samples: false
   eval_num_samples: 100
+  run_id: null

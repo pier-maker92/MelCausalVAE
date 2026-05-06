@@ -45,7 +45,7 @@ class SigmaVAEEncoder(nn.Module):
         mu_valid = mu[~padding_mask].to(dtype)
         logvar_valid = logvar[~padding_mask].to(dtype)
         kl = -0.5 * torch.sum(1 + logvar_valid - mu_valid.pow(2) - logvar_valid.exp())
-        return kl.to(mu.dtype)
+        return kl.to(mu.dtype) * self.kl_loss_weight
 
     def kl_divergence_weighted(
         self,
@@ -93,13 +93,13 @@ class SigmaVAEEncoder(nn.Module):
     def get_kl_cosine_schedule(self, step):
         """
         Returns the scaled KL loss weight following a cosine schedule
-        ranging from 0 to self.kl_loss_weight over total_steps.
-        Once step surpasses total_steps, stays at self.kl_loss_weight.
+        ranging from 0 to 1 over total_steps.
+        Once step surpasses total_steps, stays at 1.
         """
-        if self.config.kl_loss_warmup_steps == 0:
-            return self.kl_loss_weight
+        if self.config.kl_loss_warmup_steps is None or self.config.kl_loss_warmup_steps == 0:
+            return 1.0
         if step >= self.config.kl_loss_warmup_steps:
-            return self.kl_loss_weight
+            return 1.0
         # Cosine schedule: start at 0, increase to kl_loss_weight in total_steps
         cosine = 0.5 * (1 - math.cos(math.pi * step / self.config.kl_loss_warmup_steps))
-        return self.kl_loss_weight * cosine
+        return cosine

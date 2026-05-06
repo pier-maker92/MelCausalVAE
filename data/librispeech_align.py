@@ -14,7 +14,8 @@ from data.audio_dataset import SimpleAudioDataset, DataCollator, TrainDatasetWra
 from modules.feature_extractor import FeatureExtractor, MelSpectrogramConfig
 
 # Specify custom cache directory
-parquet_dir = "dataset/librispeech-aligned"
+SLURM_TMPDIR = os.getenv("SLURM_TMPDIR")
+parquet_dir = f"{SLURM_TMPDIR}/datasets/librispeech-aligned"
 # import mel spec encoder
 mel_spec_encoder = FeatureExtractor(config=MelSpectrogramConfig())
 
@@ -27,14 +28,17 @@ class LibriSpeechAlignDataset(SimpleAudioDataset):
     def __init__(self, languages: Optional[List[str]] = None):
         super().__init__()
         # Load the two datasets
-        # dataset = load_dataset(
-        #     "parquet",
-        #     data_dir=f"{parquet_dir}/librispeech-aligned",
-        # )
         dataset = load_dataset(
             "parquet",
-            data_files={"train": f"{parquet_dir}/train_clean_100/*.parquet"},
+            data_dir=f"{parquet_dir}",
         )
+        # dataset = load_dataset(
+        #     "parquet",
+        #     data_files={
+        #         "train": f"{parquet_dir}/train_clean_100/*.parquet",
+        #         "dev": f"{parquet_dir}/dev_clean/*.parquet",
+        #     },
+        # )
         partitions_per_destination = defaultdict(list)
         for partition in dataset:
             print(
@@ -52,9 +56,9 @@ class LibriSpeechAlignDataset(SimpleAudioDataset):
             )
 
     def _partition_to_destination(self, partition_name):
-        if partition_name in ["train", "validation"]:
+        if partition_name in ["train"]:
             return "train"
-        elif partition_name in ["test"]:
+        else:
             return "test"
 
     # def __len__(self):

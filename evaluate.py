@@ -99,9 +99,13 @@ def run_evaluation(
     # Load or initialize GT cache
     gt_cache = {}
     if gt_cache_path.exists():
-        with open(gt_cache_path, "r") as f:
-            gt_cache = json.load(f)
-        logger.info(f"Loaded ground truth cache from {gt_cache_path}")
+        try:
+            with open(gt_cache_path, "r") as f:
+                gt_cache = json.load(f)
+            logger.info(f"Loaded ground truth cache from {gt_cache_path}")
+        except Exception as e:
+            logger.warning(f"Failed to load ground truth cache (it might be corrupted or being written to): {e}")
+            gt_cache = {}
 
     # Initialize predictors
     utmos_predictor = UTMOSPredictor(device)
@@ -111,7 +115,7 @@ def run_evaluation(
     processed_count = 0
 
     # Temporary directory for UTMOS if needed
-    temp_wav_dir = eval_dir / "temp_wavs"
+    temp_wav_dir = eval_dir / "temp_wavs" / run_id
     temp_wav_dir.mkdir(parents=True, exist_ok=True)
 
     logger.info(f"Starting evaluation on {num_samples} samples...")
@@ -231,9 +235,14 @@ def run_evaluation(
             if gt_wav_tmp.exists():
                 gt_wav_tmp.unlink()
 
-    # Save GT cache
-    with open(gt_cache_path, "w") as f:
-        json.dump(gt_cache, f, indent=4)
+    # Save GT cache robustly
+    try:
+        temp_gt_cache_path = gt_cache_path.with_suffix(".tmp")
+        with open(temp_gt_cache_path, "w") as f:
+            json.dump(gt_cache, f, indent=4)
+        temp_gt_cache_path.replace(gt_cache_path)
+    except Exception as e:
+        logger.warning(f"Failed to save ground truth cache: {e}")
 
     # Aggregate results
     df = pd.DataFrame(samples_metrics)
@@ -259,4 +268,15 @@ def run_evaluation(
         logger.warning("wandb.run is None, metrics table not logged to WandB")
 
     logger.info(f"Evaluation complete. Results saved to {csv_path}")
+
+    # Cleanup temp directory
+    try:
+        if temp_wav_dir.exists():
+            # Remove all files just in case some were left behind
+            for f in temp_wav_dir.glob("*"):
+                f.unlink()
+            temp_wav_dir.rmdir()
+    except Exception as e:
+        logger.warning(f"Failed to cleanup temp_wav_dir {temp_wav_dir}: {e}")
+
     return summary_metrics
