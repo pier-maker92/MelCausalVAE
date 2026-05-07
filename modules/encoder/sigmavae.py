@@ -19,11 +19,14 @@ class SigmaVAEEncoder(nn.Module):
         pass
 
     def reparameterize(
-        self, mu: torch.FloatTensor, logvar: Optional[torch.FloatTensor] = None
+        self,
+        mu: torch.FloatTensor,
+        logvar: Optional[torch.FloatTensor] = None,
+        std: Optional[float] = None,
     ) -> torch.FloatTensor:
         eps = torch.randn_like(mu)
         if logvar is None:
-            std = self.sample_scalar_std(mu)
+            std = self.sample_scalar_std(mu, std)
             while std.dim() < mu.dim():
                 std = std.unsqueeze(-1)
         else:
@@ -70,11 +73,14 @@ class SigmaVAEEncoder(nn.Module):
         kl_elem = -0.5 * (1 + logvar_f - mu_f.pow(2) - logvar_f.exp())
         return (kl_elem * w * valid).sum().to(mu.dtype)
 
-    def sample_scalar_std(self, mu: torch.FloatTensor) -> torch.FloatTensor:
-        return self.std_activation(
+    def sample_scalar_std(
+        self, mu: torch.FloatTensor, std: Optional[float] = None
+    ) -> torch.FloatTensor:
+        weight = self.std_activation(
             torch.randn(mu.shape[0], mu.shape[1], dtype=mu.dtype, device=mu.device)
-            * self.config.target_std
+            * (self.config.target_std if std is None else std)
         )
+        return torch.clamp(weight, min=-2 * std, max=2 * std)
 
     def _resize_padding_mask(
         self, padding_mask: torch.BoolTensor, target_length: int, dtype: torch.dtype
@@ -96,7 +102,10 @@ class SigmaVAEEncoder(nn.Module):
         ranging from 0 to 1 over total_steps.
         Once step surpasses total_steps, stays at 1.
         """
-        if self.config.kl_loss_warmup_steps is None or self.config.kl_loss_warmup_steps == 0:
+        if (
+            self.config.kl_loss_warmup_steps is None
+            or self.config.kl_loss_warmup_steps == 0
+        ):
             return 1.0
         if step >= self.config.kl_loss_warmup_steps:
             return 1.0

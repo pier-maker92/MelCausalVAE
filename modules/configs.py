@@ -54,6 +54,7 @@ class VQConfig:
     ema_epsilon: float = 1e-5
     dim_to_quantize: Optional[int] = None
     residual_and_tail_dropout_p: float = 0.1
+    add_vq_residual_to_stoch: bool = False
 
 
 @dataclass

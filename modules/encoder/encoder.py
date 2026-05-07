@@ -82,18 +82,25 @@ class Encoder(SigmaVAEEncoder):
             self.residual_and_tail_dropout_p = (
                 config.vq_config.residual_and_tail_dropout_p
             )
+            self.add_vq_residual_to_stoch = config.vq_config.add_vq_residual_to_stoch
 
         if config.dropout_regularizer_config:
             self.dropout_regularizer = DropoutRegularizer(
                 config=config.dropout_regularizer_config
             )
 
+        chunk_vq_dim = None
+
+        if config.vq_config:
+            chunk_vq_dim = (
+                config.vq_config.dim_to_quantize
+                if not self.add_vq_residual_to_stoch
+                else None
+            )
         if config.kl_chunk_regularizer_config:
             self.kl_chunk_regularizer = KLChunkRegularizer(
                 config=config.kl_chunk_regularizer_config,
-                vq_quant_dim=(
-                    config.vq_config.dim_to_quantize if config.vq_config else None
-                ),
+                vq_quant_dim=chunk_vq_dim,
             )
 
         if config.freeze_encoder_before_latent_heads:
@@ -137,40 +144,57 @@ class Encoder(SigmaVAEEncoder):
         hiddens = x.transpose(1, 2)  # [B, T/C, 512]
         h = self.transformer(hiddens)  # [B, T/C, 512]
 
-        mu_pre_vq = self.mu(h)
+        mu = self.mu(h)
 
         logvar = None
         if hasattr(self, "logvar"):
             logvar = self.logvar(h)
 
-        mu_stoch = mu_pre_vq
-        z_quantized = torch.zeros_like(mu_pre_vq)
+        z_quantized = torch.zeros_like(mu)
+        # vq
         if hasattr(self, "vq"):
             qd = self.config.vq_config.dim_to_quantize
-            mu_head = mu_pre_vq[..., :qd]
-            mu_tail = mu_pre_vq[..., qd:]
+            mu_head = mu[..., :qd]
+            mu_tail = mu[..., qd:]
 
             vq_out = self.vq(
                 mu_head,
                 padding_mask,
                 global_step=kwargs.get("step", None),
             )
-
-            mu_stoch = torch.cat([torch.zeros_like(mu_head), mu_tail], dim=-1)
-
+            # get z_quantized (straight-through estimator)
             vq_quantized_ste = mu_head + (vq_out.quantized - mu_head).detach()
             z_quantized = torch.cat(
                 [vq_quantized_ste, torch.zeros_like(mu_tail)], dim=-1
             )
 
-            logvar_tail = logvar[..., qd:] if logvar is not None else None
-            z_stoch_tail = self.reparameterize(mu_tail, logvar_tail)
-            z_stoch = torch.cat([torch.zeros_like(mu_head), z_stoch_tail], dim=-1)
-        else:
-            z_stoch = self.reparameterize(mu_stoch, logvar)
+            if self.add_vq_residual_to_stoch:
+                mu_stoch = torch.cat([vq_out.residual, mu_tail], dim=-1)
+            else:
+                mu_stoch = torch.cat([torch.zeros_like(mu_head), mu_tail], dim=-1)
 
+            logvar_head = logvar[..., :qd] if logvar is not None else None
+            logvar_tail = logvar[..., qd:] if logvar is not None else None
+
+            # tail noise augmentation (logvar=None)
+            z_stoch_tail = self.reparameterize(mu_tail, logvar_tail, std=1.0)
+
+            # head noise augmentation (residual) if add_vq_residual_to_stoch
+            z_stoch_head = torch.zeros_like(mu_head)
+            if self.add_vq_residual_to_stoch:
+                z_stoch_head = self.reparameterize(
+                    vq_out.residual, logvar_head, std=0.1
+                )
+            z_stoch = torch.cat([z_stoch_head, z_stoch_tail], dim=-1)
+        else:
+            mu_stoch = mu
+            z_stoch = self.reparameterize(mu, logvar)
+
+        # dropout regularizer
         if hasattr(self, "dropout_regularizer"):
-            z_stoch = self.dropout_regularizer(z_stoch)
+            z_stoch_dropped = self.dropout_regularizer(z_stoch)
+        else:
+            z_stoch_dropped = z_stoch
 
         # dropout per sample
         if self.training and getattr(self, "residual_and_tail_dropout_p", 0.0) > 0.0:
@@ -179,29 +203,39 @@ class Encoder(SigmaVAEEncoder):
                 torch.rand(B, 1, 1, device=z_stoch.device)
                 >= self.residual_and_tail_dropout_p
             ).to(z_stoch.dtype)
-            z = z_quantized + z_stoch * keep_mask
+            z = z_quantized + z_stoch_dropped * keep_mask
         else:
-            z = z_quantized + z_stoch
+            z = z_quantized + z_stoch_dropped
 
-        mu = mu_stoch
         kl_loss = None
         if kwargs.get("step", None) is not None:
             if hasattr(self, "kl_chunk_regularizer"):
-                kl_term = self.kl_chunk_regularizer(mu, logvar, padding_mask)
+                kl_term = self.kl_chunk_regularizer(mu_stoch, logvar, padding_mask)
             else:
                 if hasattr(self, "vq"):
                     qd = self.config.vq_config.dim_to_quantize
-                    mu_tail = mu[..., qd:]
-                    logvar_tail = logvar[..., qd:] if logvar is not None else None
+                    mu_kl = (
+                        mu_stoch
+                        if self.add_vq_residual_to_stoch
+                        else mu_stoch[..., qd:]
+                    )
+                    if logvar is not None:
+                        logvar_kl = (
+                            logvar
+                            if self.add_vq_residual_to_stoch
+                            else logvar[..., qd:]
+                        )
+                    else:
+                        logvar_kl = None
                     kl_term = self.kl_divergence(
-                        mu_tail,
-                        logvar_tail,
+                        mu_kl,
+                        logvar_kl,
                         padding_mask,
                         dtype=z.dtype,
                     )
                 else:
                     kl_term = self.kl_divergence(
-                        mu,
+                        mu_stoch,
                         logvar,
                         padding_mask,
                         dtype=z.dtype,
@@ -212,15 +246,17 @@ class Encoder(SigmaVAEEncoder):
             "z": z,
             "kl_loss": kl_loss,
             "padding_mask": padding_mask,
-            "mu": mu,
-            "mu_pre_vq": mu_pre_vq,
+            "mu": mu_stoch,
+            "mu_pre_vq": mu,
         }
 
         if hasattr(self, "vq"):
             out["vq_stats"] = vq_out.stats
             out["vq_loss"] = vq_out.loss
             out["quantized"] = z_quantized
-            out["residual"] = torch.zeros_like(z_quantized)
+            out["residual"] = torch.cat(
+                [vq_out.residual, torch.zeros_like(mu_tail)], dim=-1
+            )
             out["tail"] = torch.cat([torch.zeros_like(mu_head), mu_tail], dim=-1)
 
         return EncoderOutput(**out)

@@ -58,8 +58,6 @@ class DropoutRegularizer(nn.Module):
         else:
             raise ValueError(f"Unknown strategy: {self.strategy!r}")
 
-        # Ensure first chunk is NEVER dropped
-        probs[0] = 0.0
         return probs
 
     def forward(self, z: torch.FloatTensor) -> torch.Tensor:
