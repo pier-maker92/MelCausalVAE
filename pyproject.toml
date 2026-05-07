@@ -19,16 +19,20 @@ dependencies = [
     "beartype",
 
     "vocos==0.1.0",
-    
 ]
 
 [project.optional-dependencies]
 training = [
     "deepspeed==0.18.4",
-    "accelerate==1.4.1",
+    "accelerate==1.13.0",
     "datasets==4.1.0",
     "utmosv2 @ git+https://github.com/sarulab-speech/UTMOSv2.git",
     "matplotlib",
     "wandb",
     "jiwer",
 ]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["modules*", "data*"]
+exclude = ["configs*", "evaluation*"]
