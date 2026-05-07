@@ -21,8 +21,6 @@ A Variational Autoencoder (VAE) for audio mel spectrograms, featuring a causal C
 pip install -r requirements.txt
 ```
 
-*Note: For optimal performance, [Flash Attention](https://github.com/Dao-AILab/flash-attention) is recommended.*
-
 ## Training
 
 The project uses [Hydra](https://hydra.cc/) for configuration management.
