@@ -30,6 +30,7 @@ training = [
     "matplotlib",
     "wandb",
     "jiwer",
+    "torchaudio_filters",
 ]
 
 [tool.setuptools.packages.find]
