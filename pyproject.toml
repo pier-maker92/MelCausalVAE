@@ -1,0 +1,34 @@
+[project]
+name = "melcausalvae"
+version = "0.1.0"
+description = "Speech AE"
+readme = "README.md"
+requires-python = ">=3.11"
+
+dependencies = [
+    "torch==2.8.0",
+    "torchaudio==2.8.0",
+    "torchvision==0.23.0",
+
+    "numpy==1.26.4",
+    "soundfile",
+
+    "transformers",
+    "hydra-core",
+    "torchdiffeq",
+    "beartype",
+
+    "vocos==0.1.0",
+    
+]
+
+[project.optional-dependencies]
+training = [
+    "deepspeed==0.18.4",
+    "accelerate==1.4.1",
+    "datasets==4.1.0",
+    "utmosv2 @ git+https://github.com/sarulab-speech/UTMOSv2.git",
+    "matplotlib",
+    "wandb",
+    "jiwer",
+]
