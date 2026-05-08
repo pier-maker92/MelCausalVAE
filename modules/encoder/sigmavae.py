@@ -43,7 +43,10 @@ class SigmaVAEEncoder(nn.Module):
         if logvar is None:
             # Compute in fp32 for numerical stability
             mu_valid = mu[~padding_mask].to(dtype)
-            return F.mse_loss(mu_valid, torch.zeros_like(mu_valid)).to(mu.dtype)
+            num_valid = (~padding_mask).sum().clamp_min(1)
+            # 0.5 * sum(mu^2) is the exact analytical KL divergence when logvar=0
+            return 0.5 * mu_valid.pow(2).sum() / num_valid * self.kl_loss_weight
+
         # Compute KL divergence in fp32 for numerical stability with fp16
         mu_valid = mu[~padding_mask].to(dtype)
         logvar_valid = logvar[~padding_mask].to(dtype)
