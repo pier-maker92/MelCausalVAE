@@ -13,10 +13,11 @@ dependencies = [
     "numpy==1.26.4",
     "soundfile",
 
-    "transformers",
+    "transformers==5.0.0",
     "hydra-core",
     "torchdiffeq",
     "beartype",
+    "torchcodec==0.7",
 
     "vocos==0.1.0",
 ]
