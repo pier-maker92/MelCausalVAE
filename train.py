@@ -340,6 +340,14 @@ class VAEtrainer(Trainer):
         if self.control.should_evaluate:
             metrics = self.evaluate(ignore_keys=ignore_keys_for_eval)
             self._report_to_hp_search(trial, self.state.global_step, metrics)
+            self.log(metrics)
+
+            # Determine if this is the new best model
+            is_new_best_metric = self._determine_best_metric(metrics=metrics, trial=trial)
+            
+            # If we are saving only the best, update should_save
+            if getattr(self.args, "save_strategy", None) == "best":
+                self.control.should_save = is_new_best_metric
 
             # Check for collapse
             vq_frac = getattr(self.state, "latest_vq_codes_used_frac", 1.0)
@@ -367,7 +375,7 @@ class VAEtrainer(Trainer):
                 if self.args.process_index == 0:
                     logger.warning(f"Skipping save! vq_codes_used_frac ({vq_frac}) is below threshold ({self.vq_collapse_threshold}).")
             else:
-                self._save_checkpoint(model, trial)  # metrics=metrics
+                self._save_checkpoint(model, trial)
                 
             self.control = self.callback_handler.on_save(
                 self.args, self.state, self.control
@@ -410,6 +418,8 @@ class VAEtrainer(Trainer):
                 num_samples=self.eval_num_samples,
                 run_id=getattr(self, "run_id", "default_run"),
             )
+            # Add prefix for Trainer's best model logic
+            eval_metrics = {f"{metric_key_prefix}_{k}": v for k, v in eval_metrics.items()}
             metrics.update(eval_metrics)
 
         # Broadcast metrics from rank 0 to all other ranks in distributed setup

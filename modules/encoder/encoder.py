@@ -89,18 +89,10 @@ class Encoder(SigmaVAEEncoder):
                 config=config.dropout_regularizer_config
             )
 
-        chunk_vq_dim = None
-
-        if config.vq_config:
-            chunk_vq_dim = (
-                config.vq_config.dim_to_quantize
-                if not self.add_vq_residual_to_stoch
-                else None
-            )
         if config.kl_chunk_regularizer_config:
             self.kl_chunk_regularizer = KLChunkRegularizer(
                 config=config.kl_chunk_regularizer_config,
-                vq_quant_dim=chunk_vq_dim,
+                vq_quant_dim=None,
             )
 
         if config.freeze_encoder_before_latent_heads:
@@ -168,78 +160,70 @@ class Encoder(SigmaVAEEncoder):
                 [vq_quantized_ste, torch.zeros_like(mu_tail)], dim=-1
             )
 
-            if self.add_vq_residual_to_stoch:
-                mu_stoch = torch.cat([vq_out.residual, mu_tail], dim=-1)
-            else:
-                mu_stoch = torch.cat([torch.zeros_like(mu_head), mu_tail], dim=-1)
-
             logvar_head = logvar[..., :qd] if logvar is not None else None
             logvar_tail = logvar[..., qd:] if logvar is not None else None
 
-            # tail noise augmentation (logvar=None)
-            z_stoch_tail = self.reparameterize(mu_tail, logvar_tail, std=1.0)
-
-            # head noise augmentation (residual) if add_vq_residual_to_stoch
-            z_stoch_head = torch.zeros_like(mu_head)
+            # 1. Define stochastic parts and their distributions
             if self.add_vq_residual_to_stoch:
-                z_stoch_head = self.reparameterize(
-                    vq_out.residual, logvar_head, std=0.1
-                )
-            z_stoch = torch.cat([z_stoch_head, z_stoch_tail], dim=-1)
+                mu_stoch = torch.cat([vq_out.residual, mu_tail], dim=-1)
+                logvar_stoch = logvar # [B, T, D]
+            else:
+                mu_stoch = mu_tail
+                logvar_stoch = logvar_tail # [B, T, D-qd]
+
+            # 2. Sample z_stoch (active parts only)
+            if self.training:
+                z_stoch = self.reparameterize(mu_tail, logvar_tail, std=1.0)
+            else:
+                z_stoch = mu_tail
+
+            if self.add_vq_residual_to_stoch:
+                if self.training:
+                    z_stoch_head = self.reparameterize(
+                        vq_out.residual, logvar_head, std=0.1
+                    )
+                else:
+                    z_stoch_head = vq_out.residual
+                z_stoch = torch.cat([z_stoch_head, z_stoch], dim=-1)
         else:
             mu_stoch = mu
+            logvar_stoch = logvar
             z_stoch = self.reparameterize(mu, logvar)
 
-        # dropout regularizer
+        # 3. Dropout Regularizer (on active parts only)
         if hasattr(self, "dropout_regularizer"):
             z_stoch_dropped = self.dropout_regularizer(z_stoch)
         else:
             z_stoch_dropped = z_stoch
 
-        # dropout per sample
+        # 4. Pad with zeros if residual was skipped
+        if hasattr(self, "vq") and not self.add_vq_residual_to_stoch:
+            z_stoch_dropped = torch.cat(
+                [torch.zeros_like(mu_head), z_stoch_dropped], dim=-1
+            )
+
+        # 5. Dropout per sample (on full dimension)
         if self.training and getattr(self, "residual_and_tail_dropout_p", 0.0) > 0.0:
-            B = z_stoch.shape[0]
+            B = z_stoch_dropped.shape[0]
             keep_mask = (
-                torch.rand(B, 1, 1, device=z_stoch.device)
+                torch.rand(B, 1, 1, device=z_stoch_dropped.device)
                 >= self.residual_and_tail_dropout_p
-            ).to(z_stoch.dtype)
-            z = z_quantized + z_stoch_dropped * keep_mask
-        else:
-            z = z_quantized + z_stoch_dropped
+            ).to(z_stoch_dropped.dtype)
+            z_stoch_dropped = z_stoch_dropped * keep_mask
+        
+        z = z_quantized + z_stoch_dropped
 
         kl_loss = None
         if kwargs.get("step", None) is not None:
             if hasattr(self, "kl_chunk_regularizer"):
-                kl_term = self.kl_chunk_regularizer(mu_stoch, logvar, padding_mask)
+                kl_term = self.kl_chunk_regularizer(mu_stoch, logvar_stoch, padding_mask)
             else:
-                if hasattr(self, "vq"):
-                    qd = self.config.vq_config.dim_to_quantize
-                    mu_kl = (
-                        mu_stoch
-                        if self.add_vq_residual_to_stoch
-                        else mu_stoch[..., qd:]
-                    )
-                    if logvar is not None:
-                        logvar_kl = (
-                            logvar
-                            if self.add_vq_residual_to_stoch
-                            else logvar[..., qd:]
-                        )
-                    else:
-                        logvar_kl = None
-                    kl_term = self.kl_divergence(
-                        mu_kl,
-                        logvar_kl,
-                        padding_mask,
-                        dtype=z.dtype,
-                    )
-                else:
-                    kl_term = self.kl_divergence(
-                        mu_stoch,
-                        logvar,
-                        padding_mask,
-                        dtype=z.dtype,
-                    )
+                kl_term = self.kl_divergence(
+                    mu_stoch,
+                    logvar_stoch,
+                    padding_mask,
+                    dtype=z.dtype,
+                )
             kl_loss = kl_term * self.get_kl_cosine_schedule(kwargs["step"])
 
         out = {
