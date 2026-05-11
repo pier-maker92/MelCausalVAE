@@ -3,15 +3,15 @@ import torch
 import torch.nn as nn
 from typing import Optional
 import torch.nn.functional as F
-from modules.configs import SigmaVAEencoderConfig
+from modules.configs import SigmaVAEEncoderConfig
 
 
 class SigmaVAEEncoder(nn.Module):
-    def __init__(self, config: SigmaVAEencoderConfig):
+    def __init__(self, config: SigmaVAEEncoderConfig):
         super().__init__()
         self.config = config
         self.std_activation = (
-            nn.Softplus() if self.config.use_sofplus else nn.Identity()
+            nn.Softplus() if self.config.use_softplus else nn.Identity()
         )
         self.kl_loss_weight = float(config.kl_loss_weight)
 

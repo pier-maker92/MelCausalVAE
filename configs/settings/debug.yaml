@@ -47,7 +47,7 @@ encoder:
   target_std: 0.3
   kl_loss_warmup_steps: 1000
   kl_loss_weight: 5e-4
-  # NOTE: legacy parameters like use_sofplus, use_1d_encoder have been removed.
+  # NOTE: legacy parameters like use_softplus, use_1d_encoder have been removed.
 
   # --- VQ Config ---
   vq_config:

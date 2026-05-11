@@ -209,6 +209,7 @@ def run_evaluation(
             # 4. Calculate Deltas
             sample_res = {
                 "id": sid,
+                "run_id": run_id,
                 "step": step,
                 "gt_text": gt_text,
                 "gt_UTMOS": gt_metrics["UTMOS"],
@@ -236,10 +237,13 @@ def run_evaluation(
                 gt_wav_tmp.unlink()
 
     # Save GT cache robustly
+    # Using a unique temp file (uuid) to avoid race conditions between parallel jobs
     try:
-        temp_gt_cache_path = gt_cache_path.with_suffix(".tmp")
+        import uuid
+        temp_gt_cache_path = gt_cache_path.with_suffix(f".{uuid.uuid4()}.tmp")
         with open(temp_gt_cache_path, "w") as f:
             json.dump(gt_cache, f, indent=4)
+        # replace is atomic on POSIX, ensuring the cache is updated safely
         temp_gt_cache_path.replace(gt_cache_path)
     except Exception as e:
         logger.warning(f"Failed to save ground truth cache: {e}")

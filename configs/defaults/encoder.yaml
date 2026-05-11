@@ -11,6 +11,9 @@ encoder:
   kl_loss_weight: 1.0e-3
   target_std: null
   kl_loss_warmup_steps: 1000
+  kl_loss_warmup_ratio: null
+  use_slt: false
+  use_softplus: false
 
   # --- VQ ---
   vq_config:

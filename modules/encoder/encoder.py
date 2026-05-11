@@ -100,6 +100,12 @@ class Encoder(SigmaVAEEncoder):
 
         self.config = config
 
+    def slt(self, x: torch.FloatTensor):
+        """The sign-log transform
+        f(x) = sign(x) ln(|x| + 1)
+        """
+        return x.sign() * (x.abs() + 1).log()
+
     def _freeze_encoder_before_latent_heads(self):
         for param in self.parameters():
             param.requires_grad = False
@@ -137,6 +143,8 @@ class Encoder(SigmaVAEEncoder):
         h = self.transformer(hiddens)  # [B, T/C, 512]
 
         mu = self.mu(h)
+        if getattr(self.config, "use_slt", False):
+            mu = self.slt(mu)
 
         logvar = None
         if hasattr(self, "logvar"):
@@ -166,10 +174,10 @@ class Encoder(SigmaVAEEncoder):
             # 1. Define stochastic parts and their distributions
             if self.add_vq_residual_to_stoch:
                 mu_stoch = torch.cat([vq_out.residual, mu_tail], dim=-1)
-                logvar_stoch = logvar # [B, T, D]
+                logvar_stoch = logvar  # [B, T, D]
             else:
                 mu_stoch = mu_tail
-                logvar_stoch = logvar_tail # [B, T, D-qd]
+                logvar_stoch = logvar_tail  # [B, T, D-qd]
 
             # 2. Sample z_stoch (active parts only)
             if self.training:
@@ -210,13 +218,15 @@ class Encoder(SigmaVAEEncoder):
                 >= self.residual_and_tail_dropout_p
             ).to(z_stoch_dropped.dtype)
             z_stoch_dropped = z_stoch_dropped * keep_mask
-        
+
         z = z_quantized + z_stoch_dropped
 
         kl_loss = None
         if kwargs.get("step", None) is not None:
             if hasattr(self, "kl_chunk_regularizer"):
-                kl_term = self.kl_chunk_regularizer(mu_stoch, logvar_stoch, padding_mask)
+                kl_term = self.kl_chunk_regularizer(
+                    mu_stoch, logvar_stoch, padding_mask
+                )
             else:
                 kl_term = self.kl_divergence(
                     mu_stoch,

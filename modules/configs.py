@@ -8,14 +8,15 @@ from dataclasses import dataclass, field, asdict
 
 
 @dataclass
-class SigmaVAEencoderConfig:
+class SigmaVAEEncoderConfig:
     latent_dim: int = 64
     target_std: float = 1.0
     logvar_layer: bool = False
     kl_loss_weight: float = 1e-5
     kl_loss_warmup_steps: Optional[int] = None
     kl_loss_warmup_ratio: Optional[float] = None
-    use_sofplus: bool = False
+    use_softplus: bool = False
+    use_slt: bool = False
 
 
 @dataclass
@@ -58,7 +59,7 @@ class VQConfig:
 
 
 @dataclass
-class EncoderConfig(SigmaVAEencoderConfig):
+class EncoderConfig(SigmaVAEEncoderConfig):
     mel_dim: int = 100
     d_model: int = 512
     compress_factor_C: int = 4
@@ -94,6 +95,7 @@ class DiTConfig:
     use_window_attention: bool = True
     window_attention_seconds: float = 3.0
     use_group_bidirectional: bool = False
+    add: bool = False
 
 
 #########################
