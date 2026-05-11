@@ -30,7 +30,6 @@ class DiT(torch.nn.Module):
         self.is_causal = config.is_causal
         self.use_window_attention = config.use_window_attention
         self.use_group_bidirectional = config.use_group_bidirectional
-        self.add = config.add
         mel_fps = 93.75  # 24000 / 256 #FIXME hardcoded to 24kHz dataset
         self.window_size = (
             int(config.window_attention_seconds * mel_fps)
@@ -48,21 +47,12 @@ class DiT(torch.nn.Module):
             )
 
         # context vector projection
-        if self.add:
-            self.context_vector_proj = nn.Sequential(
-                nn.LayerNorm(self.audio_latent_dim),
-                nn.Linear(self.audio_latent_dim, self.dit_dim),
-            )
-            self.noise_proj = nn.Sequential(
-                nn.Linear(self.mel_dim, self.dit_dim), nn.LayerNorm(self.dit_dim)
-            )
-        else:
-            self.context_vector_proj = nn.Linear(self.audio_latent_dim, self.dit_dim)
-            # noise projection
-            self.noise_proj = nn.Sequential(
-                nn.Linear(self.dit_dim + self.mel_dim, self.dit_dim),
-                nn.LayerNorm(self.dit_dim),
-            )
+        self.context_vector_proj = nn.Linear(self.audio_latent_dim, self.dit_dim)
+        # noise projection
+        self.noise_proj = nn.Sequential(
+            nn.Linear(self.dit_dim + self.mel_dim, self.dit_dim),
+            nn.LayerNorm(self.dit_dim),
+        )
 
         # transformer
         # TODO add a dedicated config for Transformer
@@ -132,10 +122,7 @@ class DiT(torch.nn.Module):
         w = ((1 - (1 - self.sigma) * t) * x0 + t * target).to(context_vector.dtype)
         # target is the original signal minus the noise
         target = (target - (1 - self.sigma) * x0).to(context_vector.dtype)
-        if self.add:
-            state = context_vector + self.noise_proj(w)
-        else:
-            state = self.noise_proj(torch.cat([context_vector, w], dim=-1))
+        state = self.noise_proj(torch.cat([context_vector, w], dim=-1))
         return state, times, target
 
     @property
@@ -251,10 +238,7 @@ class DiT(torch.nn.Module):
         attention_mask: Optional[torch.BoolTensor] = None,
     ):
         times = times.repeat(state.shape[0])
-        if self.add:
-            cond_state = context_vector + self.noise_proj(state)
-        else:
-            cond_state = self.noise_proj(torch.cat([context_vector, state], dim=-1))
+        cond_state = self.noise_proj(torch.cat([context_vector, state], dim=-1))
         gs = self._group_size
         cond_out = self.transformer(
             x=cond_state,
@@ -264,12 +248,10 @@ class DiT(torch.nn.Module):
         )
         if cfg_scale == 1.0:
             return cond_out
-        if self.add:
-            uncond_state = self.noise_proj(state)
-        else:
-            uncond_state = self.noise_proj(
-                torch.cat([torch.zeros_like(context_vector), state], dim=-1)
-            )
+
+        uncond_state = self.noise_proj(
+            torch.cat([torch.zeros_like(context_vector), state], dim=-1)
+        )
         uncond_out = self.transformer(
             x=uncond_state,
             times=times,

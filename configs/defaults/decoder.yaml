@@ -11,4 +11,3 @@ decoder:
   use_window_attention: false
   window_attention_seconds: 3.0
   use_group_bidirectional: false
-  add: false

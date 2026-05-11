@@ -95,7 +95,6 @@ class DiTConfig:
     use_window_attention: bool = True
     window_attention_seconds: float = 3.0
     use_group_bidirectional: bool = False
-    add: bool = False
 
 
 #########################
