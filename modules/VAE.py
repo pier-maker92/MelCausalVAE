@@ -23,7 +23,8 @@ class VAE(torch.nn.Module):
         count_parameters_by_module(self.decoder, "Decoder")
 
     def from_pretrained(self, checkpoint_path: str):
-        state_dict = safetensors.torch.load_file(checkpoint_path)
+        state_dict = safetensors.torch.load_file(checkpoint_path, device=str(self.device))
+        print(f"Safetensors file loaded to {self.device}. Applying state dict...")
         self.load_state_dict(state_dict, strict=False)
         print(f"Loaded checkpoint from {checkpoint_path}")
 

@@ -102,7 +102,7 @@ class FeatureExtractor(nn.Module):
             for i, audio in enumerate(audios):
                 padding_mask[i, : audio.size(-1)] = False
         else:
-            padded_audios = audios[0]
+            padded_audios = audios[0].unsqueeze(0)
             padding_mask = torch.zeros(
                 1,
                 audios[0].size(-1),

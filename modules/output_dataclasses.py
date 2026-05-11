@@ -32,6 +32,7 @@ class EncoderOutput(ModelOutput):
     quantized: Optional[torch.FloatTensor] = None
     residual: Optional[torch.FloatTensor] = None
     tail: Optional[torch.FloatTensor] = None
+    indices: Optional[torch.LongTensor] = None
 
 
 @dataclass

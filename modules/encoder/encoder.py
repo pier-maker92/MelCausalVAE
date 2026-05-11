@@ -252,6 +252,7 @@ class Encoder(SigmaVAEEncoder):
                 [vq_out.residual, torch.zeros_like(mu_tail)], dim=-1
             )
             out["tail"] = torch.cat([torch.zeros_like(mu_head), mu_tail], dim=-1)
+            out["indices"] = vq_out.indices
 
         return EncoderOutput(**out)
 
