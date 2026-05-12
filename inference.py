@@ -8,7 +8,6 @@ import torchaudio.transforms as T
 from modules.builder import build_model
 
 
-# TODO: move to utils
 def load_wav_mono_resampled(path: str, target_sr: int) -> torch.Tensor:
     wav, sr = torchaudio.load(path)
     if wav.shape[0] > 1:
@@ -17,7 +16,8 @@ def load_wav_mono_resampled(path: str, target_sr: int) -> torch.Tensor:
         wav = T.Resample(sr, target_sr)(wav)
     # normalize audio
     wav = wav / wav.abs().max()
-    return wav
+    return wav.squeeze(0)
+
 
 
 def main(args):
