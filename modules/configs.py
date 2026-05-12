@@ -32,6 +32,7 @@ class DropoutConfig(RegularizationConfig):
     strategy: str = "linear"  # linear | sigmoid
     k: float = 1.0
     x0: float = 0.0
+    pre_quantization: bool = False
 
 
 @dataclass

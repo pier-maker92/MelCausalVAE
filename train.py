@@ -768,9 +768,10 @@ def main(cfg: DictConfig):
     # If run_id is provided via command line (run_job.sh), use it.
     run_id = training_cfg.pop("run_id", None)
     if run_id is None:
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        date_dir = datetime.datetime.now().strftime("%d-%B-%Y")
+        time_dir = datetime.datetime.now().strftime("%H:%M:%S")
         run_name = wandb_run_name or "run"
-        run_id = f"{run_name}_{timestamp}"
+        run_id = f"{date_dir}/{time_dir}/{run_name}"
 
     # Setup training arguments
     training_args = TrainingArguments(

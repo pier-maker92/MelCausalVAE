@@ -1,0 +1,100 @@
+# @package _global_
+# Global VAE parameters that override configs/main.yaml defaults
+compress_factor: 4
+mel_dim: 100
+latent_dim: 64
+sample_rate: 24000
+
+# Training configuration
+training:
+  num_train_epochs: 10
+  dataset_name: librispeech_aligned
+  output_dir: checkpoints/exps/vq-setting-5-c-test
+  per_device_train_batch_size: 2
+  per_device_eval_batch_size: 4
+
+  # lr
+  learning_rate: 1e-4
+  encoder_lr: 3e-4
+  decoder_lr: 1e-4
+  encoder_warmup_ratio: 0.01
+  decoder_warmup_ratio: 0.05
+  lr_scheduler_type: "cosine"
+  encoder_min_lr: 1.0e-4
+  decoder_min_lr: 5.0e-5
+  
+  # report
+  report_to: wandb
+  wandb_project: speech-vae
+  wandb_run_name: set5-c-test
+
+  fp16: false
+  bf16: true
+
+  save_steps: 2500
+  logging_steps: 10
+
+  # eval 
+  eval_strategy: "steps"
+  eval_steps: 10
+  save_total_limit: 3
+  load_best_model_at_end: true
+  metric_for_best_model: "avg_WER"
+  greater_is_better: false
+  early_stopping_patience: 5
+  # vq patience
+  vq_collapse_threshold: 0.5
+  vq_collapse_patience: 3
+
+  gradient_accumulation_steps: 1
+  dataloader_num_workers: 8
+  eval_num_samples: 10
+
+
+# Encoder configuration
+encoder:
+  d_model: 1024
+  tf_heads: 8
+  tf_layers: 4
+  n_residual_blocks: 3
+  logvar_layer: false
+  target_std: 1.0
+  kl_loss_warmup_ratio: 0.1
+  kl_loss_weight: 1e-5
+
+  # --- VQ Config ---
+  vq_config:
+    num_embeddings: 128
+    commitment_weight: 0.25
+    reset_dead_codes: true
+    reset_every_forward: 10
+    residual_and_tail_dropout_p: 0.025
+    dim_to_quantize: 32
+    use_ema_codebook: false
+    add_vq_residual_to_stoch: false
+
+  # --- Dropout Config ---
+  dropout_regularizer_config:
+    chunk_size: 2
+    strategy: "sigmoid"
+    dropout_start: 0.2
+    dropout_end: 0.8
+    k: 6.0
+    x0: 0.5
+    dropout_hierarchical: false
+    pre_quantization: true
+
+  # --- KL Config ---
+  kl_chunk_regularizer_config: null
+
+# Decoder configuration
+decoder:
+  dit_dim: 768            
+  dit_depth: 6            
+  dit_heads: 12           
+  dit_dropout_rate: 0.1   
+  use_conv_layer: true
+  uncond_prob: 0.15
+  is_causal: false
+  use_window_attention: true
+  window_attention_seconds: 3.0

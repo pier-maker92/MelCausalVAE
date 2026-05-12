@@ -47,10 +47,6 @@ class DiT(torch.nn.Module):
             )
 
         # context vector projection
-        # self.context_vector_proj = nn.Sequential(
-        #     nn.LayerNorm(self.audio_latent_dim),
-        #     nn.Linear(self.audio_latent_dim, self.dit_dim),
-        # )
         self.context_vector_proj = nn.Linear(self.audio_latent_dim, self.dit_dim)
 
         # noise projection

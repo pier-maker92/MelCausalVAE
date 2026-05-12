@@ -88,6 +88,11 @@ class Encoder(SigmaVAEEncoder):
             self.dropout_regularizer = DropoutRegularizer(
                 config=config.dropout_regularizer_config
             )
+            self.use_pre_quant_dropout = (
+                config.dropout_regularizer_config.pre_quantization
+            )
+        else:
+            self.use_pre_quant_dropout = False
 
         if config.kl_chunk_regularizer_config:
             self.kl_chunk_regularizer = KLChunkRegularizer(
@@ -142,9 +147,14 @@ class Encoder(SigmaVAEEncoder):
         hiddens = x.transpose(1, 2)  # [B, T/C, 512]
         h = self.transformer(hiddens)  # [B, T/C, 512]
 
-        mu = self.mu(h)
+        mu_original = self.mu(h)
         if getattr(self.config, "use_slt", False):
-            mu = self.slt(mu)
+            mu_original = self.slt(mu_original)
+
+        if self.use_pre_quant_dropout:
+            mu = self.dropout_regularizer(mu_original)
+        else:
+            mu = mu_original
 
         logvar = None
         if hasattr(self, "logvar"):
@@ -199,7 +209,7 @@ class Encoder(SigmaVAEEncoder):
             z_stoch = self.reparameterize(mu, logvar)
 
         # 3. Dropout Regularizer (on active parts only)
-        if hasattr(self, "dropout_regularizer"):
+        if hasattr(self, "dropout_regularizer") and not self.use_pre_quant_dropout:
             z_stoch_dropped = self.dropout_regularizer(z_stoch)
         else:
             z_stoch_dropped = z_stoch
@@ -229,7 +239,11 @@ class Encoder(SigmaVAEEncoder):
                 )
             else:
                 kl_term = self.kl_divergence(
-                    mu_stoch,
+                    (
+                        mu_stoch
+                        if not self.use_pre_quant_dropout
+                        else mu_original[..., qd:]  # only tail
+                    ),
                     logvar_stoch,
                     padding_mask,
                     dtype=z.dtype,
