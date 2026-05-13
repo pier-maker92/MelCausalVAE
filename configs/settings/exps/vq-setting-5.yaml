@@ -82,6 +82,7 @@ encoder:
     k: 6.0
     x0: 0.5
     dropout_hierarchical: false
+    pre_quantization: false
 
   # --- KL Config ---
   kl_chunk_regularizer_config: null

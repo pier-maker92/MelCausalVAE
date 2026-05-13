@@ -73,7 +73,6 @@ class DropoutRegularizer(nn.Module):
         probability ``p_i`` linear in chunk index (``dropout_start`` .. ``dropout_end``).
         """
         if not self.training:
-            print("DropoutRegularizer: not training")
             return z
         B, T, D = z.shape
         _assert_latent_chunks_divisible(D, self.chunk_size)
