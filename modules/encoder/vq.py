@@ -3,8 +3,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from dataclasses import dataclass
 from typing import Optional, Tuple
-from modules.configs import VQConfig
-from modules.output_dataclasses import VQVAEOutput, VQStats
+from ..configs import VQConfig
+from ..output_dataclasses import VQVAEOutput, VQStats
 
 
 def _batch_vq_stats(
