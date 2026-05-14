@@ -70,7 +70,7 @@ class UTMOSPredictor:
             return None
         try:
             # Force float32 context and disable any potential autocast to bfloat16
-            with torch.cuda.amp.autocast(enabled=False):
+            with torch.autocast(device_type=self.device.type, enabled=False):
                 # Disable utmosv2 multiprocessing to avoid pickling issues
                 # when running inside our own ProcessPoolExecutor workers.
                 mos = self.model.predict(
@@ -89,7 +89,7 @@ class UTMOSPredictor:
             return {}
         try:
             logger.info(f"Running batch UTMOSv2 prediction on {input_dir}")
-            with torch.cuda.amp.autocast(enabled=False):
+            with torch.autocast(device_type=self.device.type, enabled=False):
                 # Disable utmosv2 multiprocessing to avoid pickling issues
                 # when running inside our own ProcessPoolExecutor workers.
                 results = self.model.predict(
@@ -150,7 +150,8 @@ class WhisperASR:
 def set_seed(seed: int):
     random.seed(seed)
     torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 def load_config(config_path: str) -> Dict[str, Any]:
@@ -229,11 +230,13 @@ def save_wav(path: Path, audio: torch.Tensor, sr: int = 24000):
 
 
 def get_available_gpus() -> List[int]:
-    """Detect available GPUs without initializing CUDA contexts (safe before forking)."""
+    """Detect available GPUs (CUDA or MPS) without initializing CUDA contexts (safe before forking)."""
     try:
-        if not torch.cuda.is_available():
-            return []
-        return list(range(torch.cuda.device_count()))
+        if torch.cuda.is_available():
+            return list(range(torch.cuda.device_count()))
+        if torch.backends.mps.is_available():
+            return [0]
+        return []
     except Exception:
         return []
 
@@ -698,6 +701,8 @@ def run_single_eval(
     if torch.cuda.is_available():
         torch.cuda.set_device(gpu_index)
         device = torch.device(f"cuda:{gpu_index}")
+    elif torch.backends.mps.is_available():
+        device = torch.device("mps")
     else:
         device = torch.device("cpu")
     set_seed(base_args.get("seed", 42))

@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from typing import Optional
-from modules.configs import DropoutConfig, KLChunkRegularizer
+from ..configs import DropoutConfig, KLChunkRegularizer
 
 
 def _assert_latent_chunks_divisible(latent_dim: int, chunk_size: int) -> None:

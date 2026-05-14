@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 from typing import Optional
 import torch.nn.functional as F
-from modules.configs import SigmaVAEEncoderConfig
+from ..configs import SigmaVAEEncoderConfig
 
 
 class SigmaVAEEncoder(nn.Module):

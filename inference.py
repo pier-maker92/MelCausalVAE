@@ -22,7 +22,12 @@ def load_wav_mono_resampled(path: str, target_sr: int) -> torch.Tensor:
 
 def main(args):
     checkpoint_dir = args.checkpoint_dir
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    elif torch.backends.mps.is_available():
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
 
     print(f"Loading model from {checkpoint_dir}...")
     config_path = os.path.join(checkpoint_dir, "config.json")

@@ -4,15 +4,15 @@ import random
 import torch.nn as nn
 from typing import Optional
 import torch.nn.functional as F
-from modules.encoder.vq import HardVectorQuantizer
-from modules.configs import EncoderConfig, VQConfig
-from modules.output_dataclasses import EncoderOutput
-from modules.encoder.sigmavae import SigmaVAEEncoder
-from modules.encoder.regularization import (
+from .vq import HardVectorQuantizer
+from ..configs import EncoderConfig, VQConfig
+from ..output_dataclasses import EncoderOutput
+from .sigmavae import SigmaVAEEncoder
+from .regularization import (
     DropoutRegularizer,
     KLChunkRegularizer,
 )
-from modules.encoder.utils import (
+from .utils import (
     TimeCausalConv1d,
     PreNormResCausalBlock1d,
     CausalDownsamplingBlock1d,

@@ -5,9 +5,9 @@ from typing import Optional
 from einops import rearrange
 from torchdiffeq import odeint
 from torch.nn import functional as F
-from modules.configs import DiTConfig
-from modules.decoder.dit import Transformer
-from modules.output_dataclasses import DecoderOutput
+from ..configs import DiTConfig
+from .dit import Transformer
+from ..output_dataclasses import DecoderOutput
 
 
 class DiT(torch.nn.Module):
