@@ -66,6 +66,7 @@ class DiT(torch.nn.Module):
             is_causal=self.is_causal,
             attn_flash=True,
             window_size=self.window_size,
+            conv_pos_embed_kernel_size=config.kernel_size,
         )
 
     def handle_context_vector(

@@ -28,6 +28,7 @@ class Transformer(Module):
         use_conv_layer: bool = False,
         is_causal: bool = True,
         window_size: Optional[int] = None,
+        conv_pos_embed_kernel_size: int = 31,
     ):
         super().__init__()
         assert divisible_by(depth, 2)
@@ -62,8 +63,9 @@ class Transformer(Module):
         if use_conv_layer:
             self.conv_embed = ConvPositionEmbed(
                 dim=dim,
-                kernel_size=31,  # 31 from voicebox
+                kernel_size=conv_pos_embed_kernel_size,
                 groups=None,
+                causal=is_causal,
             )
 
         self.skip_connect_scale = default(skip_connect_scale, 2**-0.5)
@@ -94,42 +96,6 @@ class Transformer(Module):
         self.final_norm = RMSNorm(dim)
         self.out_linear = nn.Linear(dim, out_dim, bias=False)
         self.is_causal = is_causal  # honor ctor arg
-
-    def _get_causal_mask(self, attention_mask: torch.BoolTensor):
-        seq_len = attention_mask.shape[1]
-        causal_mask = torch.triu(
-            torch.ones(
-                seq_len,
-                seq_len,
-                device=attention_mask.device,
-                dtype=torch.bool,
-            ),
-            diagonal=1,
-        ).logical_not()
-        causal_mask = causal_mask.unsqueeze(0).unsqueeze(0)
-        return attention_mask.unsqueeze(1).unsqueeze(2) & causal_mask
-
-    def _get_custom_causal_mask(
-        self, attention_mask: torch.BoolTensor, special_mask: torch.BoolTensor
-    ):
-        batch, seq_len = attention_mask.shape
-        device = attention_mask.device
-        causal_mask = torch.triu(
-            torch.ones(seq_len, seq_len, device=device, dtype=torch.bool),
-            diagonal=1,
-        ).logical_not()
-        identity = torch.eye(seq_len, device=device, dtype=torch.bool)
-        special_mask_row = special_mask.unsqueeze(1).unsqueeze(-1)
-        special_mask_col = special_mask.unsqueeze(1).unsqueeze(1)
-        interest_mask = (
-            identity.unsqueeze(0) & special_mask_row & special_mask_col
-        ) | (~special_mask_col)
-        final_mask = (
-            causal_mask.unsqueeze(0).unsqueeze(0)
-            & attention_mask.unsqueeze(1).unsqueeze(2)
-            & interest_mask
-        )
-        return final_mask
 
     def forward(
         self,

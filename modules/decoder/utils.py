@@ -220,12 +220,13 @@ def apply_rotary_pos_emb(pos, t):
 
 
 class ConvPositionEmbed(Module):
-    def __init__(self, dim, *, kernel_size, groups=None):
+    def __init__(self, dim, *, kernel_size, groups=None, causal=False):
         super().__init__()
         assert is_odd(kernel_size)
         groups = default(groups, dim)  # full depthwise conv by default
+        self.causal = causal
         self.dw_conv1d = nn.Sequential(
-            nn.Conv1d(dim, dim, kernel_size, groups=groups, padding=kernel_size // 2),
+            nn.Conv1d(dim, dim, kernel_size, groups=groups, padding=kernel_size // 2 if not causal else 0),
             nn.GELU(),
         )
 
@@ -234,6 +235,9 @@ class ConvPositionEmbed(Module):
             mask = mask[..., None]
             x = x.masked_fill(~mask, 0.0)
         x = rearrange(x, "b n c -> b c n")
+        if self.causal:
+            kernel_size = self.dw_conv1d[0].kernel_size[0]
+            x = F.pad(x, (kernel_size - 1, 0), value=0.0)
         x = self.dw_conv1d(x)
         out = rearrange(x, "b c n -> b n c")
         if exists(mask):

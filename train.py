@@ -1,15 +1,16 @@
-from data.audio_dataset import TestDatasetWrapper
-import math
 import os
+import math
 import wandb
 import torch
-import datetime
-import logging
 import hydra
-from omegaconf import DictConfig, OmegaConf
+import logging
+import datetime
 from vocos import Vocos
 from typing import Dict, List
 import matplotlib.pyplot as plt
+from omegaconf import DictConfig, OmegaConf
+from accelerate import InitProcessGroupKwargs
+from data.audio_dataset import TestDatasetWrapper
 from transformers import (
     Trainer,
     TrainingArguments,
@@ -22,11 +23,11 @@ from transformers import (
 
 # data
 import torch.distributed as dist
-from data.audio_dataset import DataCollator
-from data.audio_dataset import TrainDatasetWrapper
-from torch.optim.lr_scheduler import CosineAnnealingLR
 from accelerate import Accelerator
 from evaluate import run_evaluation
+from modules.builder import build_model
+from data.audio_dataset import DataCollator
+from data.audio_dataset import TrainDatasetWrapper
 
 # Set up logging
 logging.basicConfig(
@@ -128,16 +129,26 @@ class VAEtrainer(Trainer):
         """
         if self.optimizer is None:
             # Use specific LRs if provided, otherwise fallback to the global learning_rate
-            encoder_lr = self.encoder_lr if self.encoder_lr is not None else self.args.learning_rate
-            decoder_lr = self.decoder_lr if self.decoder_lr is not None else self.args.learning_rate
+            encoder_lr = (
+                self.encoder_lr
+                if self.encoder_lr is not None
+                else self.args.learning_rate
+            )
+            decoder_lr = (
+                self.decoder_lr
+                if self.decoder_lr is not None
+                else self.args.learning_rate
+            )
 
-            logger.info(f"Setting up optimizer with encoder_lr: {encoder_lr}, decoder_lr: {decoder_lr}")
+            logger.info(
+                f"Setting up optimizer with encoder_lr: {encoder_lr}, decoder_lr: {decoder_lr}"
+            )
 
             # Define parameter groups
             # We group encoder and feature_extractor together, and decoder separately.
             encoder_params = []
             decoder_params = []
-            
+
             for n, p in self.model.named_parameters():
                 if not p.requires_grad:
                     continue
@@ -154,8 +165,12 @@ class VAEtrainer(Trainer):
                 {"params": decoder_params, "lr": decoder_lr},
             ]
 
-            optimizer_cls, optimizer_kwargs = Trainer.get_optimizer_cls_and_kwargs(self.args)
-            self.optimizer = optimizer_cls(optimizer_grouped_parameters, **optimizer_kwargs)
+            optimizer_cls, optimizer_kwargs = Trainer.get_optimizer_cls_and_kwargs(
+                self.args
+            )
+            self.optimizer = optimizer_cls(
+                optimizer_grouped_parameters, **optimizer_kwargs
+            )
 
         return self.optimizer
 
@@ -168,7 +183,10 @@ class VAEtrainer(Trainer):
             optimizer = self.optimizer
 
         use_cosine = self.args.lr_scheduler_type == "cosine"
-        has_warmup = self.encoder_warmup_ratio is not None or self.decoder_warmup_ratio is not None
+        has_warmup = (
+            self.encoder_warmup_ratio is not None
+            or self.decoder_warmup_ratio is not None
+        )
 
         if has_warmup or use_cosine:
             logger.info(
@@ -176,36 +194,62 @@ class VAEtrainer(Trainer):
                 f"encoder_warmup: {self.encoder_warmup_ratio}, "
                 f"decoder_warmup: {self.decoder_warmup_ratio}"
             )
-            
-            enc_warmup_steps = int(num_training_steps * (self.encoder_warmup_ratio or 0.0))
-            dec_warmup_steps = int(num_training_steps * (self.decoder_warmup_ratio or 0.0))
 
-            encoder_lr = self.encoder_lr if self.encoder_lr is not None else self.args.learning_rate
-            decoder_lr = self.decoder_lr if self.decoder_lr is not None else self.args.learning_rate
+            enc_warmup_steps = int(
+                num_training_steps * (self.encoder_warmup_ratio or 0.0)
+            )
+            dec_warmup_steps = int(
+                num_training_steps * (self.decoder_warmup_ratio or 0.0)
+            )
 
-            enc_min_lr = self.encoder_min_lr if self.encoder_min_lr is not None else self.min_learning_rate
-            dec_min_lr = self.decoder_min_lr if self.decoder_min_lr is not None else self.min_learning_rate
+            encoder_lr = (
+                self.encoder_lr
+                if self.encoder_lr is not None
+                else self.args.learning_rate
+            )
+            decoder_lr = (
+                self.decoder_lr
+                if self.decoder_lr is not None
+                else self.args.learning_rate
+            )
+
+            enc_min_lr = (
+                self.encoder_min_lr
+                if self.encoder_min_lr is not None
+                else self.min_learning_rate
+            )
+            dec_min_lr = (
+                self.decoder_min_lr
+                if self.decoder_min_lr is not None
+                else self.min_learning_rate
+            )
 
             def get_lr_lambda(current_step, warmup_steps, initial_lr, min_lr):
                 # 1. Warmup phase
                 if current_step < warmup_steps:
                     return float(current_step) / float(max(1, warmup_steps))
-                
+
                 # 2. Constant phase if no cosine decay
                 if not use_cosine:
                     return 1.0
-                    
+
                 # 3. Cosine annealing phase
-                progress = float(current_step - warmup_steps) / float(max(1, num_training_steps - warmup_steps))
+                progress = float(current_step - warmup_steps) / float(
+                    max(1, num_training_steps - warmup_steps)
+                )
                 progress = min(1.0, max(0.0, progress))
-                
+
                 min_lr_ratio = min_lr / initial_lr if initial_lr > 0 else 0.0
                 cosine_decay = 0.5 * (1.0 + math.cos(math.pi * progress))
-                
+
                 return min_lr_ratio + (1.0 - min_lr_ratio) * cosine_decay
 
-            enc_lambda = lambda step: get_lr_lambda(step, enc_warmup_steps, encoder_lr, enc_min_lr)
-            dec_lambda = lambda step: get_lr_lambda(step, dec_warmup_steps, decoder_lr, dec_min_lr)
+            enc_lambda = lambda step: get_lr_lambda(
+                step, enc_warmup_steps, encoder_lr, enc_min_lr
+            )
+            dec_lambda = lambda step: get_lr_lambda(
+                step, dec_warmup_steps, decoder_lr, dec_min_lr
+            )
 
             self.lr_scheduler = torch.optim.lr_scheduler.LambdaLR(
                 optimizer, [enc_lambda, dec_lambda]
@@ -343,8 +387,10 @@ class VAEtrainer(Trainer):
             self.log(metrics)
 
             # Determine if this is the new best model
-            is_new_best_metric = self._determine_best_metric(metrics=metrics, trial=trial)
-            
+            is_new_best_metric = self._determine_best_metric(
+                metrics=metrics, trial=trial
+            )
+
             # If we are saving only the best, update should_save
             if getattr(self.args, "save_strategy", None) == "best":
                 self.control.should_save = is_new_best_metric
@@ -355,16 +401,21 @@ class VAEtrainer(Trainer):
                 if not hasattr(self.state, "vq_collapse_counter"):
                     self.state.vq_collapse_counter = 0
                 self.state.vq_collapse_counter += 1
-                
+
                 if self.args.process_index == 0:
                     logger.warning(
                         f"VQ Collapse detected (fraction {vq_frac} < {self.vq_collapse_threshold}). "
                         f"Patience: {self.state.vq_collapse_counter}/{self.vq_collapse_patience or 'Infinity'}"
                     )
-                
-                if self.vq_collapse_patience is not None and self.state.vq_collapse_counter >= self.vq_collapse_patience:
+
+                if (
+                    self.vq_collapse_patience is not None
+                    and self.state.vq_collapse_counter >= self.vq_collapse_patience
+                ):
                     if self.args.process_index == 0:
-                        logger.error(f"Training stopped due to VQ collapse after {self.vq_collapse_patience} evaluations.")
+                        logger.error(
+                            f"Training stopped due to VQ collapse after {self.vq_collapse_patience} evaluations."
+                        )
                     self.control.should_training_stop = True
             else:
                 self.state.vq_collapse_counter = 0
@@ -373,10 +424,12 @@ class VAEtrainer(Trainer):
             vq_frac = getattr(self.state, "latest_vq_codes_used_frac", 1.0)
             if vq_frac < self.vq_collapse_threshold:
                 if self.args.process_index == 0:
-                    logger.warning(f"Skipping save! vq_codes_used_frac ({vq_frac}) is below threshold ({self.vq_collapse_threshold}).")
+                    logger.warning(
+                        f"Skipping save! vq_codes_used_frac ({vq_frac}) is below threshold ({self.vq_collapse_threshold})."
+                    )
             else:
                 self._save_checkpoint(model, trial)
-                
+
             self.control = self.callback_handler.on_save(
                 self.args, self.state, self.control
             )
@@ -419,7 +472,9 @@ class VAEtrainer(Trainer):
                 run_id=getattr(self, "run_id", "default_run"),
             )
             # Add prefix for Trainer's best model logic
-            eval_metrics = {f"{metric_key_prefix}_{k}": v for k, v in eval_metrics.items()}
+            eval_metrics = {
+                f"{metric_key_prefix}_{k}": v for k, v in eval_metrics.items()
+            }
             metrics.update(eval_metrics)
 
         # Broadcast metrics from rank 0 to all other ranks in distributed setup
@@ -675,13 +730,9 @@ def main(cfg: DictConfig):
     cfg_dict = OmegaConf.to_container(cfg, resolve=True)
 
     training_cfg = cfg_dict.get("training", {})
-    encoder_cfg = cfg_dict.get("encoder", {})
-    decoder_cfg = cfg_dict.get("decoder", {})
 
     # Set seed for reproducibility
     set_seed(training_cfg.get("seed", 42))
-
-    from accelerate import InitProcessGroupKwargs
 
     # Increase timeout to 2 hours for lengthy evaluation on Rank 0
     kwargs = InitProcessGroupKwargs(timeout=datetime.timedelta(seconds=7200))
@@ -720,8 +771,6 @@ def main(cfg: DictConfig):
         )
         logger.info(f"Initialized W&B on main process (id: {wandb_id})")
 
-    from modules.builder import build_model
-
     logger.info("Creating VAE model...")
     model = build_model(cfg_dict)
     if getattr(model.config.mel_spectrogram_config, "use_bigvgan_mel", False):
@@ -756,13 +805,19 @@ def main(cfg: DictConfig):
     decoder_min_lr = training_cfg.pop("decoder_min_lr", None)
     encoder_warmup_ratio = training_cfg.pop("encoder_warmup_ratio", None)
     decoder_warmup_ratio = training_cfg.pop("decoder_warmup_ratio", None)
-    
-    if encoder_lr is not None: encoder_lr = float(encoder_lr)
-    if decoder_lr is not None: decoder_lr = float(decoder_lr)
-    if encoder_min_lr is not None: encoder_min_lr = float(encoder_min_lr)
-    if decoder_min_lr is not None: decoder_min_lr = float(decoder_min_lr)
-    if encoder_warmup_ratio is not None: encoder_warmup_ratio = float(encoder_warmup_ratio)
-    if decoder_warmup_ratio is not None: decoder_warmup_ratio = float(decoder_warmup_ratio)
+
+    if encoder_lr is not None:
+        encoder_lr = float(encoder_lr)
+    if decoder_lr is not None:
+        decoder_lr = float(decoder_lr)
+    if encoder_min_lr is not None:
+        encoder_min_lr = float(encoder_min_lr)
+    if decoder_min_lr is not None:
+        decoder_min_lr = float(decoder_min_lr)
+    if encoder_warmup_ratio is not None:
+        encoder_warmup_ratio = float(encoder_warmup_ratio)
+    if decoder_warmup_ratio is not None:
+        decoder_warmup_ratio = float(decoder_warmup_ratio)
 
     # Create unique run ID for evaluation outputs
     # If run_id is provided via command line (run_job.sh), use it.
@@ -776,7 +831,7 @@ def main(cfg: DictConfig):
     # Setup training arguments
     training_args = TrainingArguments(
         remove_unused_columns=False,  # Don't let Trainer auto-remove columns
-        ddp_timeout=7200,             # 2 hours timeout for long evaluation on Rank 0
+        ddp_timeout=7200,  # 2 hours timeout for long evaluation on Rank 0
         **training_cfg,
     )
     logger.info(f"TrainingArgs bf16 enabled: {training_args.bf16}")
