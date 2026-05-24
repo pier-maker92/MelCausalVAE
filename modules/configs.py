@@ -97,6 +97,7 @@ class DiTConfig:
     window_attention_seconds: float = 3.0
     use_group_bidirectional: bool = False
     kernel_size: int = 31
+    causal_convolution: bool = True
 
 
 #########################

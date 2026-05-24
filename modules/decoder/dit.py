@@ -29,6 +29,7 @@ class Transformer(Module):
         is_causal: bool = True,
         window_size: Optional[int] = None,
         conv_pos_embed_kernel_size: int = 31,
+        conv_is_causal: bool = True,
     ):
         super().__init__()
         assert divisible_by(depth, 2)
@@ -65,7 +66,7 @@ class Transformer(Module):
                 dim=dim,
                 kernel_size=conv_pos_embed_kernel_size,
                 groups=None,
-                causal=is_causal,
+                causal=conv_is_causal,
             )
 
         self.skip_connect_scale = default(skip_connect_scale, 2**-0.5)
