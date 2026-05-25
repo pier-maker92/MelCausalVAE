@@ -30,7 +30,7 @@ class DiT(torch.nn.Module):
         self.is_causal = config.is_causal
         self.use_window_attention = config.use_window_attention
         self.use_group_bidirectional = config.use_group_bidirectional
-        self.causal_convolution = getattr(config, "causal_convolution", True)
+        self.causal_convolution = config.causal_convolution
         mel_fps = 93.75  # 24000 / 256 #FIXME hardcoded to 24kHz dataset
         self.window_size = (
             int(config.window_attention_seconds * mel_fps)
@@ -47,13 +47,19 @@ class DiT(torch.nn.Module):
                 f"VAE group_bidirectional: enabled (group_size will be set to expansion_factor)"
             )
 
-        # context vector upconvolution
-        self.context_vector_upconv = nn.ConvTranspose1d(
-            in_channels=self.audio_latent_dim,
-            out_channels=self.dit_dim,
-            kernel_size=self.expansion_factor,
-            stride=self.expansion_factor,
-        )
+        # context vector upsampling layers
+        self.upsample = config.upsample
+        if self.upsample == "conv":
+            self.context_vector_upconv = nn.ConvTranspose1d(
+                in_channels=self.audio_latent_dim,
+                out_channels=self.dit_dim,
+                kernel_size=self.expansion_factor,
+                stride=self.expansion_factor,
+            )
+        elif self.upsample == "repeat":
+            self.context_vector_proj = nn.Linear(self.audio_latent_dim, self.dit_dim)
+        else:
+            raise ValueError(f"Unknown upsample method: {self.upsample}")
         # noise projection
         self.noise_proj = nn.Sequential(
             nn.Linear(self.dit_dim + self.mel_dim, self.dit_dim),
@@ -84,10 +90,17 @@ class DiT(torch.nn.Module):
         padding_mask: Optional[torch.BoolTensor] = None,
     ):
 
-        # Upconvolution instead of repeat_interleave
-        context_vector = context_vector.transpose(1, 2)
-        context_vector = self.context_vector_upconv(context_vector)
-        context_vector = context_vector.transpose(1, 2)
+        # Upsampling based on configuration
+        if self.upsample == "conv":
+            context_vector = context_vector.transpose(1, 2)
+            context_vector = self.context_vector_upconv(context_vector)
+            context_vector = context_vector.transpose(1, 2)
+        elif self.upsample == "repeat":
+            context_vector = context_vector.repeat_interleave(
+                self.expansion_factor, dim=1
+            )
+            context_vector = self.context_vector_proj(context_vector)
+
         if padding_mask is not None:
             padding_mask = padding_mask.repeat_interleave(self.expansion_factor, dim=1)
         if target is not None:
@@ -109,6 +122,7 @@ class DiT(torch.nn.Module):
             )
             * temperature
         )
+
         return context_vector, x0, padding_mask
 
     def prepare_flow(

@@ -82,22 +82,23 @@ class EncoderConfig(SigmaVAEEncoderConfig):
 
 @dataclass
 class DiTConfig:
-    audio_latent_dim: int = 64
-    dit_dim: int = 768
-    dit_depth: int = 6
-    dit_heads: int = 8
-    dit_dropout_rate: float = 0.1
-    use_conv_layer: bool = False
-    sigma: float = 1e-5
-    expansion_factor: int = 4  # ~25Hz
-    mel_dim: int = 100
-    uncond_prob: float = 0.0
-    is_causal: bool = True
-    use_window_attention: bool = True
-    window_attention_seconds: float = 3.0
-    use_group_bidirectional: bool = False
-    kernel_size: int = 31
-    causal_convolution: bool = True
+    audio_latent_dim: int
+    dit_dim: int
+    dit_depth: int
+    dit_heads: int
+    dit_dropout_rate: float
+    use_conv_layer: bool
+    sigma: float
+    expansion_factor: int
+    mel_dim: int
+    uncond_prob: float
+    is_causal: bool
+    use_window_attention: bool
+    window_attention_seconds: float
+    use_group_bidirectional: bool
+    kernel_size: int
+    causal_convolution: bool
+    upsample: str
 
 
 #########################

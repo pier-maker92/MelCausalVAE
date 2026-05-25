@@ -19,7 +19,6 @@ def load_wav_mono_resampled(path: str, target_sr: int) -> torch.Tensor:
     return wav.squeeze(0)
 
 
-
 def main(args):
     checkpoint_dir = args.checkpoint_dir
     if torch.cuda.is_available():
@@ -86,7 +85,7 @@ def main(args):
                 os.path.dirname(audio_path),
                 f"reconstructed_{os.path.basename(audio_path)}",
             )
-        torchaudio.save(output_path, audio, model.config.sample_rate)
+        torchaudio.save(output_path, audio.cpu(), model.config.sample_rate)
         print("Saved reconstructed audio to", output_path)
 
 
