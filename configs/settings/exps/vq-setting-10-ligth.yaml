@@ -9,8 +9,8 @@ sample_rate: 24000
 training:
   num_train_epochs: 10
   dataset_name: librispeech_aligned
-  output_dir: checkpoints/exps/vq-setting-9
-  per_device_train_batch_size: 16
+  output_dir: checkpoints/exps/vq-setting-10-ligth
+  per_device_train_batch_size: 8
   per_device_eval_batch_size: 4
 
   # lr
@@ -26,7 +26,7 @@ training:
   # report
   report_to: wandb
   wandb_project: speech-vae
-  wandb_run_name: set9
+  wandb_run_name: set10-ligth
 
   fp16: false
   bf16: true
@@ -64,13 +64,13 @@ encoder:
 
   # --- VQ Config ---
   vq_config:
-    num_embeddings: 128
+    num_embeddings: 512
     commitment_weight: 0.25
     reset_dead_codes: true
     reset_every_forward: 10
     residual_and_tail_dropout_p: 0.025
     dim_to_quantize: 32
-    use_ema_codebook: false
+    use_ema_codebook: true
     add_vq_residual_to_stoch: false
 
   # --- Dropout Config ---
@@ -82,7 +82,7 @@ encoder:
     k: 6.0
     x0: 0.5
     dropout_hierarchical: false
-    pre_quantization: false
+    pre_quantization: true
 
   # --- KL Config ---
   kl_chunk_regularizer_config: null

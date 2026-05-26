@@ -24,6 +24,7 @@ def build_model(cfg_dict: Dict[str, Any]) -> VAE:
     decoder_cfg.setdefault("mel_dim", cfg_dict.get("mel_dim"))
     decoder_cfg.setdefault("audio_latent_dim", cfg_dict.get("latent_dim"))
     decoder_cfg.setdefault("expansion_factor", cfg_dict.get("compress_factor"))
+    decoder_cfg.setdefault("upsample", cfg_dict.get("upsample", "conv"))
 
     decoder_config = DiTConfig(**decoder_cfg)
 
