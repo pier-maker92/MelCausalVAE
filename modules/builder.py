@@ -20,6 +20,10 @@ def build_model(cfg_dict: Dict[str, Any]) -> VAE:
     encoder_cfg = cfg_dict.get("encoder_config", cfg_dict.get("encoder", {})).copy()
     decoder_cfg = cfg_dict.get("decoder_config", cfg_dict.get("decoder", {})).copy()
     mel_spec_cfg = cfg_dict.get("mel_spectrogram_config", {}).copy()
+    
+    decoder_cfg.setdefault("mel_dim", cfg_dict.get("mel_dim"))
+    decoder_cfg.setdefault("audio_latent_dim", cfg_dict.get("latent_dim"))
+    decoder_cfg.setdefault("expansion_factor", cfg_dict.get("compress_factor"))
 
     decoder_config = DiTConfig(**decoder_cfg)
 
