@@ -76,9 +76,9 @@ encoder:
   # --- Dropout Config ---
   dropout_regularizer_config:
     chunk_size: 2
-    strategy: "sigmoid"
-    dropout_start: 0.2
-    dropout_end: 0.8
+    strategy: "linear"
+    dropout_start: 0.0
+    dropout_end: 0.7
     k: 6.0
     x0: 0.5
     dropout_hierarchical: false

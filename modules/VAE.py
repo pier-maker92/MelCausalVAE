@@ -5,7 +5,7 @@ from .decoder.cfm import DiT
 from .configs import VAEConfig
 from .encoder.encoder import Encoder
 from .utils import count_parameters_by_module
-from .feature_extractor import FeatureExtractor
+from .feature_extractor import FeatureExtractor, WavLMFeatureExtractor
 from .output_dataclasses import VAEOutput, DecoderOutput, FeatureExtractorOutput
 
 
@@ -16,6 +16,11 @@ class VAE(torch.nn.Module):
         super().__init__()
         self.config = config
         self.feature_extractor = FeatureExtractor(config.mel_spectrogram_config)
+        
+        self.wavlm_extractor = None
+        if getattr(config, "wavlm_config", None) is not None:
+            self.wavlm_extractor = WavLMFeatureExtractor(config.wavlm_config)
+
         self.encoder = Encoder(config.encoder_config)
         self.decoder = DiT(config.decoder_config)
 
@@ -33,7 +38,12 @@ class VAE(torch.nn.Module):
         features_extractor_output = self.feature_extractor(audios_srs)
         features = features_extractor_output.audio_features
         padding_mask = features_extractor_output.padding_mask
-        return features, padding_mask
+
+        if self.wavlm_extractor is not None:
+            wavlm_output = self.wavlm_extractor(audios_srs)
+            return wavlm_output.audio_features, wavlm_output.padding_mask, features, padding_mask
+
+        return features, padding_mask, features, padding_mask
 
     def encode(self, features, padding_mask, **kwargs):
         encoder_output = self.encoder(
@@ -45,13 +55,14 @@ class VAE(torch.nn.Module):
 
     def forward(self, audios_srs, **kwargs):
         # extract features
-        features, padding_mask = self.extract_features(audios_srs, **kwargs)
+        enc_features, enc_padding_mask, dec_features, dec_padding_mask = self.extract_features(audios_srs, **kwargs)
         # encode to latent space
-        encoder_output = self.encode(features, padding_mask, **kwargs)
+        encoder_output = self.encode(enc_features, enc_padding_mask, **kwargs)
+
         # decode from latent space
         audio_loss = self.decoder(
-            target=features,
-            target_padding_mask=padding_mask,
+            target=dec_features,
+            target_padding_mask=dec_padding_mask,
             context_vector=encoder_output.z,
         ).loss
 
@@ -127,8 +138,8 @@ class VAE(torch.nn.Module):
         """
 
         # Encode audio to mel spectrogram
-        features, padding_mask = self.extract_features(audios_srs, **kwargs)
-        encoder_output = self.encode(features, padding_mask, **kwargs)
+        enc_features, enc_padding_mask, dec_features, dec_padding_mask = self.extract_features(audios_srs, **kwargs)
+        encoder_output = self.encode(enc_features, enc_padding_mask, **kwargs)
 
         # Handle cases where VQ is disabled or parts are missing
         if (
@@ -155,7 +166,7 @@ class VAE(torch.nn.Module):
             padding_mask=encoder_output.padding_mask,
         )
         if self.config.mel_spectrogram_config.normalize:
-            features = self.denormalize_mel(features)
+            dec_features = self.denormalize_mel(dec_features)
 
         return {
             "decoder_output": DecoderOutput(
@@ -164,8 +175,8 @@ class VAE(torch.nn.Module):
             ),
             "encoder_output": encoder_output,
             "feature_extractor_output": FeatureExtractorOutput(
-                audio_features=features,
-                padding_mask=padding_mask,
+                audio_features=dec_features,
+                padding_mask=dec_padding_mask,
             ),
         }
 

@@ -9,9 +9,10 @@ sample_rate: 24000
 training:
   num_train_epochs: 10
   dataset_name: librispeech_aligned
-  output_dir: checkpoints/exps/vq-setting-10-ligth
-  per_device_train_batch_size: 8
+  output_dir: checkpoints/exps/vq-setting-10-wavlm
+  per_device_train_batch_size: 16
   per_device_eval_batch_size: 4
+  generate_and_log_samples: true
 
   # lr
   learning_rate: 1e-4
@@ -26,7 +27,7 @@ training:
   # report
   report_to: wandb
   wandb_project: speech-vae
-  wandb_run_name: set10-ligth
+  wandb_run_name: set10-wavlm
 
   fp16: false
   bf16: true
@@ -50,6 +51,11 @@ training:
   dataloader_num_workers: 8
   eval_num_samples: 100
 
+wavlm_config:
+  pretrained_model_name: "microsoft/wavlm-large"
+  layer: 6
+  sampling_rate: 16000
+  normalize: true
 
 # Encoder configuration
 encoder:
@@ -76,9 +82,9 @@ encoder:
   # --- Dropout Config ---
   dropout_regularizer_config:
     chunk_size: 2
-    strategy: "sigmoid"
-    dropout_start: 0.2
-    dropout_end: 0.8
+    strategy: "linear"
+    dropout_start: 0.0
+    dropout_end: 0.7
     k: 6.0
     x0: 0.5
     dropout_hierarchical: false

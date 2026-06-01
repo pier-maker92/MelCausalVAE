@@ -82,10 +82,8 @@ class FeatureExtractor(nn.Module):
             )
         sr = unique_sampling_rates.pop()
         if sr != self.sampling_rate:
-            raise ValueError(
-                f"Sampling rate {sr} is not supported by this model. "
-                f"Expected {self.sampling_rate}."
-            )
+            import torchaudio.functional as F
+            audios = [F.resample(audio, sr, self.sampling_rate) for audio in audios]
         dtype = audios[0].dtype
         device = audios[0].device
         # Get max length for padding
@@ -195,10 +193,8 @@ class WavLMFeatureExtractor(nn.Module):
             )
         sr = unique_sampling_rates.pop()
         if sr != self.sampling_rate:
-            raise ValueError(
-                f"Sampling rate {sr} is not supported by this model. "
-                f"Expected {self.sampling_rate}."
-            )
+            import torchaudio.functional as F
+            audios = [F.resample(audio, sr, self.sampling_rate) for audio in audios]
         
         dtype = audios[0].dtype
         device = audios[0].device

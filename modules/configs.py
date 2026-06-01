@@ -142,18 +142,26 @@ class VAEConfig:
     mel_spectrogram_config: MelSpectrogramConfig = field(
         default_factory=MelSpectrogramConfig
     )
+    wavlm_config: Optional[WavLMConfig] = None
 
     def __post_init__(self):
         self.mel_spectrogram_config.n_mels = self.mel_dim
         self.mel_spectrogram_config.sampling_rate = self.sample_rate
 
-        self.encoder_config.mel_dim = self.mel_dim
+        if self.wavlm_config is not None:
+            self.encoder_config.mel_dim = 1024
+        else:
+            self.encoder_config.mel_dim = self.mel_dim
+
         self.encoder_config.latent_dim = self.latent_dim
         self.encoder_config.compress_factor_C = self.compress_factor
 
         self.decoder_config.mel_dim = self.mel_dim
         self.decoder_config.audio_latent_dim = self.latent_dim
-        self.decoder_config.expansion_factor = self.compress_factor
+        if self.wavlm_config is not None:
+            self.decoder_config.expansion_factor = 2 * self.compress_factor
+        else:
+            self.decoder_config.expansion_factor = self.compress_factor
 
     @property
     def hidden_size(self) -> int:

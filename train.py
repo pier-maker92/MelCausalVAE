@@ -731,14 +731,14 @@ def main(cfg: DictConfig):
 
     training_cfg = cfg_dict.get("training", {})
 
-    # Set seed for reproducibility
-    set_seed(training_cfg.get("seed", 42))
-
     # Increase timeout to 2 hours for lengthy evaluation on Rank 0
     kwargs = InitProcessGroupKwargs(timeout=datetime.timedelta(seconds=7200))
     accelerator = Accelerator(kwargs_handlers=[kwargs])
     logger.info(f"Using device: {accelerator.device}")
     logger.info(f"Mixed precision: {accelerator.state.mixed_precision}")
+
+    # Set seed for reproducibility
+    set_seed(training_cfg.get("seed", 42))
 
     # Create AudioDataset
     dataset_name = training_cfg.pop("dataset_name", None)

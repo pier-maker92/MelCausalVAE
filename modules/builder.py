@@ -49,6 +49,10 @@ def build_model(cfg_dict: Dict[str, Any]) -> VAE:
     )
     mel_spec_config = MelSpectrogramConfig(**mel_spec_cfg)
 
+    from .configs import WavLMConfig
+    wavlm_dict = cfg_dict.get("wavlm_config", None)
+    wavlm_config = WavLMConfig(**wavlm_dict) if wavlm_dict else None
+
     vae_config = VAEConfig(
         mel_dim=cfg_dict.get("mel_dim"),
         latent_dim=cfg_dict.get("latent_dim"),
@@ -57,6 +61,7 @@ def build_model(cfg_dict: Dict[str, Any]) -> VAE:
         encoder_config=encoder_config,
         decoder_config=decoder_config,
         mel_spectrogram_config=mel_spec_config,
+        wavlm_config=wavlm_config,
     )
 
     return VAE(config=vae_config)

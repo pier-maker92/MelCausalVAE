@@ -178,15 +178,19 @@ if __name__ == "__main__":
         required=True,
         help="HuggingFace dataset name or local dataset key (e.g. mls, libritts, librispeech_aligned)",
     )
+    default_dir = "data/wavlm_features"
+    if "SLURM_TMPDIR" in os.environ:
+        default_dir = os.path.join(os.environ["SLURM_TMPDIR"], "wavlm_features")
+
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="data/wavlm_features",
+        default=default_dir,
         help="Path to the output directory",
     )
     parser.add_argument("--debug", action="store_true", help="Enable debug mode")
-    parser.add_argument("--batch_size", type=int, default=8, help="Batch size for inference")
-    parser.add_argument("--num_workers", type=int, default=4, help="Number of dataloader workers")
+    parser.add_argument("--batch_size", type=int, default=32, help="Batch size for inference")
+    parser.add_argument("--num_workers", type=int, default=1, help="Number of dataloader workers")
     parser.add_argument("--shard_size_mb", type=int, default=512, help="Max size in MB for each parquet shard")
     args = parser.parse_args()
     main(args)
