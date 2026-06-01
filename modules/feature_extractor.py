@@ -5,9 +5,14 @@ import einops
 from torch import nn
 from einops import rearrange
 from typing import Tuple, List
-from .configs import MelSpectrogramConfig
+from .configs import MelSpectrogramConfig, WavLMConfig
 from torchaudio.transforms import MelSpectrogram
 from .output_dataclasses import FeatureExtractorOutput
+
+try:
+    from transformers import WavLMModel
+except ImportError:
+    WavLMModel = None
 
 
 # TODO fix implementation for bigvgan
@@ -145,4 +150,112 @@ class FeatureExtractor(nn.Module):
         return FeatureExtractorOutput(
             audio_features=mel_spec,
             padding_mask=padding_mask,
+        )
+
+
+class WavLMFeatureExtractor(nn.Module):
+    def __init__(
+        self,
+        config: WavLMConfig,
+        **kwargs,
+    ):
+        super().__init__()
+        if WavLMModel is None:
+            raise ImportError("transformers is not installed. Please install it using `pip install transformers` to use WavLMFeatureExtractor.")
+            
+        self.sampling_rate = config.sampling_rate
+        self.layer = config.layer
+        self.normalize = config.normalize
+        
+        self.wavlm = WavLMModel.from_pretrained(config.pretrained_model_name)
+        self.wavlm.eval()
+        for param in self.wavlm.parameters():
+            param.requires_grad = False
+            
+        self.register_buffer("std", torch.tensor(1.0))
+        self.register_buffer("mean", torch.tensor(0.0))
+
+    @torch.no_grad()
+    def _update_std_mean_with_momentum(
+        self, features: torch.Tensor, padding_mask: torch.BoolTensor
+    ):
+        valid_features = features[~padding_mask]
+        if valid_features.numel() > 0:
+            self.std.copy_(self.std * 0.99 + valid_features.std() * 0.01)
+            self.mean.copy_(self.mean * 0.99 + valid_features.mean() * 0.01)
+            
+    def forward(self, audios_srs: List[Tuple[torch.FloatTensor, int]], **kwargs):
+        audios, sampling_rates = zip(*audios_srs)
+        unique_sampling_rates = set(sampling_rates)
+        if len(unique_sampling_rates) > 1:
+            raise ValueError(
+                "All audios must have the same sampling rate. "
+                f"Found {len(unique_sampling_rates)} unique sampling rates: "
+                f"{unique_sampling_rates}."
+            )
+        sr = unique_sampling_rates.pop()
+        if sr != self.sampling_rate:
+            raise ValueError(
+                f"Sampling rate {sr} is not supported by this model. "
+                f"Expected {self.sampling_rate}."
+            )
+        
+        dtype = audios[0].dtype
+        device = audios[0].device
+        
+        if len(audios) > 1:
+            max_length = max(audio.size(-1) for audio in audios)
+            batch_size = len(audios)
+
+            padded_audios = torch.nn.utils.rnn.pad_sequence(
+                audios, batch_first=True, padding_value=0.0
+            )
+            padding_mask = torch.ones(
+                (batch_size, max_length),
+                dtype=torch.bool,
+                device=device,
+            )
+            for i, audio in enumerate(audios):
+                padding_mask[i, : audio.size(-1)] = False
+        else:
+            padded_audios = audios[0].unsqueeze(0)
+            padding_mask = torch.zeros(
+                1,
+                audios[0].size(-1),
+                dtype=torch.bool,
+                device=device,
+            )
+
+        if self.wavlm.device != device:
+            self.wavlm = self.wavlm.to(device)
+
+        with torch.no_grad():
+            outputs = self.wavlm(
+                padded_audios, 
+                attention_mask=(~padding_mask).long(), 
+                output_hidden_states=True
+            )
+            features = outputs.hidden_states[self.layer]
+            
+        features = features.to(dtype)
+        
+        feat_padding_mask = (
+            torch.nn.functional.interpolate(
+                padding_mask.unsqueeze(1).to(torch.float32),
+                size=features.shape[1],
+                mode="nearest",
+            )
+            .squeeze(1)
+            .to(torch.bool)
+        )
+
+        if self.training:
+            self._update_std_mean_with_momentum(features, feat_padding_mask)
+
+        if self.normalize:
+            features = (features - self.mean) / self.std
+
+        return FeatureExtractorOutput(
+            audio_features=features,
+            padding_mask=feat_padding_mask,
         )

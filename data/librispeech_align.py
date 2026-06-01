@@ -25,13 +25,24 @@ def simple_collate_fn(batch):
 
 
 class LibriSpeechAlignDataset(SimpleAudioDataset):
-    def __init__(self, languages: Optional[List[str]] = None):
+    def __init__(self, debug: bool = False):
         super().__init__()
         # Load the two datasets
         dataset = load_dataset(
             "parquet",
             data_dir=f"{parquet_dir}",
         )
+
+        # if debug:
+        #     confirm = input(
+        #         "This is in debug mode, meaning that only dev partition will be used. Plase confirm this setting or just leave and never come back! Y/n: "
+        #     )
+        #     if confirm.strip().lower() not in ["y", "yes", ""]:
+        #         print("Exiting...")
+        #         sys.exit(0)
+        # self.debug = debug
+        self.dataset = dataset
+
         # dataset = load_dataset(
         #     "parquet",
         #     data_files={

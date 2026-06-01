@@ -117,6 +117,14 @@ class MelSpectrogramConfig:
     normalize: bool = True
     use_bigvgan_mel: bool = False
 
+@dataclass
+class WavLMConfig:
+    pretrained_model_name: str = "microsoft/wavlm-large"
+    layer: int = 6
+    sampling_rate: int = 16000
+    normalize: bool = True
+
+
 
 #########################
 #          VAE          #
