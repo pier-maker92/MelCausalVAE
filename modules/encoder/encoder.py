@@ -261,11 +261,9 @@ class Encoder(SigmaVAEEncoder):
         if hasattr(self, "vq"):
             out["vq_stats"] = vq_out.stats
             out["vq_loss"] = vq_out.loss
-            out["quantized"] = z_quantized
-            out["residual"] = torch.cat(
-                [vq_out.residual, torch.zeros_like(mu_tail)], dim=-1
-            )
-            out["tail"] = torch.cat([torch.zeros_like(mu_head), mu_tail], dim=-1)
+            out["quantized"] = vq_quantized_ste
+            out["residual"] = vq_out.residual
+            out["tail"] = mu_tail
             out["indices"] = vq_out.indices
 
         return EncoderOutput(**out)

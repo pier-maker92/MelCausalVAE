@@ -150,12 +150,13 @@ class VAE(torch.nn.Module):
             context_vector = encoder_output.z
         else:
             context_vector = torch.zeros_like(encoder_output.z)
+            qd = self.config.encoder_config.vq_config.dim_to_quantize
             if kwargs.get("quantized", True) and encoder_output.quantized is not None:
-                context_vector += encoder_output.quantized
+                context_vector[..., :qd] += encoder_output.quantized
             if kwargs.get("residual", True) and encoder_output.residual is not None:
-                context_vector += encoder_output.residual
+                context_vector[..., :qd] += encoder_output.residual
             if kwargs.get("tail", True) and encoder_output.tail is not None:
-                context_vector += encoder_output.tail
+                context_vector[..., qd:] += encoder_output.tail
 
         reconstructed_mel, reconstructed_padding_mask = self.sample(
             num_steps=num_steps,
