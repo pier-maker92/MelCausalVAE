@@ -148,6 +148,30 @@ class Encoder(SigmaVAEEncoder):
         h = self.transformer(hiddens)  # [B, T/C, 512]
 
         mu_original = self.mu(h)
+
+        ortho_loss = None
+        if hasattr(self, "vq"):
+            qd = self.config.vq_config.dim_to_quantize
+            if qd > 0 and qd < mu_original.shape[-1]:
+                if padding_mask is not None:
+                    valid_mask = ~padding_mask
+                    mu_valid = mu_original[valid_mask]
+                else:
+                    mu_valid = mu_original.view(-1, mu_original.shape[-1])
+
+                mu_head_flat = mu_valid[:, :qd]
+                mu_tail_flat = mu_valid[:, qd:]
+
+                # Center features
+                mu_head_flat = mu_head_flat - mu_head_flat.mean(dim=0, keepdim=True)
+                mu_tail_flat = mu_tail_flat - mu_tail_flat.mean(dim=0, keepdim=True)
+
+                N_valid = mu_head_flat.shape[0]
+                if N_valid > 1:
+                    cov = (mu_head_flat.T @ mu_tail_flat) / (N_valid - 1)
+                    # 1/N sum_i sum_j Cov(i, j)^2
+                    ortho_loss = (cov**2).mean()
+
         if getattr(self.config, "use_slt", False):
             mu_original = self.slt(mu_original)
 
@@ -211,11 +235,13 @@ class Encoder(SigmaVAEEncoder):
             else:
                 z_stoch = mu
 
-        # 3. Dropout Regularizer (on active parts only)
-        if hasattr(self, "dropout_regularizer") and not self.use_pre_quant_dropout:
-            z_stoch_dropped = self.dropout_regularizer(z_stoch)
-        else:
-            z_stoch_dropped = z_stoch
+        # # 3. Dropout Regularizer (on active parts only)
+        # if hasattr(self, "dropout_regularizer") and not self.use_pre_quant_dropout:
+        #     z_stoch_dropped = self.dropout_regularizer(z_stoch)
+        # else:
+        #     z_stoch_dropped = z_stoch
+
+        z_stoch_dropped = z_stoch
 
         # 4. Pad with zeros if residual was skipped
         if hasattr(self, "vq") and not self.add_vq_residual_to_stoch:
@@ -233,6 +259,8 @@ class Encoder(SigmaVAEEncoder):
             z_stoch_dropped = z_stoch_dropped * keep_mask
 
         z = z_quantized + z_stoch_dropped
+        if hasattr(self, "dropout_regularizer") and not self.use_pre_quant_dropout:
+            z = self.dropout_regularizer(z)
 
         kl_loss = None
         if kwargs.get("step", None) is not None:
@@ -241,7 +269,9 @@ class Encoder(SigmaVAEEncoder):
                     mu_stoch, logvar_stoch, padding_mask
                 )
             else:
-                _qd = self.config.vq_config.dim_to_quantize if hasattr(self, "vq") else 0
+                _qd = (
+                    self.config.vq_config.dim_to_quantize if hasattr(self, "vq") else 0
+                )
                 kl_term = self.kl_divergence(
                     (
                         mu_stoch
@@ -260,6 +290,7 @@ class Encoder(SigmaVAEEncoder):
             "padding_mask": padding_mask,
             "mu": mu_stoch,
             "mu_pre_vq": mu,
+            "ortho_loss": ortho_loss,
         }
 
         if hasattr(self, "vq"):

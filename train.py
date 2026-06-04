@@ -110,6 +110,7 @@ class VAEtrainer(Trainer):
             "kl_loss",
             "mu_mean",
             "mu_var",
+            "ortho_loss",
         ]
         if getattr(self.model.encoder.config, "vq_config", None) is not None:
             granular_losses.extend(
@@ -291,7 +292,10 @@ class VAEtrainer(Trainer):
             kl_loss = output.kl_loss
             vq_loss = getattr(output, "vq_loss", None)
             vq_stats = getattr(output, "vq_stats", None)
+            ortho_loss = getattr(output, "ortho_loss", None)
             loss = audio_loss + kl_loss + (vq_loss if vq_loss is not None else 0.0)
+            if ortho_loss is not None:
+                loss = loss + ortho_loss
 
             # Accumulate granular losses
             flat_metrics = {
@@ -300,6 +304,7 @@ class VAEtrainer(Trainer):
                 "mu_mean": getattr(output, "mu_mean", None),
                 "mu_var": getattr(output, "mu_var", None),
                 "vq_loss": vq_loss,
+                "ortho_loss": ortho_loss,
             }
             if vq_stats is not None:
                 flat_metrics["vq_perplexity"] = vq_stats.perplexity

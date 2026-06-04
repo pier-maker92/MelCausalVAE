@@ -77,6 +77,7 @@ class VAE(torch.nn.Module):
             "kl_loss": encoder_output.kl_loss,
             "mu_mean": mu_mean,
             "mu_var": mu_var,
+            "ortho_loss": getattr(encoder_output, "ortho_loss", None),
         }
         vq_stats = getattr(encoder_output, "vq_stats", None)
         if vq_stats is not None:
