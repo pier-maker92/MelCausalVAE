@@ -79,9 +79,11 @@ class SigmaVAEEncoder(nn.Module):
     def sample_scalar_std(
         self, mu: torch.FloatTensor, std: Optional[float] = None
     ) -> torch.FloatTensor:
+        if std is None:
+            std = self.config.target_std
         weight = self.std_activation(
             torch.randn(mu.shape[0], mu.shape[1], dtype=mu.dtype, device=mu.device)
-            * (self.config.target_std if std is None else std)
+            * std
         )
         return torch.clamp(weight, min=-2 * std, max=2 * std)
 

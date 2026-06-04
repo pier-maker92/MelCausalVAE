@@ -206,7 +206,10 @@ class Encoder(SigmaVAEEncoder):
         else:
             mu_stoch = mu
             logvar_stoch = logvar
-            z_stoch = self.reparameterize(mu, logvar)
+            if self.training:
+                z_stoch = self.reparameterize(mu, logvar)
+            else:
+                z_stoch = mu
 
         # 3. Dropout Regularizer (on active parts only)
         if hasattr(self, "dropout_regularizer") and not self.use_pre_quant_dropout:
@@ -238,11 +241,12 @@ class Encoder(SigmaVAEEncoder):
                     mu_stoch, logvar_stoch, padding_mask
                 )
             else:
+                _qd = self.config.vq_config.dim_to_quantize if hasattr(self, "vq") else 0
                 kl_term = self.kl_divergence(
                     (
                         mu_stoch
                         if not self.use_pre_quant_dropout
-                        else mu_original[..., qd:]  # only tail
+                        else mu_original[..., _qd:]  # only tail
                     ),
                     logvar_stoch,
                     padding_mask,
