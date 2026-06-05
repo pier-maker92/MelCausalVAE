@@ -46,6 +46,8 @@ class VAEOutput(ModelOutput):
     quantized: Optional[torch.FloatTensor] = None
     residual: Optional[torch.FloatTensor] = None
     tail: Optional[torch.FloatTensor] = None
+    distill_cosine_loss: Optional[torch.FloatTensor] = None
+    distill_ortho_loss: Optional[torch.FloatTensor] = None
 
 
 @dataclass

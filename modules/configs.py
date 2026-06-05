@@ -60,6 +60,13 @@ class VQConfig:
 
 
 @dataclass
+class SemanticDistillationConfig:
+    wavlm_layer: int = 18
+    cosine_loss_weight: float = 1.0
+    ortho_loss_weight: float = 1.0
+
+
+@dataclass
 class EncoderConfig(SigmaVAEEncoderConfig):
     mel_dim: int = 100
     d_model: int = 512
@@ -73,6 +80,7 @@ class EncoderConfig(SigmaVAEEncoderConfig):
     vq_config: Optional[VQConfig] = None
     dropout_regularizer_config: Optional[DropoutConfig] = None
     kl_chunk_regularizer_config: Optional[KLChunkRegularizer] = None
+    semantic_distillation_config: Optional[SemanticDistillationConfig] = None
 
 
 #########################

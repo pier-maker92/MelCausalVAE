@@ -120,6 +120,13 @@ class VAEtrainer(Trainer):
                     "vq_codes_used_frac",
                 ]
             )
+        if getattr(self.model.encoder.config, "semantic_distillation_config", None) is not None:
+            granular_losses.extend(
+                [
+                    "distill_cosine_loss",
+                    "distill_ortho_loss",
+                ]
+            )
         self.add_callback(AddGranularLossesToTrainerState(granular_losses))
         self.add_callback(KLWarmupRatioCallback())
 
@@ -292,6 +299,14 @@ class VAEtrainer(Trainer):
             vq_loss = getattr(output, "vq_loss", None)
             vq_stats = getattr(output, "vq_stats", None)
             loss = audio_loss + kl_loss + (vq_loss if vq_loss is not None else 0.0)
+            
+            distill_cosine_loss = getattr(output, "distill_cosine_loss", None)
+            distill_ortho_loss = getattr(output, "distill_ortho_loss", None)
+            sem_cfg = getattr(model.encoder.config, "semantic_distillation_config", None)
+            if distill_cosine_loss is not None and sem_cfg is not None:
+                loss += distill_cosine_loss * sem_cfg.cosine_loss_weight
+            if distill_ortho_loss is not None and sem_cfg is not None:
+                loss += distill_ortho_loss * sem_cfg.ortho_loss_weight
 
             # Accumulate granular losses
             flat_metrics = {
@@ -300,6 +315,8 @@ class VAEtrainer(Trainer):
                 "mu_mean": getattr(output, "mu_mean", None),
                 "mu_var": getattr(output, "mu_var", None),
                 "vq_loss": vq_loss,
+                "distill_cosine_loss": distill_cosine_loss,
+                "distill_ortho_loss": distill_ortho_loss,
             }
             if vq_stats is not None:
                 flat_metrics["vq_perplexity"] = vq_stats.perplexity

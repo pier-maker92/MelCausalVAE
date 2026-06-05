@@ -94,6 +94,9 @@ class Encoder(SigmaVAEEncoder):
         else:
             self.use_pre_quant_dropout = False
 
+        if getattr(config, "semantic_distillation_config", None) is not None and config.dropout_regularizer_config is not None:
+            raise ValueError("Dropout policy must be null when semantic distillation is active.")
+
         if config.kl_chunk_regularizer_config:
             self.kl_chunk_regularizer = KLChunkRegularizer(
                 config=config.kl_chunk_regularizer_config,

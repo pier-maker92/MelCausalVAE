@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 import safetensors.torch
 from typing import Optional
 from .decoder.cfm import DiT
@@ -21,6 +22,14 @@ class VAE(torch.nn.Module):
         if getattr(config, "wavlm_config", None) is not None:
             self.wavlm_extractor = WavLMFeatureExtractor(config.wavlm_config)
 
+        self.distill_wavlm_extractor = None
+        sem_cfg = getattr(config.encoder_config, "semantic_distillation_config", None)
+        if sem_cfg is not None:
+            from .configs import WavLMConfig
+            self.distill_wavlm_extractor = WavLMFeatureExtractor(WavLMConfig(layer=sem_cfg.wavlm_layer))
+            dim_to_quantize = config.encoder_config.vq_config.dim_to_quantize if config.encoder_config.vq_config else config.encoder_config.latent_dim
+            self.distill_proj_head = torch.nn.Linear(1024, dim_to_quantize)
+
         self.encoder = Encoder(config.encoder_config)
         self.decoder = DiT(config.decoder_config)
 
@@ -39,11 +48,15 @@ class VAE(torch.nn.Module):
         features = features_extractor_output.audio_features
         padding_mask = features_extractor_output.padding_mask
 
+        distill_features = None
+        if self.distill_wavlm_extractor is not None:
+            distill_features = self.distill_wavlm_extractor(audios_srs).audio_features
+
         if self.wavlm_extractor is not None:
             wavlm_output = self.wavlm_extractor(audios_srs)
-            return wavlm_output.audio_features, wavlm_output.padding_mask, features, padding_mask
+            return wavlm_output.audio_features, wavlm_output.padding_mask, features, padding_mask, distill_features
 
-        return features, padding_mask, features, padding_mask
+        return features, padding_mask, features, padding_mask, distill_features
 
     def encode(self, features, padding_mask, **kwargs):
         encoder_output = self.encoder(
@@ -55,7 +68,7 @@ class VAE(torch.nn.Module):
 
     def forward(self, audios_srs, **kwargs):
         # extract features
-        enc_features, enc_padding_mask, dec_features, dec_padding_mask = self.extract_features(audios_srs, **kwargs)
+        enc_features, enc_padding_mask, dec_features, dec_padding_mask, distill_features = self.extract_features(audios_srs, **kwargs)
         # encode to latent space
         encoder_output = self.encode(enc_features, enc_padding_mask, **kwargs)
 
@@ -82,7 +95,49 @@ class VAE(torch.nn.Module):
         if vq_stats is not None:
             out.update({"vq_loss": encoder_output.vq_loss, "vq_stats": vq_stats})
 
+        if distill_features is not None:
+            distill_cosine_loss, distill_ortho_loss = self._compute_distillation_losses(encoder_output, distill_features)
+            out["distill_cosine_loss"] = distill_cosine_loss
+            out["distill_ortho_loss"] = distill_ortho_loss
+
         return VAEOutput(**out)
+
+    def _compute_distillation_losses(self, encoder_output, distill_features):
+        mu_pre_vq = encoder_output.mu_pre_vq
+        B, T_mu, D_mu = mu_pre_vq.shape
+        
+        aligned_wavlm = F.interpolate(
+            distill_features.transpose(1, 2),
+            size=T_mu,
+            mode='linear',
+            align_corners=False
+        ).transpose(1, 2)
+        
+        mask = ~encoder_output.padding_mask
+        qd = self.config.encoder_config.vq_config.dim_to_quantize if getattr(self.config.encoder_config, "vq_config", None) else self.config.encoder_config.latent_dim
+        
+        mu_head = mu_pre_vq[..., :qd]
+        projected_wavlm_head = self.distill_proj_head(aligned_wavlm)
+        
+        mu_head_masked = mu_head[mask]
+        projected_wavlm_head_masked = projected_wavlm_head[mask]
+        
+        distill_cosine_loss = 1.0 - F.cosine_similarity(mu_head_masked, projected_wavlm_head_masked, dim=-1).mean()
+        
+        mu_tail = getattr(encoder_output, "tail", None)
+        if mu_tail is None:
+            mu_tail = mu_pre_vq[..., qd:]
+        
+        mu_tail_masked = mu_tail[mask]
+        aligned_wavlm_masked = aligned_wavlm[mask]
+        
+        mu_tail_centered = mu_tail_masked - mu_tail_masked.mean(dim=0, keepdim=True)
+        aligned_wavlm_centered = aligned_wavlm_masked - aligned_wavlm_masked.mean(dim=0, keepdim=True)
+        
+        cov = torch.matmul(mu_tail_centered.T, aligned_wavlm_centered) / (mu_tail_centered.size(0) - 1 + 1e-8)
+        distill_ortho_loss = (cov ** 2).mean()
+
+        return distill_cosine_loss, distill_ortho_loss
 
     @torch.no_grad()
     def denormalize_mel(self, mel: torch.Tensor):
@@ -138,7 +193,7 @@ class VAE(torch.nn.Module):
         """
 
         # Encode audio to mel spectrogram
-        enc_features, enc_padding_mask, dec_features, dec_padding_mask = self.extract_features(audios_srs, **kwargs)
+        enc_features, enc_padding_mask, dec_features, dec_padding_mask, _ = self.extract_features(audios_srs, **kwargs)
         encoder_output = self.encode(enc_features, enc_padding_mask, **kwargs)
 
         # Handle cases where VQ is disabled or parts are missing
