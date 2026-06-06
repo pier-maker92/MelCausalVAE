@@ -11,6 +11,7 @@ from .configs import (
     VQConfig,
     DropoutConfig,
     KLChunkRegularizer,
+    SemanticDistillationConfig,
 )
 
 
@@ -37,10 +38,14 @@ def build_model(cfg_dict: Dict[str, Any]) -> VAE:
     kl_dict = encoder_cfg.pop("kl_chunk_regularizer_config", None)
     kl_config = KLChunkRegularizer(**kl_dict) if kl_dict else None
 
+    distill_dict = encoder_cfg.pop("semantic_distillation_config", None)
+    distill_config = SemanticDistillationConfig(**distill_dict) if distill_dict else None
+
     encoder_config = EncoderConfig(
         vq_config=vq_config,
         dropout_regularizer_config=dropout_config,
         kl_chunk_regularizer_config=kl_config,
+        semantic_distillation_config=distill_config,
         **encoder_cfg,
     )
 

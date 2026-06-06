@@ -33,6 +33,7 @@ class EncoderOutput(ModelOutput):
     residual: Optional[torch.FloatTensor] = None
     tail: Optional[torch.FloatTensor] = None
     indices: Optional[torch.LongTensor] = None
+    ortho_loss: Optional[torch.FloatTensor] = None
 
 
 @dataclass

@@ -68,6 +68,8 @@ class KLWarmupRatioCallback(TrainerCallback):
         **kwargs,
     ):
         model = kwargs.get("model", None)
+        if model is not None and hasattr(model, "module"):
+            model = model.module
         if model is None or not hasattr(model, "encoder"):
             return control
 
@@ -302,7 +304,8 @@ class VAEtrainer(Trainer):
             
             distill_cosine_loss = getattr(output, "distill_cosine_loss", None)
             distill_ortho_loss = getattr(output, "distill_ortho_loss", None)
-            sem_cfg = getattr(model.encoder.config, "semantic_distillation_config", None)
+            actual_model = model.module if hasattr(model, "module") else model
+            sem_cfg = getattr(actual_model.encoder.config, "semantic_distillation_config", None)
             if distill_cosine_loss is not None and sem_cfg is not None:
                 loss += distill_cosine_loss * sem_cfg.cosine_loss_weight
             if distill_ortho_loss is not None and sem_cfg is not None:

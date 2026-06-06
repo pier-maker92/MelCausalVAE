@@ -84,6 +84,15 @@ class Encoder(SigmaVAEEncoder):
             )
             self.add_vq_residual_to_stoch = config.vq_config.add_vq_residual_to_stoch
 
+            qd = config.vq_config.dim_to_quantize
+            tail_dim = config.latent_dim - qd
+            if tail_dim > 0 and qd != tail_dim:
+                min_dim = min(qd, tail_dim)
+                if qd > tail_dim:
+                    self.ortho_proj = nn.Linear(qd, min_dim, bias=False)
+                else:
+                    self.ortho_proj = nn.Linear(tail_dim, min_dim, bias=False)
+
         if config.dropout_regularizer_config:
             self.dropout_regularizer = DropoutRegularizer(
                 config=config.dropout_regularizer_config
@@ -93,9 +102,6 @@ class Encoder(SigmaVAEEncoder):
             )
         else:
             self.use_pre_quant_dropout = False
-
-        if getattr(config, "semantic_distillation_config", None) is not None and config.dropout_regularizer_config is not None:
-            raise ValueError("Dropout policy must be null when semantic distillation is active.")
 
         if config.kl_chunk_regularizer_config:
             self.kl_chunk_regularizer = KLChunkRegularizer(
@@ -164,11 +170,35 @@ class Encoder(SigmaVAEEncoder):
             logvar = self.logvar(h)
 
         z_quantized = torch.zeros_like(mu)
+        ortho_loss = None
         # vq
         if hasattr(self, "vq"):
             qd = self.config.vq_config.dim_to_quantize
             mu_head = mu[..., :qd]
             mu_tail = mu[..., qd:]
+
+            ortho_weight = 1.0
+            if getattr(self.config, "semantic_distillation_config", None) is not None:
+                ortho_weight = self.config.semantic_distillation_config.ortho_loss_weight
+
+            if mu_tail.shape[-1] > 0 and ortho_weight > 0.0:
+                mask = ~padding_mask
+                h1 = mu_head[mask]
+                h2 = mu_tail[mask]
+
+                if hasattr(self, "ortho_proj"):
+                    if h1.shape[-1] > h2.shape[-1]:
+                        h1 = self.ortho_proj(h1)
+                    else:
+                        h2 = self.ortho_proj(h2)
+
+                h1_centered = h1 - h1.mean(dim=0, keepdim=True)
+                h2_centered = h2 - h2.mean(dim=0, keepdim=True)
+
+                cov = torch.matmul(h1_centered.T, h2_centered) / (
+                    h1_centered.size(0) - 1 + 1e-8
+                )
+                ortho_loss = (cov**2).mean()
 
             vq_out = self.vq(
                 mu_head,
@@ -244,7 +274,9 @@ class Encoder(SigmaVAEEncoder):
                     mu_stoch, logvar_stoch, padding_mask
                 )
             else:
-                _qd = self.config.vq_config.dim_to_quantize if hasattr(self, "vq") else 0
+                _qd = (
+                    self.config.vq_config.dim_to_quantize if hasattr(self, "vq") else 0
+                )
                 kl_term = self.kl_divergence(
                     (
                         mu_stoch
@@ -263,6 +295,7 @@ class Encoder(SigmaVAEEncoder):
             "padding_mask": padding_mask,
             "mu": mu_stoch,
             "mu_pre_vq": mu,
+            "ortho_loss": ortho_loss,
         }
 
         if hasattr(self, "vq"):
