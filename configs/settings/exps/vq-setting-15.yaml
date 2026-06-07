@@ -9,7 +9,7 @@ sample_rate: 24000
 training:
   num_train_epochs: 10
   dataset_name: librispeech_aligned
-  output_dir: checkpoints/exps/vq-setting-15
+  output_dir: checkpoints/exps/vq-setting-15-orth
   per_device_train_batch_size: 16
   per_device_eval_batch_size: 4
 
@@ -26,7 +26,7 @@ training:
   # report
   report_to: wandb
   wandb_project: speech-vae
-  wandb_run_name: set15
+  wandb_run_name: set15-orth
 
   fp16: false
   bf16: true
@@ -44,7 +44,7 @@ training:
   early_stopping_patience: 5
   # vq patience
   vq_collapse_threshold: 0.5
-  vq_collapse_patience: 3
+  vq_collapse_patience: 10
 
   gradient_accumulation_steps: 1
   dataloader_num_workers: 8
@@ -69,7 +69,7 @@ encoder:
     reset_dead_codes: true
     reset_every_forward: 10
     residual_and_tail_dropout_p: 0.1
-    dim_to_quantize: 8
+    dim_to_quantize: 24
     use_ema_codebook: true
     add_vq_residual_to_stoch: false
 
@@ -78,7 +78,7 @@ encoder:
     chunk_size: 2
     strategy: "linear"
     dropout_start: 0.0
-    dropout_end: 0.7
+    dropout_end: 0.8
     k: 6.0
     x0: 0.5
     dropout_hierarchical: false
@@ -88,7 +88,7 @@ encoder:
   semantic_distillation_config:
     wavlm_layer: 18
     cosine_loss_weight: 1.0
-    ortho_loss_weight: 0.0
+    ortho_loss_weight: 1.0
 
   # --- KL Config ---
   kl_chunk_regularizer_config: null

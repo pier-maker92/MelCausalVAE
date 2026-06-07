@@ -86,12 +86,6 @@ class Encoder(SigmaVAEEncoder):
 
             qd = config.vq_config.dim_to_quantize
             tail_dim = config.latent_dim - qd
-            if tail_dim > 0 and qd != tail_dim:
-                min_dim = min(qd, tail_dim)
-                if qd > tail_dim:
-                    self.ortho_proj = nn.Linear(qd, min_dim, bias=False)
-                else:
-                    self.ortho_proj = nn.Linear(tail_dim, min_dim, bias=False)
 
         if config.dropout_regularizer_config:
             self.dropout_regularizer = DropoutRegularizer(
@@ -183,22 +177,27 @@ class Encoder(SigmaVAEEncoder):
 
             if mu_tail.shape[-1] > 0 and ortho_weight > 0.0:
                 mask = ~padding_mask
+                # h1 shape: [N, qd], h2 shape: [N, tail_dim]
                 h1 = mu_head[mask]
                 h2 = mu_tail[mask]
 
-                if hasattr(self, "ortho_proj"):
-                    if h1.shape[-1] > h2.shape[-1]:
-                        h1 = self.ortho_proj(h1)
-                    else:
-                        h2 = self.ortho_proj(h2)
-
+                # 1. Centra le feature (Media = 0) lungo la dimensione del batch
                 h1_centered = h1 - h1.mean(dim=0, keepdim=True)
                 h2_centered = h2 - h2.mean(dim=0, keepdim=True)
 
-                cov = torch.matmul(h1_centered.T, h2_centered) / (
-                    h1_centered.size(0) - 1 + 1e-8
-                )
-                ortho_loss = (cov**2).mean()
+                # 2. Normalizza per la deviazione standard (Correlazione di Pearson)
+                # Aggiungiamo epsilon per stabilità numerica ed evitare divisioni per zero
+                h1_norm = h1_centered / (h1_centered.std(dim=0, keepdim=True) + 1e-8)
+                h2_norm = h2_centered / (h2_centered.std(dim=0, keepdim=True) + 1e-8)
+
+                # 3. Calcola la matrice di Cross-Correlazione
+                # Shape risultante: [qd, tail_dim]
+                N = h1_centered.size(0)
+                cross_corr = torch.matmul(h1_norm.T, h2_norm) / (N - 1 + 1e-8)
+
+                # 4. La loss è la media dei quadrati degli elementi della matrice
+                # (Penalizza ogni correlazione lineare spingendola a 0)
+                ortho_loss = (cross_corr**2).mean()
 
             vq_out = self.vq(
                 mu_head,
