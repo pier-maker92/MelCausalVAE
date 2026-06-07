@@ -41,27 +41,20 @@ from transformers import WhisperProcessor, WhisperForConditionalGeneration
 from jiwer import wer as compute_wer, cer as compute_cer
 
 from datasets import load_dataset, concatenate_datasets
-import utmosv2
+import utmos
 
 
-# Standalone UTMOS predictor using utmosv2
+# Standalone UTMOS predictor using utmos
 class UTMOSPredictor:
     def __init__(self, device):
-        logger.info("Initializing UTMOSv2 model")
+        logger.info("Initializing UTMOS model")
         try:
-            # Force UTMOS model creation on the worker-assigned device.
-            # This avoids multi-GPU workers contending on default cuda:0.
-            self.model = utmosv2.create_model(pretrained=True, device=str(device))
-            if hasattr(self.model, "to"):
-                self.model.to(device)
-            if hasattr(self.model, "float"):
-                self.model.float()
+            self.model = utmos.Score()
             self.device = device
-            self.device_str = str(device)
             self.has_utmos = True
-            logger.info("UTMOSv2 model loaded successfully.")
+            logger.info("UTMOS model loaded successfully.")
         except Exception as e:
-            logger.warning(f"Failed to load UTMOSv2 model: {e}")
+            logger.warning(f"Failed to load UTMOS model: {e}")
             self.has_utmos = False
 
     @torch.no_grad()
@@ -71,16 +64,10 @@ class UTMOSPredictor:
         try:
             # Force float32 context and disable any potential autocast to bfloat16
             with torch.autocast(device_type=self.device.type, enabled=False):
-                # Disable utmosv2 multiprocessing to avoid pickling issues
-                # when running inside our own ProcessPoolExecutor workers.
-                mos = self.model.predict(
-                    input_path=str(wav_path),
-                    device=self.device_str,
-                    num_workers=0,
-                )
+                mos = self.model.calculate_wav_file(str(wav_path))
                 return float(mos)
         except Exception as e:
-            logger.warning(f"UTMOSv2 prediction failed for {wav_path}: {e}")
+            logger.warning(f"UTMOS prediction failed for {wav_path}: {e}")
             return None
 
     @torch.no_grad()
@@ -88,23 +75,16 @@ class UTMOSPredictor:
         if not self.has_utmos:
             return {}
         try:
-            logger.info(f"Running batch UTMOSv2 prediction on {input_dir}")
+            logger.info(f"Running batch UTMOS prediction on {input_dir}")
+            input_dir_path = Path(input_dir)
+            mos_map = {}
             with torch.autocast(device_type=self.device.type, enabled=False):
-                # Disable utmosv2 multiprocessing to avoid pickling issues
-                # when running inside our own ProcessPoolExecutor workers.
-                results = self.model.predict(
-                    input_dir=str(input_dir),
-                    device=self.device_str,
-                    num_workers=0,
-                )
-                # Map basename to MOS score
-                mos_map = {
-                    Path(r["file_path"]).name: float(r["predicted_mos"])
-                    for r in results
-                }
-                return mos_map
+                for wav_path in input_dir_path.glob("*.wav"):
+                    mos = self.model.calculate_wav_file(str(wav_path))
+                    mos_map[wav_path.name] = float(mos)
+            return mos_map
         except Exception as e:
-            logger.warning(f"Batch UTMOSv2 prediction failed: {e}")
+            logger.warning(f"Batch UTMOS prediction failed: {e}")
             return {}
 
 
@@ -288,6 +268,9 @@ def evaluate_dataset(
     original_audio_only: bool,
     skip_ref_metrics: bool,
     run,
+    quantized: bool = False,
+    residual: bool = False,
+    tail: bool = False,
 ) -> Dict[str, Any]:
     results: Dict[str, Any] = {"samples": [], "aggregates": {}}
 
@@ -360,13 +343,26 @@ def evaluate_dataset(
         elif baseline_model is None:
             # --- MelCausalVAE PATH ---
             with torch.no_grad():
-                out = model.encode_and_sample(
-                    audios_srs=audios_srs,
-                    num_steps=n_steps,
-                    temperature=temperature,
-                    guidance_scale=guidance_scale,
-                    generator=None,
-                )
+                params = {
+                    "audios_srs": audios_srs,
+                    "num_steps": n_steps,
+                    "temperature": temperature,
+                    "guidance_scale": guidance_scale,
+                    "generator": None,
+                }
+                if quantized or residual or tail:
+                    params["quantized"] = False
+                    params["residual"] = False
+                    params["tail"] = False
+
+                if quantized:
+                    params["quantized"] = True
+                if residual:
+                    params["residual"] = True
+                if tail:
+                    params["tail"] = True
+
+                out = model.encode_and_sample(**params)
             original_mel = out["original_mel"].detach().cpu()
             reconstructed_mel = out["reconstructed_mel"].detach().cpu()
             padding_mask = out["padding_mask"].detach().cpu()
@@ -807,6 +803,9 @@ def run_single_eval(
             original_audio_only=original_audio_only,
             skip_ref_metrics=(not base_args.get("compute_ref_metrics", False)) and (not original_audio_only),
             run=run,
+            quantized=base_args.get("quantized", False),
+            residual=base_args.get("residual", False),
+            tail=base_args.get("tail", False),
         )
         status = "success"
         error = None
@@ -1025,6 +1024,9 @@ def main():
         action="store_true",
         help="If set, filters the LibriSpeech test set using the E2TTS JSON keys",
     )
+    parser.add_argument("-q", "--quantized", action="store_true")
+    parser.add_argument("-r", "--residual", action="store_true")
+    parser.add_argument("-t", "--tail", action="store_true")
 
     args = parser.parse_args()
 
@@ -1099,6 +1101,9 @@ def main():
         "filter_librispeech": args.filter_librispeech,
         "original_audio_only": args.original_audio_only,
         "skip_ref_metrics": args.skip_ref_metrics,
+        "quantized": args.quantized,
+        "residual": args.residual,
+        "tail": args.tail,
     }
 
     # orchestrate one job per GPU

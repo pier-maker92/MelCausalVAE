@@ -15,24 +15,19 @@ logger = logging.getLogger(__name__)
 
 
 class UTMOSPredictor:
-    """Standalone UTMOS predictor using utmosv2."""
+    """Standalone UTMOS predictor using utmos."""
 
     def __init__(self, device: torch.device):
-        logger.info("Initializing UTMOSv2 model")
-        import utmosv2
+        logger.info("Initializing UTMOS model")
+        import utmos
 
-        self.model = utmosv2.create_model(pretrained=True, device=str(device))
+        self.model = utmos.Score()
         self.device = device
-        logger.info("UTMOSv2 model loaded successfully.")
+        logger.info("UTMOS model loaded successfully.")
 
     @torch.no_grad()
     def predict(self, wav_path: str) -> Optional[float]:
-        # Disable utmosv2 multiprocessing to avoid issues
-        mos = self.model.predict(
-            input_path=str(wav_path),
-            device=str(self.device),
-            num_workers=0,
-        )
+        mos = self.model.calculate_wav_file(str(wav_path))
         return float(mos)
 
 
@@ -82,6 +77,9 @@ def run_evaluation(
     dataset_name: str,
     num_samples: int = 100,
     run_id: str = "default_run",
+    quantized: bool = False,
+    residual: bool = False,
+    tail: bool = False,
 ) -> Dict[str, float]:
     """
     Perform evaluation on 100 samples from the test set.
@@ -137,13 +135,26 @@ def run_evaluation(
 
         # Reconstruct
         with torch.no_grad():
-            reconstruction_results = model.encode_decode(
-                audios_srs=model_audios_srs,
-                num_steps=16,
-                temperature=0.2,
-                guidance_scale=1.3,
-                phoneme_alignments=batch.get("phoneme_alignments", None),
-            )
+            params = {
+                "audios_srs": model_audios_srs,
+                "num_steps": 16,
+                "temperature": 0.2,
+                "guidance_scale": 1.3,
+                "phoneme_alignments": batch.get("phoneme_alignments", None),
+            }
+            if quantized or residual or tail:
+                params["quantized"] = False
+                params["residual"] = False
+                params["tail"] = False
+
+            if quantized:
+                params["quantized"] = True
+            if residual:
+                params["residual"] = True
+            if tail:
+                params["tail"] = True
+
+            reconstruction_results = model.encode_decode(**params)
 
             # reconstructed_mel is in results["decoder_output"].audio_features
             reconstructed_mels = reconstruction_results["decoder_output"].audio_features
