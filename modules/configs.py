@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, List
 from dataclasses import dataclass, field, asdict
 
 
@@ -17,6 +17,7 @@ class SigmaVAEEncoderConfig:
     kl_loss_warmup_ratio: Optional[float] = None
     use_softplus: bool = False
     use_slt: bool = False
+    use_reparameterization_trick: bool = False
 
 
 @dataclass
@@ -57,6 +58,7 @@ class VQConfig:
     dim_to_quantize: Optional[int] = None
     residual_and_tail_dropout_p: float = 0.1
     add_vq_residual_to_stoch: bool = False
+    fsq_levels: Optional[List[int]] = None
 
 
 @dataclass

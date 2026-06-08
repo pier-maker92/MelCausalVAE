@@ -237,3 +237,83 @@ class HardVectorQuantizer(nn.Module):
                 dtype=self._ema_cluster_size.dtype,
                 device=z.device,
             )
+
+
+class FiniteScalarQuantizer(nn.Module):
+    def __init__(self, config: VQConfig):
+        super().__init__()
+        self.config = config
+        self.dim = config.dim_to_quantize
+        levels = config.fsq_levels
+        if len(levels) != self.dim:
+            raise ValueError(f"Length of fsq_levels ({len(levels)}) must match dim_to_quantize ({self.dim})")
+            
+        _levels = torch.tensor(levels, dtype=torch.float32)
+        self.register_buffer("_levels", _levels)
+        
+        _basis = torch.cumprod(torch.tensor([1] + levels[:-1], dtype=torch.int32), dim=0)
+        self.register_buffer("_basis", _basis)
+        
+        self.num_embeddings = int(_levels.prod().item())
+        self.commit_weight = float(config.commitment_weight)
+        
+    def bound(self, z: torch.Tensor) -> torch.Tensor:
+        """Bound z in [-1, 1]"""
+        return torch.tanh(z)
+
+    def quantize(self, z: torch.Tensor) -> torch.Tensor:
+        half_l = (self._levels - 1) * 0.5
+        offset = torch.where(self._levels % 2 == 0, 0.5, 0.0)
+        z = z * half_l - offset
+        z = torch.round(z)
+        z = z + offset
+        z = z / half_l
+        return z
+
+    def codes_to_indices(self, z_hat: torch.Tensor) -> torch.Tensor:
+        half_l = (self._levels - 1) * 0.5
+        offset = torch.where(self._levels % 2 == 0, 0.5, 0.0)
+        # Recover rounded integers
+        z_hat = torch.round(z_hat * half_l - offset)
+        # Shift to start at 0
+        z_hat = z_hat + half_l + offset
+        return (z_hat * self._basis).sum(dim=-1).to(torch.int64)
+
+    def forward(
+        self,
+        z: torch.Tensor,
+        padding_mask: Optional[torch.BoolTensor] = None,
+        global_step: Optional[int] = None,
+    ) -> VQVAEOutput:
+        B, T, D = z.shape
+        if D != self.dim:
+            raise ValueError(f"Expected last dim {self.dim}, got {D}")
+
+        z_bounded = self.bound(z)
+        z_q = self.quantize(z_bounded)
+        
+        z_residual = z - z_q.detach()
+        indices_bt = self.codes_to_indices(z_q)
+        
+        if padding_mask is None:
+            valid = torch.ones(B, T, dtype=torch.bool, device=z.device)
+        else:
+            valid = ~padding_mask
+
+        stats = _batch_vq_stats(indices_bt, valid, self.num_embeddings, z)
+
+        if valid.any():
+            z_e = z[valid]
+            z_qv = z_q[valid]
+            loss_commit = F.mse_loss(z_e, z_qv.detach())
+            vq_loss = self.commit_weight * loss_commit
+        else:
+            vq_loss = z.new_zeros(())
+
+        return VQVAEOutput(
+            indices=indices_bt,
+            quantized=z_q,
+            residual=z_residual,
+            stats=stats,
+            loss=vq_loss,
+        )

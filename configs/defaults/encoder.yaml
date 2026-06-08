@@ -14,6 +14,7 @@ encoder:
   kl_loss_warmup_ratio: null
   use_slt: false
   use_softplus: false
+  use_reparameterization_trick: false
 
   # --- VQ ---
   vq_config:
@@ -27,6 +28,7 @@ encoder:
     ema_epsilon: 1.0e-5
     dim_to_quantize: 32
     residual_and_tail_dropout_p: 0.3
+    fsq_levels: null
 
   dropout_regularizer_config: null
     # chunk_size: 2

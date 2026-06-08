@@ -4,7 +4,7 @@ import random
 import torch.nn as nn
 from typing import Optional
 import torch.nn.functional as F
-from .vq import HardVectorQuantizer
+from .vq import HardVectorQuantizer, FiniteScalarQuantizer
 from ..configs import EncoderConfig, VQConfig
 from ..output_dataclasses import EncoderOutput
 from .sigmavae import SigmaVAEEncoder
@@ -78,7 +78,10 @@ class Encoder(SigmaVAEEncoder):
                 raise ValueError(
                     f"dim_to_quantize ({config.vq_config.dim_to_quantize}) must be <= latent_dim ({config.latent_dim})."
                 )
-            self.vq = HardVectorQuantizer(config.vq_config)
+            if getattr(config.vq_config, "fsq_levels", None) is not None:
+                self.vq = FiniteScalarQuantizer(config.vq_config)
+            else:
+                self.vq = HardVectorQuantizer(config.vq_config)
             self.residual_and_tail_dropout_p = (
                 config.vq_config.residual_and_tail_dropout_p
             )
@@ -222,13 +225,13 @@ class Encoder(SigmaVAEEncoder):
                 logvar_stoch = logvar_tail  # [B, T, D-qd]
 
             # 2. Sample z_stoch (active parts only)
-            if self.training:
+            if self.training and getattr(self.config, "use_reparameterization_trick", True):
                 z_stoch = self.reparameterize(mu_tail, logvar_tail, std=1.0)
             else:
                 z_stoch = mu_tail
 
             if self.add_vq_residual_to_stoch:
-                if self.training:
+                if self.training and getattr(self.config, "use_reparameterization_trick", True):
                     z_stoch_head = self.reparameterize(
                         vq_out.residual, logvar_head, std=0.1
                     )
@@ -238,7 +241,7 @@ class Encoder(SigmaVAEEncoder):
         else:
             mu_stoch = mu
             logvar_stoch = logvar
-            if self.training:
+            if self.training and getattr(self.config, "use_reparameterization_trick", True):
                 z_stoch = self.reparameterize(mu, logvar)
             else:
                 z_stoch = mu
