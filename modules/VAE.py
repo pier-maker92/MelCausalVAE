@@ -98,6 +98,7 @@ class VAE(torch.nn.Module):
             target=dec_features,
             target_padding_mask=dec_padding_mask,
             context_vector=encoder_output.z,
+            speaker_embedding=getattr(encoder_output, "speaker_embedding", None),
         ).loss
 
         mu_mean = encoder_output.mu[
@@ -181,6 +182,7 @@ class VAE(torch.nn.Module):
         mu: Optional[torch.Tensor] = None,
         generator: Optional[torch.Generator] = None,
         padding_mask: Optional[torch.BoolTensor] = None,
+        speaker_embedding: Optional[torch.FloatTensor] = None,
         **kwargs,
     ):
         assert z is not None or mu is not None, "Either z or mu must be provided"
@@ -192,6 +194,7 @@ class VAE(torch.nn.Module):
             padding_mask=padding_mask,
             context_vector=context_vector,
             guidance_scale=guidance_scale,
+            speaker_embedding=speaker_embedding,
         )
         reconstructed_mel = decoder_output.audio_features
         reconstructed_padding_mask = decoder_output.padding_mask
@@ -243,6 +246,7 @@ class VAE(torch.nn.Module):
             z=context_vector,
             generator=generator,
             padding_mask=encoder_output.padding_mask,
+            speaker_embedding=getattr(encoder_output, "speaker_embedding", None),
         )
         if self.config.mel_spectrogram_config.normalize:
             dec_features = self.denormalize_mel(dec_features)

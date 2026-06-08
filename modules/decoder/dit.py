@@ -30,6 +30,7 @@ class Transformer(Module):
         window_size: Optional[int] = None,
         conv_pos_embed_kernel_size: int = 31,
         conv_is_causal: bool = True,
+        speaker_cond_dim: Optional[int] = None,
     ):
         super().__init__()
         assert divisible_by(depth, 2)
@@ -60,6 +61,14 @@ class Transformer(Module):
             nn.Linear(dim, time_hidden_dim),
             nn.SiLU(),
         )
+
+        if speaker_cond_dim is not None:
+            self.speaker_proj = nn.Sequential(
+                nn.SiLU(),
+                nn.Linear(speaker_cond_dim, time_hidden_dim)
+            )
+        else:
+            self.speaker_proj = None
 
         if use_conv_layer:
             self.conv_embed = ConvPositionEmbed(
@@ -104,6 +113,7 @@ class Transformer(Module):
         times: torch.FloatTensor,
         attention_mask: Optional[torch.BoolTensor] = None,
         group_size: Optional[int] = None,
+        speaker_embedding: Optional[torch.FloatTensor] = None,
     ):
         batch, seq_len, *_ = x.shape
         t = times
@@ -120,6 +130,8 @@ class Transformer(Module):
 
         # time embedding
         time_emb = self.sinu_pos_emb(t)
+        if self.speaker_proj is not None and speaker_embedding is not None:
+            time_emb = time_emb + self.speaker_proj(speaker_embedding)
 
         # add register tokens to the left
         if self.has_register_tokens:

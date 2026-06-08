@@ -157,6 +157,13 @@ class Encoder(SigmaVAEEncoder):
         if getattr(self.config, "use_slt", False):
             mu_original = self.slt(mu_original)
 
+        speaker_embedding = None
+        if getattr(self.config, "use_instance_norm", False):
+            spk_mu = mu_original.mean(dim=1, keepdim=True)
+            spk_sigma = mu_original.std(dim=1, keepdim=True)
+            mu_original = (mu_original - spk_mu) / (spk_sigma + 1e-6)
+            speaker_embedding = torch.cat([spk_mu.squeeze(1), spk_sigma.squeeze(1)], dim=-1)
+
         if self.use_pre_quant_dropout:
             mu = self.dropout_regularizer(mu_original)
         else:
@@ -298,6 +305,7 @@ class Encoder(SigmaVAEEncoder):
             "mu": mu_stoch,
             "mu_pre_vq": mu,
             "ortho_loss": ortho_loss,
+            "speaker_embedding": speaker_embedding,
         }
 
         if hasattr(self, "vq"):

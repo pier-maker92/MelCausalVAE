@@ -79,6 +79,7 @@ class DiT(torch.nn.Module):
             window_size=self.window_size,
             conv_pos_embed_kernel_size=config.kernel_size,
             conv_is_causal=self.causal_convolution,
+            speaker_cond_dim=config.speaker_cond_dim,
         )
 
     def handle_context_vector(
@@ -130,9 +131,12 @@ class DiT(torch.nn.Module):
         target: torch.FloatTensor,
         context_vector: torch.FloatTensor,
         x0: torch.FloatTensor,
+        speaker_embedding: Optional[torch.FloatTensor] = None,
     ):
         if random.random() < self.uncond_prob:
             context_vector = torch.zeros_like(context_vector)
+            if speaker_embedding is not None:
+                speaker_embedding = torch.zeros_like(speaker_embedding)
         # We need times
         times = torch.rand(
             (target.shape[0],),
@@ -147,7 +151,7 @@ class DiT(torch.nn.Module):
         # target is the original signal minus the noise
         target = (target - (1 - self.sigma) * x0).to(context_vector.dtype)
         state = self.noise_proj(torch.cat([context_vector, w], dim=-1))
-        return state, times, target
+        return state, times, target, speaker_embedding
 
     @property
     def _group_size(self) -> Optional[int]:
@@ -165,6 +169,7 @@ class DiT(torch.nn.Module):
         state: torch.FloatTensor,
         target: torch.FloatTensor,
         flow_mask: torch.BoolTensor,
+        speaker_embedding: Optional[torch.FloatTensor] = None,
     ):
         mask_to_loss = ~flow_mask
         v = self.transformer(
@@ -172,6 +177,7 @@ class DiT(torch.nn.Module):
             times=times,
             attention_mask=mask_to_loss,
             group_size=self._group_size,
+            speaker_embedding=speaker_embedding,
         )
 
         v_to_loss = v[mask_to_loss].view(-1, self.mel_dim)
@@ -185,6 +191,7 @@ class DiT(torch.nn.Module):
         target: torch.FloatTensor,
         target_padding_mask: torch.BoolTensor,
         context_vector: torch.FloatTensor,
+        speaker_embedding: Optional[torch.FloatTensor] = None,
         **kwargs,
     ):
         context_vector, prior, _ = self.handle_context_vector(
@@ -192,15 +199,16 @@ class DiT(torch.nn.Module):
         )
 
         # ---- flow ----
-        state, times, v_target = self.prepare_flow(
+        state, times, v_target, speaker_embedding = self.prepare_flow(
             target=target,
             context_vector=context_vector,
             x0=prior,
+            speaker_embedding=speaker_embedding,
         )
 
         # ---- get the flow ----
         loss = self.let_it_flow(
-            times=times, state=state, target=v_target, flow_mask=target_padding_mask
+            times=times, state=state, target=v_target, flow_mask=target_padding_mask, speaker_embedding=speaker_embedding
         )
 
         return DecoderOutput(
@@ -215,6 +223,7 @@ class DiT(torch.nn.Module):
         guidance_scale: float = 1.0,
         generator: Optional[torch.Generator] = None,
         padding_mask: Optional[torch.BoolTensor] = None,
+        speaker_embedding: Optional[torch.FloatTensor] = None,
         **kwargs,
     ):
         cfg_scale = guidance_scale
@@ -240,6 +249,7 @@ class DiT(torch.nn.Module):
                 cfg_scale=cfg_scale,
                 context_vector=context_vector,
                 attention_mask=~upsampled_padding_mask,
+                speaker_embedding=speaker_embedding,
             )
             return features
 
@@ -260,6 +270,7 @@ class DiT(torch.nn.Module):
         cfg_scale: float,
         context_vector: torch.FloatTensor,
         attention_mask: Optional[torch.BoolTensor] = None,
+        speaker_embedding: Optional[torch.FloatTensor] = None,
     ):
         times = times.repeat(state.shape[0])
         cond_state = self.noise_proj(torch.cat([context_vector, state], dim=-1))
@@ -269,6 +280,7 @@ class DiT(torch.nn.Module):
             times=times,
             attention_mask=attention_mask,
             group_size=gs,
+            speaker_embedding=speaker_embedding,
         )
         if cfg_scale == 1.0:
             return cond_out
@@ -276,11 +288,17 @@ class DiT(torch.nn.Module):
         uncond_state = self.noise_proj(
             torch.cat([torch.zeros_like(context_vector), state], dim=-1)
         )
+        if speaker_embedding is not None:
+            uncond_speaker_embedding = torch.zeros_like(speaker_embedding)
+        else:
+            uncond_speaker_embedding = None
+            
         uncond_out = self.transformer(
             x=uncond_state,
             times=times,
             attention_mask=attention_mask,
             group_size=gs,
+            speaker_embedding=uncond_speaker_embedding,
         )
 
         final = (cfg_scale * cond_out + (1 - cfg_scale) * uncond_out).to(

@@ -34,6 +34,7 @@ class EncoderOutput(ModelOutput):
     tail: Optional[torch.FloatTensor] = None
     indices: Optional[torch.LongTensor] = None
     ortho_loss: Optional[torch.FloatTensor] = None
+    speaker_embedding: Optional[torch.FloatTensor] = None
 
 
 @dataclass

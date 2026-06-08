@@ -18,6 +18,7 @@ class SigmaVAEEncoderConfig:
     use_softplus: bool = False
     use_slt: bool = False
     use_reparameterization_trick: bool = False
+    use_instance_norm: bool = False
 
 
 @dataclass
@@ -109,6 +110,7 @@ class DiTConfig:
     kernel_size: int
     causal_convolution: bool
     upsample: str
+    speaker_cond_dim: Optional[int] = None
 
 
 #########################
