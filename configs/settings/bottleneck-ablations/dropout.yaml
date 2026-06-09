@@ -23,7 +23,6 @@ training:
 encoder:
   d_model: 1024
 
-  logvar_layer: false
   target_std: 0.3
   kl_loss_warmup_steps: 10
   kl_loss_weight: 5e-4

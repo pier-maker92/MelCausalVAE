@@ -102,6 +102,9 @@ class Encoder(SigmaVAEEncoder):
                 vq_quant_dim=None,
             )
 
+        if getattr(config, "speaker_cond_dim", None) is not None:
+            self.speaker_proj = nn.Linear(2 * d_model, config.speaker_cond_dim)
+
         if config.freeze_encoder_before_latent_heads:
             self._freeze_encoder_before_latent_heads()
 
@@ -130,6 +133,9 @@ class Encoder(SigmaVAEEncoder):
                 param.requires_grad = True
         if hasattr(self, "vq"):
             for param in self.vq.parameters():
+                param.requires_grad = True
+        if hasattr(self, "speaker_proj"):
+            for param in self.speaker_proj.parameters():
                 param.requires_grad = True
 
     def forward(
@@ -160,13 +166,21 @@ class Encoder(SigmaVAEEncoder):
         if getattr(self.config, "use_instance_norm", False):
             valid_mask = (~padding_mask).unsqueeze(-1).to(h.dtype)  # [B, T, 1]
             valid_count = valid_mask.sum(dim=1, keepdim=True).clamp(min=1.0)
-            
+
             spk_mu = (h * valid_mask).sum(dim=1, keepdim=True) / valid_count
-            spk_sigma = torch.sqrt(((h - spk_mu) ** 2 * valid_mask).sum(dim=1, keepdim=True) / valid_count + 1e-6)
-            
+            spk_sigma = torch.sqrt(
+                ((h - spk_mu) ** 2 * valid_mask).sum(dim=1, keepdim=True) / valid_count
+                + 1e-6
+            )
+
             h = (h - spk_mu) / (spk_sigma + 1e-6)
             h = h * valid_mask  # Re-apply mask
-            speaker_embedding = torch.cat([spk_mu.squeeze(1), spk_sigma.squeeze(1)], dim=-1)
+            speaker_embedding = torch.cat(
+                [spk_mu.squeeze(1), spk_sigma.squeeze(1)], dim=-1
+            )
+
+            if hasattr(self, "speaker_proj"):
+                speaker_embedding = self.speaker_proj(speaker_embedding)
 
         semantic_features = None
         mu_semantic = None
@@ -176,7 +190,7 @@ class Encoder(SigmaVAEEncoder):
             mu_semantic = self.mu_semantic(h)
             if getattr(self.config, "use_slt", False):
                 mu_semantic = self.slt(mu_semantic)
-            
+
             vq_out = self.vq(
                 mu_semantic,
                 padding_mask,
@@ -194,12 +208,12 @@ class Encoder(SigmaVAEEncoder):
             logvar_acoustic = self.logvar_acoustic(h)
             if getattr(self.config, "use_slt", False):
                 mu_acoustic = self.slt(mu_acoustic)
-                
+
             z_acoustic = self.reparameterize(mu_acoustic, logvar_acoustic)
-                
+
             if hasattr(self, "dropout_regularizer"):
                 z_acoustic = self.dropout_regularizer(z_acoustic)
-                
+
             acoustic_features = z_acoustic
 
         features_to_concat = []
@@ -207,7 +221,7 @@ class Encoder(SigmaVAEEncoder):
             features_to_concat.append(semantic_features)
         if acoustic_features is not None:
             features_to_concat.append(acoustic_features)
-            
+
         if len(features_to_concat) > 1:
             combined_features = torch.cat(features_to_concat, dim=-1)
         elif len(features_to_concat) == 1:
@@ -216,12 +230,14 @@ class Encoder(SigmaVAEEncoder):
             raise ValueError("No semantic or acoustic features computed.")
 
         z = self.out_proj(combined_features)
-        
+
         ortho_loss = None
         if mu_semantic is not None and mu_acoustic is not None:
             ortho_weight = 1.0
             if getattr(self.config, "semantic_distillation_config", None) is not None:
-                ortho_weight = self.config.semantic_distillation_config.ortho_loss_weight
+                ortho_weight = (
+                    self.config.semantic_distillation_config.ortho_loss_weight
+                )
 
             if ortho_weight > 0.0:
                 mask = ~padding_mask

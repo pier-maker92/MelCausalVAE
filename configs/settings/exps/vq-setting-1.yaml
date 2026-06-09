@@ -56,7 +56,6 @@ encoder:
   tf_heads: 8
   tf_layers: 4
   n_residual_blocks: 3
-  logvar_layer: false
   target_std: 1.0
   kl_loss_warmup_ratio: 0.05
   kl_loss_weight: 1e-4

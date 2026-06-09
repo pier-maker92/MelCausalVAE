@@ -33,7 +33,6 @@ encoder:
   tf_heads: 8
   tf_layers: 4
   n_residual_blocks: 3
-  logvar_layer: false
   target_std: 0.3
   kl_loss_warmup_steps: 1000
   kl_loss_weight: 5e-4
@@ -45,7 +44,6 @@ encoder:
     commitment_weight: 0.25
     reset_dead_codes: true
     reset_every_forward: 10
-    residual_and_tail_dropout_p: 0.2  # (was vq_residual_dropout)
     dim_to_quantize: 32
     use_ema_codebook: true
 

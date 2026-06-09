@@ -63,7 +63,6 @@ encoder:
   tf_heads: 8
   tf_layers: 4
   n_residual_blocks: 3
-  logvar_layer: false
   target_std: 1.0
   kl_loss_warmup_ratio: 0.1
   kl_loss_weight: 1e-5
@@ -74,10 +73,8 @@ encoder:
     commitment_weight: 0.25
     reset_dead_codes: true
     reset_every_forward: 10
-    residual_and_tail_dropout_p: 0.025
     dim_to_quantize: 32
     use_ema_codebook: true
-    add_vq_residual_to_stoch: false
 
   # --- Dropout Config ---
   dropout_regularizer_config:

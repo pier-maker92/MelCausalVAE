@@ -80,7 +80,7 @@ class EncoderConfig(SigmaVAEEncoderConfig):
     dropout_regularizer_config: Optional[DropoutConfig] = None
     kl_chunk_regularizer_config: Optional[KLChunkRegularizer] = None
     semantic_distillation_config: Optional[SemanticDistillationConfig] = None
-
+    speaker_cond_dim: Optional[int] = None
 
 #########################
 #        decoder        #
@@ -184,3 +184,8 @@ class VAEConfig:
         d = asdict(self)
         d["model_type"] = "VAE"
         return d
+
+    def to_json_string(self) -> str:
+        """Convert config to JSON string for Hugging Face Trainer integrations (e.g., TensorBoard)"""
+        import json
+        return json.dumps(self.to_dict(), indent=2)

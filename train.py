@@ -604,10 +604,18 @@ class VAEtrainer(Trainer):
 
     def _generate_and_log_samples(self):
         """
-        Generate mel spectrogram reconstructions and log to wandb.
+        Generate mel spectrogram reconstructions and log to wandb and/or tensorboard.
         """
         logger.info(f"Generating reconstruction samples...")
         vocoder, vocoder_type = self._get_vocoder()
+
+        # Try to find tensorboard writer from trainer callbacks
+        tb_writer = None
+        if hasattr(self, "callback_handler") and self.callback_handler is not None:
+            for callback in self.callback_handler.callbacks:
+                if callback.__class__.__name__ == "TensorBoardCallback":
+                    tb_writer = getattr(callback, "tb_writer", None)
+                    break
 
         # Get some samples from the eval dataset using its dataloader
         eval_dataloader = self.get_eval_dataloader(self.eval_dataset)
@@ -674,15 +682,6 @@ class VAEtrainer(Trainer):
                 device_id=device_id,
             )
 
-            # Convert matplotlib figure to wandb Image
-            images.append(
-                wandb.Image(
-                    fig,
-                    caption=f"Sample {idx} - Step {self.state.global_step} - Device {device_id}",
-                )
-            )
-            plt.close(fig)
-
             # Decode reconstructed mel to audio
             mel = results["decoder_output"].audio_features[idx]  # [T, F]
             pad_mask = results["decoder_output"].padding_mask[idx]  # [T] True = padded
@@ -707,17 +706,43 @@ class VAEtrainer(Trainer):
             # normalize waveform to -1 to 1
             waveform = waveform / (waveform.abs().max() + 1e-8)
             sr = audios_srs[idx][1]
-            # Log as wandb audio as well
-            audios.append(
-                wandb.Audio(
-                    waveform.numpy(),
-                    sample_rate=sr,
-                    caption=f"Sample {idx} - Step {self.state.global_step} - Device {device_id}",
-                )
-            )
 
-        # Log to wandb as a table for better visualization
-        # Log to wandb as simple lists (reverting to what worked before but with correct data)
+            # Log to TensorBoard if available
+            if tb_writer is not None:
+                # Add image comparison plot (close=False, we close it manually at the end)
+                tb_writer.add_figure(
+                    f"reconstructions/sample_{idx}",
+                    fig,
+                    global_step=self.state.global_step,
+                    close=False,
+                )
+                # Add reconstructed audio
+                tb_writer.add_audio(
+                    f"reconstructions_audio/sample_{idx}",
+                    waveform,
+                    global_step=self.state.global_step,
+                    sample_rate=sr,
+                )
+
+            # Log as wandb objects if available
+            if wandb.run is not None:
+                images.append(
+                    wandb.Image(
+                        fig,
+                        caption=f"Sample {idx} - Step {self.state.global_step} - Device {device_id}",
+                    )
+                )
+                audios.append(
+                    wandb.Audio(
+                        waveform.numpy(),
+                        sample_rate=sr,
+                        caption=f"Sample {idx} - Step {self.state.global_step} - Device {device_id}",
+                    )
+                )
+
+            plt.close(fig)
+
+        # Log to wandb as simple lists
         if wandb.run is not None:
             wandb.log(
                 {
@@ -729,6 +754,12 @@ class VAEtrainer(Trainer):
 
             logger.info(
                 f"Successfully logged {len(images)} reconstruction samples to wandb"
+            )
+
+        if tb_writer is not None:
+            tb_writer.flush()
+            logger.info(
+                f"Successfully logged {len(audios_srs)} reconstruction samples to TensorBoard"
             )
 
     def _create_mel_comparison_plot(

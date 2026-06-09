@@ -10,8 +10,8 @@ training:
   num_train_epochs: 10
   dataset_name: librispeech_aligned
   output_dir: checkpoints/exps/vq-setting-20
-  per_device_train_batch_size: 16
-  per_device_eval_batch_size: 4
+  per_device_train_batch_size: 6
+  per_device_eval_batch_size: 2
 
   # lr
   learning_rate: 1e-4
@@ -24,19 +24,19 @@ training:
   decoder_min_lr: 5.0e-5
   
   # report
-  report_to: wandb
+  report_to: tensorboard
   wandb_project: speech-vae
   wandb_run_name: set20
 
   fp16: false
   bf16: true
 
-  save_steps: 2500
+  save_steps: 1000
   logging_steps: 1
 
   # eval 
   eval_strategy: "steps"
-  eval_steps: 2500
+  eval_steps: 250
   save_total_limit: 3
   load_best_model_at_end: true
   metric_for_best_model: "avg_WER"
@@ -46,9 +46,11 @@ training:
   vq_collapse_threshold: 0.5
   vq_collapse_patience: 5
 
-  gradient_accumulation_steps: 1
+  gradient_accumulation_steps: 2
   dataloader_num_workers: 8
-  eval_num_samples: 100
+  eval_num_samples: 10
+  # log
+  generate_and_log_samples: true
 
 
 # Encoder configuration
@@ -58,7 +60,7 @@ encoder:
   tf_layers: 4
   n_residual_blocks: 3
   target_std: 1.0
-  kl_loss_warmup_ratio: 0.1
+  kl_loss_warmup_ratio: 0.0
   kl_loss_weight: 1e-4
   use_instance_norm: true
   acoustic_dim: 32
@@ -84,6 +86,9 @@ encoder:
   # --- KL Config ---
   kl_chunk_regularizer_config: null
 
+  # --- Speaker Embedding ---
+  speaker_cond_dim: 512
+
 # Decoder configuration
 decoder:
   dit_dim: 768            
@@ -97,4 +102,4 @@ decoder:
   window_attention_seconds: 3.0
   kernel_size: 7
   causal_convolution: false
-  speaker_cond_dim: 32
+  speaker_cond_dim: 512
