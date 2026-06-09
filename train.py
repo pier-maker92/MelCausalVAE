@@ -650,116 +650,126 @@ class VAEtrainer(Trainer):
             )
             return
 
-        # Generate reconstructions
-        with torch.no_grad():
-            results = self.model.encode_decode(
-                audios_srs=audios_srs,
-                num_steps=16,
-                temperature=0.2,
-                guidance_scale=1.3,
-                phoneme_alignments=phoneme_alignments,
-            )
-        # Create visualizations
-        images = []
+        # Generate reconstructions for different modes
+        modes = [
+            ("full", True, True),
+            ("quantized_only", True, False),
+            ("acoustic_only", False, True),
+        ]
+
         # Resolve device id safely for distributed/non-distributed
         if dist.is_available() and dist.is_initialized():
             device_id = dist.get_rank()
         else:
             device_id = 0
 
-        audios = []
-        audio_paths = []
-        segmentation_plots = []
-        for idx in range(len(audios_srs)):
-            fig = self._create_mel_comparison_plot(
-                original=results["feature_extractor_output"].audio_features[idx],
-                reconstructed=results["decoder_output"].audio_features[idx],
-                original_padding_mask=results["feature_extractor_output"].padding_mask[
-                    idx
-                ],
-                reconstructed_padding_mask=results["decoder_output"].padding_mask[idx],
-                sample_idx=idx,
-                device_id=device_id,
-            )
+        wandb_logs = {}
+        total_logged = 0
 
-            # Decode reconstructed mel to audio
-            mel = results["decoder_output"].audio_features[idx]  # [T, F]
-            pad_mask = results["decoder_output"].padding_mask[idx]  # [T] True = padded
-            T = min(mel.shape[0], pad_mask.shape[0])
-            mel = mel[:T]
-            pad_mask = pad_mask[:T]
-            valid_mel = mel[~pad_mask]
-
-            # Shape for Vocos/BigVGAN: [B, F, T]
-            features = (
-                valid_mel.unsqueeze(0).permute(0, 2, 1).float().to(self.args.device)
-            )
-
-            if vocoder_type == "bigvgan":
-                # BigVGAN expects exp(mel)
-                # features = torch.exp(features.float())
-                waveform = vocoder(features)
-            else:
-                waveform = vocoder.decode(features)  # [1, samples]
-
-            waveform = waveform.float().squeeze().detach().cpu()
-            # normalize waveform to -1 to 1
-            waveform = waveform / (waveform.abs().max() + 1e-8)
-            sr = audios_srs[idx][1]
-
-            # Log to TensorBoard if available
-            if tb_writer is not None:
-                # Add image comparison plot (close=False, we close it manually at the end)
-                tb_writer.add_figure(
-                    f"reconstructions/sample_{idx}",
-                    fig,
-                    global_step=self.state.global_step,
-                    close=False,
+        for mode_name, use_quantized, use_tail in modes:
+            with torch.no_grad():
+                results = self.model.encode_decode(
+                    audios_srs=audios_srs,
+                    num_steps=16,
+                    temperature=0.2,
+                    guidance_scale=1.3,
+                    phoneme_alignments=phoneme_alignments,
+                    quantized=use_quantized,
+                    tail=use_tail,
                 )
-                # Add reconstructed audio
-                tb_writer.add_audio(
-                    f"reconstructions_audio/sample_{idx}",
-                    waveform,
-                    global_step=self.state.global_step,
-                    sample_rate=sr,
+            
+            # Create visualizations
+            images = []
+            audios = []
+            for idx in range(len(audios_srs)):
+                fig = self._create_mel_comparison_plot(
+                    original=results["feature_extractor_output"].audio_features[idx],
+                    reconstructed=results["decoder_output"].audio_features[idx],
+                    original_padding_mask=results["feature_extractor_output"].padding_mask[
+                        idx
+                    ],
+                    reconstructed_padding_mask=results["decoder_output"].padding_mask[idx],
+                    sample_idx=idx,
+                    device_id=device_id,
                 )
 
-            # Log as wandb objects if available
-            if wandb.run is not None:
-                images.append(
-                    wandb.Image(
+                # Decode reconstructed mel to audio
+                mel = results["decoder_output"].audio_features[idx]  # [T, F]
+                pad_mask = results["decoder_output"].padding_mask[idx]  # [T] True = padded
+                T = min(mel.shape[0], pad_mask.shape[0])
+                mel = mel[:T]
+                pad_mask = pad_mask[:T]
+                valid_mel = mel[~pad_mask]
+
+                # Shape for Vocos/BigVGAN: [B, F, T]
+                features = (
+                    valid_mel.unsqueeze(0).permute(0, 2, 1).float().to(self.args.device)
+                )
+
+                if vocoder_type == "bigvgan":
+                    # BigVGAN expects exp(mel)
+                    # features = torch.exp(features.float())
+                    waveform = vocoder(features)
+                else:
+                    waveform = vocoder.decode(features)  # [1, samples]
+
+                waveform = waveform.float().squeeze().detach().cpu()
+                # normalize waveform to -1 to 1
+                waveform = waveform / (waveform.abs().max() + 1e-8)
+                sr = audios_srs[idx][1]
+
+                # Log to TensorBoard if available
+                if tb_writer is not None:
+                    # Add image comparison plot (close=False, we close it manually at the end)
+                    tb_writer.add_figure(
+                        f"reconstructions_{mode_name}/sample_{idx}",
                         fig,
-                        caption=f"Sample {idx} - Step {self.state.global_step} - Device {device_id}",
+                        global_step=self.state.global_step,
+                        close=False,
                     )
-                )
-                audios.append(
-                    wandb.Audio(
-                        waveform.numpy(),
+                    # Add reconstructed audio
+                    tb_writer.add_audio(
+                        f"reconstructions_audio_{mode_name}/sample_{idx}",
+                        waveform,
+                        global_step=self.state.global_step,
                         sample_rate=sr,
-                        caption=f"Sample {idx} - Step {self.state.global_step} - Device {device_id}",
                     )
-                )
 
-            plt.close(fig)
+                # Log as wandb objects if available
+                if wandb.run is not None:
+                    images.append(
+                        wandb.Image(
+                            fig,
+                            caption=f"Sample {idx} ({mode_name}) - Step {self.state.global_step} - Device {device_id}",
+                        )
+                    )
+                    audios.append(
+                        wandb.Audio(
+                            waveform.numpy(),
+                            sample_rate=sr,
+                            caption=f"Sample {idx} ({mode_name}) - Step {self.state.global_step} - Device {device_id}",
+                        )
+                    )
+
+                plt.close(fig)
+            
+            if wandb.run is not None:
+                wandb_logs[f"reconstructions_{mode_name}"] = images
+                wandb_logs[f"reconstructions_audio_{mode_name}"] = audios
+                
+            total_logged += len(audios_srs)
 
         # Log to wandb as simple lists
         if wandb.run is not None:
-            wandb.log(
-                {
-                    "reconstructions": images,
-                    "reconstructions_audio": audios,
-                },
-                step=self.state.global_step,
-            )
-
+            wandb.log(wandb_logs, step=self.state.global_step)
             logger.info(
-                f"Successfully logged {len(images)} reconstruction samples to wandb"
+                f"Successfully logged {total_logged} reconstruction samples to wandb across {len(modes)} modes"
             )
 
         if tb_writer is not None:
             tb_writer.flush()
             logger.info(
-                f"Successfully logged {len(audios_srs)} reconstruction samples to TensorBoard"
+                f"Successfully logged {total_logged} reconstruction samples to TensorBoard across {len(modes)} modes"
             )
 
     def _create_mel_comparison_plot(

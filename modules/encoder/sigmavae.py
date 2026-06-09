@@ -47,7 +47,8 @@ class SigmaVAEEncoder(nn.Module):
         # Compute KL divergence in fp32 for numerical stability with fp16
         mu_valid = mu[~padding_mask].to(dtype)
         logvar_valid = logvar[~padding_mask].to(dtype)
-        kl = -0.5 * torch.sum(1 + logvar_valid - mu_valid.pow(2) - logvar_valid.exp())
+        num_valid = (~padding_mask).sum().clamp_min(1)
+        kl = -0.5 * torch.sum(1 + logvar_valid - mu_valid.pow(2) - logvar_valid.exp()) / num_valid
         return kl.to(mu.dtype) * self.kl_loss_weight
 
     def kl_divergence_weighted(
@@ -71,7 +72,8 @@ class SigmaVAEEncoder(nn.Module):
         mu_f = mu.to(dtype)
         logvar_f = logvar.to(dtype)
         kl_elem = -0.5 * (1 + logvar_f - mu_f.pow(2) - logvar_f.exp())
-        return (kl_elem * w * valid).sum().to(mu.dtype)
+        denom = (valid.sum() * mu.shape[-1]).clamp(min=1.0)
+        return ((kl_elem * w * valid).sum() / denom).to(mu.dtype)
 
     def sample_scalar_std(
         self, mu: torch.FloatTensor, std: Optional[float] = None
