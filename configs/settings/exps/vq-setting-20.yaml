@@ -64,6 +64,7 @@ encoder:
   kl_loss_weight: 1e-4
   use_instance_norm: true
   acoustic_dim: 32
+  acoustic_dropout_p: 0.1
 
   # --- VQ Config ---
   vq_config:

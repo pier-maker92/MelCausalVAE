@@ -17,6 +17,7 @@ class SigmaVAEEncoderConfig:
     use_slt: bool = False
     use_instance_norm: bool = False
     acoustic_dim: Optional[int] = None
+    acoustic_dropout_p: float = 0.0
 
 
 @dataclass

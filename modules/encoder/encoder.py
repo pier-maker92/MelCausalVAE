@@ -214,6 +214,14 @@ class Encoder(SigmaVAEEncoder):
             if hasattr(self, "dropout_regularizer"):
                 z_acoustic = self.dropout_regularizer(z_acoustic)
 
+            if self.training and getattr(self.config, "acoustic_dropout_p", 0.0) > 0.0:
+                B = z_acoustic.shape[0]
+                keep_mask = (
+                    torch.rand(B, 1, 1, device=z_acoustic.device)
+                    >= self.config.acoustic_dropout_p
+                ).to(z_acoustic.dtype)
+                z_acoustic = z_acoustic * keep_mask
+
             acoustic_features = z_acoustic
 
         features_to_concat = []
