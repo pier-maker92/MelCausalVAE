@@ -2,7 +2,67 @@ import os
 import math
 import wandb
 import torch
+
+# --- WORKAROUND FOR FAIRSEQ/HYDRA ON PYTHON 3.11 ---
+import dataclasses
+_orig_get_field = dataclasses._get_field
+
+def _patched_get_field(cls, a_name, a_type, *args, **kwargs):
+    try:
+        return _orig_get_field(cls, a_name, a_type, *args, **kwargs)
+    except ValueError as e:
+        if "mutable default" in str(e):
+            default = getattr(cls, a_name, dataclasses.MISSING)
+            actual_default = default.default if isinstance(default, dataclasses.Field) else default
+            if actual_default is not dataclasses.MISSING:
+                default_cls = actual_default.__class__
+                orig_hash = getattr(default_cls, '__hash__', None)
+                try:
+                    default_cls.__hash__ = lambda self: id(self)
+                except TypeError:
+                    pass
+                
+                try:
+                    return _orig_get_field(cls, a_name, a_type, *args, **kwargs)
+                finally:
+                    try:
+                        if orig_hash is None:
+                            default_cls.__hash__ = None
+                        else:
+                            default_cls.__hash__ = orig_hash
+                    except TypeError:
+                        pass
+        raise
+
+dataclasses._get_field = _patched_get_field
+# ---------------------------------------------------
+
+# --- WORKAROUND FOR PYTORCH 2.6 WEIGHTS_ONLY ---
+_orig_torch_load = torch.load
+def _patched_torch_load(*args, **kwargs):
+    kwargs["weights_only"] = False
+    return _orig_torch_load(*args, **kwargs)
+torch.load = _patched_torch_load
+# -----------------------------------------------
+
 import hydra
+
+# --- WORKAROUND FOR FAIRSEQ HYDRA EXPERIMENTAL IMPORT ---
+import hydra.experimental
+hydra.experimental.initialize = hydra.initialize
+hydra.experimental.initialize_config_module = hydra.initialize_config_module
+hydra.experimental.initialize_config_dir = hydra.initialize_config_dir
+hydra.experimental.compose = hydra.compose
+
+import hydra.experimental.initialize as _hydra_exp_init
+_hydra_exp_init.initialize = hydra.initialize
+_hydra_exp_init.initialize_config_module = hydra.initialize_config_module
+_hydra_exp_init.initialize_config_dir = hydra.initialize_config_dir
+
+import hydra.experimental.compose as _hydra_exp_compose
+_hydra_exp_compose.compose = hydra.compose
+# --------------------------------------------------------
+
 import logging
 import datetime
 from vocos import Vocos

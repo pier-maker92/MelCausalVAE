@@ -90,6 +90,10 @@ class Encoder(SigmaVAEEncoder):
             qd = config.vq_config.dim_to_quantize
             tail_dim = config.latent_dim - qd
 
+            if tail_dim > 0:
+                self.ortho_proj_head = nn.Linear(qd, qd)
+                self.ortho_proj_tail = nn.Linear(tail_dim, qd)
+
         if config.dropout_regularizer_config:
             self.dropout_regularizer = DropoutRegularizer(
                 config=config.dropout_regularizer_config
@@ -162,7 +166,9 @@ class Encoder(SigmaVAEEncoder):
             spk_mu = mu_original.mean(dim=1, keepdim=True)
             spk_sigma = mu_original.std(dim=1, keepdim=True)
             mu_original = (mu_original - spk_mu) / (spk_sigma + 1e-6)
-            speaker_embedding = torch.cat([spk_mu.squeeze(1), spk_sigma.squeeze(1)], dim=-1)
+            speaker_embedding = torch.cat(
+                [spk_mu.squeeze(1), spk_sigma.squeeze(1)], dim=-1
+            )
 
         if self.use_pre_quant_dropout:
             mu = self.dropout_regularizer(mu_original)
@@ -183,7 +189,9 @@ class Encoder(SigmaVAEEncoder):
 
             ortho_weight = 1.0
             if getattr(self.config, "semantic_distillation_config", None) is not None:
-                ortho_weight = self.config.semantic_distillation_config.ortho_loss_weight
+                ortho_weight = (
+                    self.config.semantic_distillation_config.ortho_loss_weight
+                )
 
             if mu_tail.shape[-1] > 0 and ortho_weight > 0.0:
                 mask = ~padding_mask
@@ -191,23 +199,33 @@ class Encoder(SigmaVAEEncoder):
                 h1 = mu_head[mask]
                 h2 = mu_tail[mask]
 
-                # 1. Centra le feature (Media = 0) lungo la dimensione del batch
-                h1_centered = h1 - h1.mean(dim=0, keepdim=True)
-                h2_centered = h2 - h2.mean(dim=0, keepdim=True)
+                # 1. Proietta alla stessa dimensione se necessario
+                if hasattr(self, "ortho_proj_head") and hasattr(
+                    self, "ortho_proj_tail"
+                ):
+                    h1_proj = self.ortho_proj_head(h1)
+                    h2_proj = self.ortho_proj_tail(h2)
+                else:
+                    h1_proj = h1
+                    h2_proj = h2
 
-                # 2. Normalizza per la deviazione standard (Correlazione di Pearson)
-                # Aggiungiamo epsilon per stabilità numerica ed evitare divisioni per zero
-                h1_norm = h1_centered / (h1_centered.std(dim=0, keepdim=True) + 1e-8)
-                h2_norm = h2_centered / (h2_centered.std(dim=0, keepdim=True) + 1e-8)
+                # 2. Definisci il parametro beta
+                beta = (
+                    getattr(
+                        self.config.semantic_distillation_config, "ortho_beta", 0.01
+                    )
+                    if getattr(self.config, "semantic_distillation_config", None)
+                    is not None
+                    else 0.01
+                )
 
-                # 3. Calcola la matrice di Cross-Correlazione
-                # Shape risultante: [qd, tail_dim]
-                N = h1_centered.size(0)
-                cross_corr = torch.matmul(h1_norm.T, h2_norm) / (N - 1 + 1e-8)
+                # 3. Calcola la Cosine Similarity
+                cos_sim = F.cosine_similarity(h1_proj, h2_proj, dim=-1)
+                abs_cos_sim = torch.abs(cos_sim)
+                mean_abs_cos_sim = abs_cos_sim.mean()
 
-                # 4. La loss è la media dei quadrati degli elementi della matrice
-                # (Penalizza ogni correlazione lineare spingendola a 0)
-                ortho_loss = (cross_corr**2).mean()
+                # 4. Sottrai beta e eleva al quadrato
+                ortho_loss = (mean_abs_cos_sim - beta) ** 2
 
             vq_out = self.vq(
                 mu_head,
@@ -232,13 +250,17 @@ class Encoder(SigmaVAEEncoder):
                 logvar_stoch = logvar_tail  # [B, T, D-qd]
 
             # 2. Sample z_stoch (active parts only)
-            if self.training and getattr(self.config, "use_reparameterization_trick", True):
+            if self.training and getattr(
+                self.config, "use_reparameterization_trick", True
+            ):
                 z_stoch = self.reparameterize(mu_tail, logvar_tail, std=1.0)
             else:
                 z_stoch = mu_tail
 
             if self.add_vq_residual_to_stoch:
-                if self.training and getattr(self.config, "use_reparameterization_trick", True):
+                if self.training and getattr(
+                    self.config, "use_reparameterization_trick", True
+                ):
                     z_stoch_head = self.reparameterize(
                         vq_out.residual, logvar_head, std=0.1
                     )
@@ -248,7 +270,9 @@ class Encoder(SigmaVAEEncoder):
         else:
             mu_stoch = mu
             logvar_stoch = logvar
-            if self.training and getattr(self.config, "use_reparameterization_trick", True):
+            if self.training and getattr(
+                self.config, "use_reparameterization_trick", True
+            ):
                 z_stoch = self.reparameterize(mu, logvar)
             else:
                 z_stoch = mu
@@ -258,6 +282,7 @@ class Encoder(SigmaVAEEncoder):
             z_stoch_dropped = self.dropout_regularizer(z_stoch)
         else:
             z_stoch_dropped = z_stoch
+        # z_stoch_dropped = z_stoch
 
         # 4. Pad with zeros if residual was skipped
         if hasattr(self, "vq") and not self.add_vq_residual_to_stoch:
@@ -275,6 +300,8 @@ class Encoder(SigmaVAEEncoder):
             z_stoch_dropped = z_stoch_dropped * keep_mask
 
         z = z_quantized + z_stoch_dropped
+        # if hasattr(self, "dropout_regularizer"):
+        #     z = self.dropout_regularizer(z)
 
         kl_loss = None
         if kwargs.get("step", None) is not None:
