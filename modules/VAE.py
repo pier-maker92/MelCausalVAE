@@ -101,12 +101,17 @@ class VAE(torch.nn.Module):
             speaker_embedding=getattr(encoder_output, "speaker_embedding", None),
         ).loss
 
-        mu_mean = encoder_output.mu[
-            ~encoder_output.padding_mask
-        ].mean()  # whatever is not quantized
-        mu_var = encoder_output.mu[
-            ~encoder_output.padding_mask
-        ].var()  # whatever is not quantized
+        if encoder_output.mu is not None:
+            mu_mean = encoder_output.mu[
+                ~encoder_output.padding_mask
+            ].mean()  # whatever is not quantized
+            mu_var = encoder_output.mu[
+                ~encoder_output.padding_mask
+            ].var()  # whatever is not quantized
+        else:
+            mu_mean = torch.tensor(0.0, device=encoder_output.z.device)
+            mu_var = torch.tensor(0.0, device=encoder_output.z.device)
+            
         out = {
             "audio_loss": audio_loss,
             "kl_loss": encoder_output.kl_loss,
@@ -230,14 +235,26 @@ class VAE(torch.nn.Module):
         ):
             context_vector = encoder_output.z
         else:
-            context_vector = torch.zeros_like(encoder_output.z)
-            qd = self.config.encoder_config.vq_config.dim_to_quantize
-            if kwargs.get("quantized", True) and encoder_output.quantized is not None:
-                context_vector[..., :qd] += encoder_output.quantized
-            if kwargs.get("residual", True) and encoder_output.residual is not None:
-                context_vector[..., :qd] += encoder_output.residual
-            if kwargs.get("tail", True) and encoder_output.tail is not None:
-                context_vector[..., qd:] += encoder_output.tail
+            features_to_concat = []
+            if encoder_output.quantized is not None:
+                semantic_part = encoder_output.quantized if kwargs.get("quantized", True) else torch.zeros_like(encoder_output.quantized)
+                features_to_concat.append(semantic_part)
+                
+            if encoder_output.tail is not None:
+                acoustic_part = encoder_output.tail if kwargs.get("tail", True) else torch.zeros_like(encoder_output.tail)
+                features_to_concat.append(acoustic_part)
+                
+            if len(features_to_concat) > 1:
+                combined_features = torch.cat(features_to_concat, dim=-1)
+            elif len(features_to_concat) == 1:
+                combined_features = features_to_concat[0]
+            else:
+                combined_features = torch.zeros_like(encoder_output.z)
+                
+            if hasattr(self.encoder, "out_proj") and len(features_to_concat) > 0:
+                context_vector = self.encoder.out_proj(combined_features)
+            else:
+                context_vector = encoder_output.z
 
         reconstructed_mel, reconstructed_padding_mask = self.sample(
             num_steps=num_steps,

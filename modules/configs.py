@@ -19,6 +19,7 @@ class SigmaVAEEncoderConfig:
     use_slt: bool = False
     use_reparameterization_trick: bool = False
     use_instance_norm: bool = False
+    acoustic_dim: Optional[int] = None
 
 
 @dataclass

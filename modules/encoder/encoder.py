@@ -69,26 +69,22 @@ class Encoder(SigmaVAEEncoder):
             d_model=d_model, nheads=tf_heads, nlayers=tf_layers, drop_p=drop_p
         )
 
-        self.mu = nn.Linear(d_model, latent_dim)
-        if config.logvar_layer:
-            self.logvar = nn.Linear(d_model, latent_dim)
-
+        semantic_dim = 0
         if config.vq_config:
-            if config.vq_config.dim_to_quantize > config.latent_dim:
-                raise ValueError(
-                    f"dim_to_quantize ({config.vq_config.dim_to_quantize}) must be <= latent_dim ({config.latent_dim})."
-                )
+            semantic_dim = config.vq_config.dim_to_quantize
+            self.mu_semantic = nn.Linear(d_model, semantic_dim)
             if getattr(config.vq_config, "fsq_levels", None) is not None:
                 self.vq = FiniteScalarQuantizer(config.vq_config)
             else:
                 self.vq = HardVectorQuantizer(config.vq_config)
-            self.residual_and_tail_dropout_p = (
-                config.vq_config.residual_and_tail_dropout_p
-            )
-            self.add_vq_residual_to_stoch = config.vq_config.add_vq_residual_to_stoch
 
-            qd = config.vq_config.dim_to_quantize
-            tail_dim = config.latent_dim - qd
+        acoustic_dim = getattr(config, "acoustic_dim", 0) or 0
+        if acoustic_dim > 0:
+            self.mu_acoustic = nn.Linear(d_model, acoustic_dim)
+            self.logvar_acoustic = nn.Linear(d_model, acoustic_dim)
+
+        if semantic_dim + acoustic_dim > 0:
+            self.out_proj = nn.Linear(semantic_dim + acoustic_dim, latent_dim)
 
         if config.dropout_regularizer_config:
             self.dropout_regularizer = DropoutRegularizer(
@@ -120,10 +116,17 @@ class Encoder(SigmaVAEEncoder):
     def _freeze_encoder_before_latent_heads(self):
         for param in self.parameters():
             param.requires_grad = False
-        for param in self.mu.parameters():
-            param.requires_grad = True
-        if hasattr(self, "logvar"):
-            for param in self.logvar.parameters():
+        if hasattr(self, "mu_semantic"):
+            for param in self.mu_semantic.parameters():
+                param.requires_grad = True
+        if hasattr(self, "mu_acoustic"):
+            for param in self.mu_acoustic.parameters():
+                param.requires_grad = True
+        if hasattr(self, "logvar_acoustic"):
+            for param in self.logvar_acoustic.parameters():
+                param.requires_grad = True
+        if hasattr(self, "out_proj"):
+            for param in self.out_proj.parameters():
                 param.requires_grad = True
         if hasattr(self, "vq"):
             for param in self.vq.parameters():
@@ -153,146 +156,101 @@ class Encoder(SigmaVAEEncoder):
         hiddens = x.transpose(1, 2)  # [B, T/C, 512]
         h = self.transformer(hiddens)  # [B, T/C, 512]
 
-        mu_original = self.mu(h)
-        if getattr(self.config, "use_slt", False):
-            mu_original = self.slt(mu_original)
-
         speaker_embedding = None
         if getattr(self.config, "use_instance_norm", False):
-            spk_mu = mu_original.mean(dim=1, keepdim=True)
-            spk_sigma = mu_original.std(dim=1, keepdim=True)
-            mu_original = (mu_original - spk_mu) / (spk_sigma + 1e-6)
+            valid_mask = (~padding_mask).unsqueeze(-1).to(h.dtype)  # [B, T, 1]
+            valid_count = valid_mask.sum(dim=1, keepdim=True).clamp(min=1.0)
+            
+            spk_mu = (h * valid_mask).sum(dim=1, keepdim=True) / valid_count
+            spk_sigma = torch.sqrt(((h - spk_mu) ** 2 * valid_mask).sum(dim=1, keepdim=True) / valid_count + 1e-6)
+            
+            h = (h - spk_mu) / (spk_sigma + 1e-6)
+            h = h * valid_mask  # Re-apply mask
             speaker_embedding = torch.cat([spk_mu.squeeze(1), spk_sigma.squeeze(1)], dim=-1)
 
-        if self.use_pre_quant_dropout:
-            mu = self.dropout_regularizer(mu_original)
+        semantic_features = None
+        mu_semantic = None
+        vq_out = None
+        vq_quantized_ste = None
+        if hasattr(self, "mu_semantic"):
+            mu_semantic = self.mu_semantic(h)
+            if getattr(self.config, "use_slt", False):
+                mu_semantic = self.slt(mu_semantic)
+            
+            vq_out = self.vq(
+                mu_semantic,
+                padding_mask,
+                global_step=kwargs.get("step", None),
+            )
+            # No reparameterization for semantic, just STE
+            vq_quantized_ste = mu_semantic + (vq_out.quantized - mu_semantic).detach()
+            semantic_features = vq_quantized_ste
+
+        acoustic_features = None
+        mu_acoustic = None
+        logvar_acoustic = None
+        if hasattr(self, "mu_acoustic"):
+            mu_acoustic = self.mu_acoustic(h)
+            logvar_acoustic = self.logvar_acoustic(h)
+            if getattr(self.config, "use_slt", False):
+                mu_acoustic = self.slt(mu_acoustic)
+                
+            if self.training and getattr(self.config, "use_reparameterization_trick", True):
+                z_acoustic = self.reparameterize(mu_acoustic, logvar_acoustic)
+            else:
+                z_acoustic = mu_acoustic
+                
+            if hasattr(self, "dropout_regularizer"):
+                z_acoustic = self.dropout_regularizer(z_acoustic)
+                
+            acoustic_features = z_acoustic
+
+        features_to_concat = []
+        if semantic_features is not None:
+            features_to_concat.append(semantic_features)
+        if acoustic_features is not None:
+            features_to_concat.append(acoustic_features)
+            
+        if len(features_to_concat) > 1:
+            combined_features = torch.cat(features_to_concat, dim=-1)
+        elif len(features_to_concat) == 1:
+            combined_features = features_to_concat[0]
         else:
-            mu = mu_original
+            raise ValueError("No semantic or acoustic features computed.")
 
-        logvar = None
-        if hasattr(self, "logvar"):
-            logvar = self.logvar(h)
-
-        z_quantized = torch.zeros_like(mu)
+        z = self.out_proj(combined_features)
+        
         ortho_loss = None
-        # vq
-        if hasattr(self, "vq"):
-            qd = self.config.vq_config.dim_to_quantize
-            mu_head = mu[..., :qd]
-            mu_tail = mu[..., qd:]
-
+        if mu_semantic is not None and mu_acoustic is not None:
             ortho_weight = 1.0
             if getattr(self.config, "semantic_distillation_config", None) is not None:
                 ortho_weight = self.config.semantic_distillation_config.ortho_loss_weight
 
-            if mu_tail.shape[-1] > 0 and ortho_weight > 0.0:
+            if ortho_weight > 0.0:
                 mask = ~padding_mask
-                # h1 shape: [N, qd], h2 shape: [N, tail_dim]
-                h1 = mu_head[mask]
-                h2 = mu_tail[mask]
+                h1 = mu_semantic[mask]
+                h2 = mu_acoustic[mask]
 
-                # 1. Centra le feature (Media = 0) lungo la dimensione del batch
                 h1_centered = h1 - h1.mean(dim=0, keepdim=True)
                 h2_centered = h2 - h2.mean(dim=0, keepdim=True)
 
-                # 2. Normalizza per la deviazione standard (Correlazione di Pearson)
-                # Aggiungiamo epsilon per stabilità numerica ed evitare divisioni per zero
                 h1_norm = h1_centered / (h1_centered.std(dim=0, keepdim=True) + 1e-8)
                 h2_norm = h2_centered / (h2_centered.std(dim=0, keepdim=True) + 1e-8)
 
-                # 3. Calcola la matrice di Cross-Correlazione
-                # Shape risultante: [qd, tail_dim]
                 N = h1_centered.size(0)
                 cross_corr = torch.matmul(h1_norm.T, h2_norm) / (N - 1 + 1e-8)
-
-                # 4. La loss è la media dei quadrati degli elementi della matrice
-                # (Penalizza ogni correlazione lineare spingendola a 0)
                 ortho_loss = (cross_corr**2).mean()
 
-            vq_out = self.vq(
-                mu_head,
-                padding_mask,
-                global_step=kwargs.get("step", None),
-            )
-            # get z_quantized (straight-through estimator)
-            vq_quantized_ste = mu_head + (vq_out.quantized - mu_head).detach()
-            z_quantized = torch.cat(
-                [vq_quantized_ste, torch.zeros_like(mu_tail)], dim=-1
-            )
-
-            logvar_head = logvar[..., :qd] if logvar is not None else None
-            logvar_tail = logvar[..., qd:] if logvar is not None else None
-
-            # 1. Define stochastic parts and their distributions
-            if self.add_vq_residual_to_stoch:
-                mu_stoch = torch.cat([vq_out.residual, mu_tail], dim=-1)
-                logvar_stoch = logvar  # [B, T, D]
-            else:
-                mu_stoch = mu_tail
-                logvar_stoch = logvar_tail  # [B, T, D-qd]
-
-            # 2. Sample z_stoch (active parts only)
-            if self.training and getattr(self.config, "use_reparameterization_trick", True):
-                z_stoch = self.reparameterize(mu_tail, logvar_tail, std=1.0)
-            else:
-                z_stoch = mu_tail
-
-            if self.add_vq_residual_to_stoch:
-                if self.training and getattr(self.config, "use_reparameterization_trick", True):
-                    z_stoch_head = self.reparameterize(
-                        vq_out.residual, logvar_head, std=0.1
-                    )
-                else:
-                    z_stoch_head = vq_out.residual
-                z_stoch = torch.cat([z_stoch_head, z_stoch], dim=-1)
-        else:
-            mu_stoch = mu
-            logvar_stoch = logvar
-            if self.training and getattr(self.config, "use_reparameterization_trick", True):
-                z_stoch = self.reparameterize(mu, logvar)
-            else:
-                z_stoch = mu
-
-        # 3. Dropout Regularizer (on active parts only)
-        if hasattr(self, "dropout_regularizer") and not self.use_pre_quant_dropout:
-            z_stoch_dropped = self.dropout_regularizer(z_stoch)
-        else:
-            z_stoch_dropped = z_stoch
-
-        # 4. Pad with zeros if residual was skipped
-        if hasattr(self, "vq") and not self.add_vq_residual_to_stoch:
-            z_stoch_dropped = torch.cat(
-                [torch.zeros_like(mu_head), z_stoch_dropped], dim=-1
-            )
-
-        # 5. Dropout per sample (on full dimension)
-        if self.training and getattr(self, "residual_and_tail_dropout_p", 0.0) > 0.0:
-            B = z_stoch_dropped.shape[0]
-            keep_mask = (
-                torch.rand(B, 1, 1, device=z_stoch_dropped.device)
-                >= self.residual_and_tail_dropout_p
-            ).to(z_stoch_dropped.dtype)
-            z_stoch_dropped = z_stoch_dropped * keep_mask
-
-        z = z_quantized + z_stoch_dropped
-
         kl_loss = None
-        if kwargs.get("step", None) is not None:
+        if kwargs.get("step", None) is not None and hasattr(self, "mu_acoustic"):
             if hasattr(self, "kl_chunk_regularizer"):
                 kl_term = self.kl_chunk_regularizer(
-                    mu_stoch, logvar_stoch, padding_mask
+                    mu_acoustic, logvar_acoustic, padding_mask
                 )
             else:
-                _qd = (
-                    self.config.vq_config.dim_to_quantize if hasattr(self, "vq") else 0
-                )
                 kl_term = self.kl_divergence(
-                    (
-                        mu_stoch
-                        if not self.use_pre_quant_dropout
-                        else mu_original[..., _qd:]  # only tail
-                    ),
-                    logvar_stoch,
+                    mu_acoustic,
+                    logvar_acoustic,
                     padding_mask,
                     dtype=z.dtype,
                 )
@@ -302,18 +260,18 @@ class Encoder(SigmaVAEEncoder):
             "z": z,
             "kl_loss": kl_loss,
             "padding_mask": padding_mask,
-            "mu": mu_stoch,
-            "mu_pre_vq": mu,
+            "mu": mu_acoustic,
+            "mu_pre_vq": mu_semantic,
             "ortho_loss": ortho_loss,
             "speaker_embedding": speaker_embedding,
         }
 
-        if hasattr(self, "vq"):
+        if vq_out is not None:
             out["vq_stats"] = vq_out.stats
             out["vq_loss"] = vq_out.loss
             out["quantized"] = vq_quantized_ste
-            out["residual"] = vq_out.residual
-            out["tail"] = mu_tail
+            out["residual"] = None
+            out["tail"] = acoustic_features
             out["indices"] = vq_out.indices
 
         return EncoderOutput(**out)
