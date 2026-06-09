@@ -10,9 +10,6 @@ class SigmaVAEEncoder(nn.Module):
     def __init__(self, config: SigmaVAEEncoderConfig):
         super().__init__()
         self.config = config
-        self.std_activation = (
-            nn.Softplus() if self.config.use_softplus else nn.Identity()
-        )
         self.kl_loss_weight = float(config.kl_loss_weight)
 
     def forward(self, **kwargs):
@@ -81,10 +78,7 @@ class SigmaVAEEncoder(nn.Module):
     ) -> torch.FloatTensor:
         if std is None:
             std = self.config.target_std
-        weight = self.std_activation(
-            torch.randn(mu.shape[0], mu.shape[1], dtype=mu.dtype, device=mu.device)
-            * std
-        )
+        weight = torch.randn(mu.shape[0], mu.shape[1], dtype=mu.dtype, device=mu.device) * std
         return torch.clamp(weight, min=-2 * std, max=2 * std)
 
     def _resize_padding_mask(

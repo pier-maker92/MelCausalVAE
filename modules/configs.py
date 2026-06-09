@@ -11,13 +11,10 @@ from dataclasses import dataclass, field, asdict
 class SigmaVAEEncoderConfig:
     latent_dim: int = 64
     target_std: float = 1.0
-    logvar_layer: bool = False
     kl_loss_weight: float = 1e-5
     kl_loss_warmup_steps: Optional[int] = None
     kl_loss_warmup_ratio: Optional[float] = None
-    use_softplus: bool = False
     use_slt: bool = False
-    use_reparameterization_trick: bool = False
     use_instance_norm: bool = False
     acoustic_dim: Optional[int] = None
 
@@ -58,8 +55,6 @@ class VQConfig:
     ema_decay: float = 0.99
     ema_epsilon: float = 1e-5
     dim_to_quantize: Optional[int] = None
-    residual_and_tail_dropout_p: float = 0.1
-    add_vq_residual_to_stoch: bool = False
     fsq_levels: Optional[List[int]] = None
 
 

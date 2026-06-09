@@ -195,10 +195,7 @@ class Encoder(SigmaVAEEncoder):
             if getattr(self.config, "use_slt", False):
                 mu_acoustic = self.slt(mu_acoustic)
                 
-            if self.training and getattr(self.config, "use_reparameterization_trick", True):
-                z_acoustic = self.reparameterize(mu_acoustic, logvar_acoustic)
-            else:
-                z_acoustic = mu_acoustic
+            z_acoustic = self.reparameterize(mu_acoustic, logvar_acoustic)
                 
             if hasattr(self, "dropout_regularizer"):
                 z_acoustic = self.dropout_regularizer(z_acoustic)
