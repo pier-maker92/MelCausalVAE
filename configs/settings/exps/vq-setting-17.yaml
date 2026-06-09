@@ -9,7 +9,7 @@ sample_rate: 24000
 training:
   num_train_epochs: 10
   dataset_name: librispeech_aligned
-  output_dir: checkpoints/exps/vq-setting-14-orth
+  output_dir: checkpoints/exps/vq-setting-17
   per_device_train_batch_size: 16
   per_device_eval_batch_size: 4
 
@@ -26,13 +26,13 @@ training:
   # report
   report_to: wandb
   wandb_project: speech-vae
-  wandb_run_name: set14-orth
+  wandb_run_name: set17
 
   fp16: false
   bf16: true
 
   save_steps: 2500
-  logging_steps: 10
+  logging_steps: 1
 
   # eval 
   eval_strategy: "steps"
@@ -44,13 +44,11 @@ training:
   early_stopping_patience: 5
   # vq patience
   vq_collapse_threshold: 0.5
-  vq_collapse_patience: 10
+  vq_collapse_patience: 5
 
   gradient_accumulation_steps: 1
   dataloader_num_workers: 8
   eval_num_samples: 100
-
-  resume_from_checkpoint: /scratch/piermel/MelCausalVAE/checkpoints/exps/07-June-2026/18:39:19_set14-orth/checkpoint-12500
 
 
 # Encoder configuration
@@ -62,15 +60,17 @@ encoder:
   logvar_layer: false
   target_std: 1.0
   kl_loss_warmup_ratio: 0.1
-  kl_loss_weight: 1e-5
+  kl_loss_weight: 0.0
+  use_reparameterization_trick: false
+  use_instance_norm: false
 
   # --- VQ Config ---
   vq_config:
-    num_embeddings: 512
+    num_embeddings: 256
     commitment_weight: 0.25
     reset_dead_codes: true
     reset_every_forward: 10
-    residual_and_tail_dropout_p: 0.1
+    residual_and_tail_dropout_p: 0.25
     dim_to_quantize: 24
     use_ema_codebook: true
     add_vq_residual_to_stoch: false
@@ -100,3 +100,4 @@ decoder:
   window_attention_seconds: 3.0
   kernel_size: 7
   causal_convolution: false
+  speaker_cond_dim: 32
