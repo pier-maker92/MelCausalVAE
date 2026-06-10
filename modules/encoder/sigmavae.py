@@ -39,17 +39,20 @@ class SigmaVAEEncoder(nn.Module):
     ) -> torch.FloatTensor:
         if logvar is None:
             # Compute in fp32 for numerical stability
-            mu_valid = mu[~padding_mask].to(dtype)
+            mu_valid = mu[~padding_mask].to(torch.float32)
             num_valid = (~padding_mask).sum().clamp_min(1)
             # 0.5 * sum(mu^2) is the exact analytical KL divergence when logvar=0
-            return 0.5 * mu_valid.pow(2).sum() / num_valid * self.kl_loss_weight
+            kl = 0.5 * mu_valid.pow(2).sum() / (num_valid * mu.shape[-1])
+            return kl.to(dtype) * self.kl_loss_weight
 
         # Compute KL divergence in fp32 for numerical stability with fp16
-        mu_valid = mu[~padding_mask].to(dtype)
-        logvar_valid = logvar[~padding_mask].to(dtype)
+        mu_valid = mu[~padding_mask].to(torch.float32)
+        logvar_valid = logvar[~padding_mask].to(torch.float32)
+        # Add clamp to prevent any extreme values before exp()
+        logvar_valid = torch.clamp(logvar_valid, min=-30.0, max=20.0)
         num_valid = (~padding_mask).sum().clamp_min(1)
-        kl = -0.5 * torch.sum(1 + logvar_valid - mu_valid.pow(2) - logvar_valid.exp()) / num_valid
-        return kl.to(mu.dtype) * self.kl_loss_weight
+        kl = -0.5 * torch.sum(1 + logvar_valid - mu_valid.pow(2) - logvar_valid.exp()) / (num_valid * mu.shape[-1])
+        return kl.to(dtype) * self.kl_loss_weight
 
     def kl_divergence_weighted(
         self,
@@ -63,17 +66,18 @@ class SigmaVAEEncoder(nn.Module):
         Same KL as kl_divergence but each latent dimension is scaled by channel_weights [latent_dim].
         When weights are all 1.0, matches kl_divergence (up to dtype handling).
         """
-        w = channel_weights.to(device=mu.device, dtype=dtype).view(1, 1, -1)
-        valid = (~padding_mask).unsqueeze(-1).to(dtype=dtype)
+        w = channel_weights.to(device=mu.device, dtype=torch.float32).view(1, 1, -1)
+        valid = (~padding_mask).unsqueeze(-1).to(dtype=torch.float32)
         if logvar is None:
-            mu_f = mu.to(dtype)
+            mu_f = mu.to(torch.float32)
             denom = (valid.sum() * mu.shape[-1]).clamp(min=1.0)
-            return (mu_f.pow(2) * w * valid).sum() / denom
-        mu_f = mu.to(dtype)
-        logvar_f = logvar.to(dtype)
+            return ((mu_f.pow(2) * w * valid).sum() / denom).to(dtype)
+        mu_f = mu.to(torch.float32)
+        logvar_f = logvar.to(torch.float32)
+        logvar_f = torch.clamp(logvar_f, min=-30.0, max=20.0)
         kl_elem = -0.5 * (1 + logvar_f - mu_f.pow(2) - logvar_f.exp())
         denom = (valid.sum() * mu.shape[-1]).clamp(min=1.0)
-        return ((kl_elem * w * valid).sum() / denom).to(mu.dtype)
+        return ((kl_elem * w * valid).sum() / denom).to(dtype)
 
     def sample_scalar_std(
         self, mu: torch.FloatTensor, std: Optional[float] = None
