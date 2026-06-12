@@ -70,7 +70,7 @@ encoder:
     commitment_weight: 0.25
     reset_dead_codes: true
     reset_every_forward: 10
-    residual_and_tail_dropout_p: 0.1
+    residual_and_tail_dropout_p: 0.25
     dim_to_quantize: 24
     use_ema_codebook: true
     add_vq_residual_to_stoch: false
