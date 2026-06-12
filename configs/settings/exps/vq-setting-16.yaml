@@ -46,7 +46,7 @@ training:
   vq_collapse_threshold: 0.5
   vq_collapse_patience: 5
 
-  gradient_accumulation_steps: 2
+  gradient_accumulation_steps: 1
   dataloader_num_workers: 8
   eval_num_samples: 100
 
