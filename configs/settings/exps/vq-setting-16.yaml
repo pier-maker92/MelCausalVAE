@@ -2,7 +2,7 @@
 # Global VAE parameters that override configs/main.yaml defaults
 compress_factor: 4
 mel_dim: 100
-latent_dim: 16
+latent_dim: 64
 sample_rate: 24000
 
 # Training configuration
@@ -71,13 +71,13 @@ encoder:
     reset_dead_codes: true
     reset_every_forward: 10
     residual_and_tail_dropout_p: 0.1
-    dim_to_quantize: 8
+    dim_to_quantize: 24
     use_ema_codebook: true
-    add_vq_residual_to_stoch: true
+    add_vq_residual_to_stoch: false
 
   # --- Dropout Config ---
   dropout_regularizer_config:
-    chunk_size: 1
+    chunk_size: 2
     strategy: "linear"
     dropout_start: 0.0
     dropout_end: 0.8
@@ -90,7 +90,7 @@ encoder:
   semantic_distillation_config:
     wavlm_layer: 18
     cosine_loss_weight: 1.0
-    ortho_loss_weight: 1.0
+    ortho_loss_weight: 0.0
 
   # --- KL Config ---
   kl_chunk_regularizer_config: null
@@ -108,4 +108,4 @@ decoder:
   window_attention_seconds: 3.0
   kernel_size: 7
   causal_convolution: false
-  speaker_cond_dim: 32
+  speaker_cond_dim: 128
