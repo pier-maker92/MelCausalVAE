@@ -11,6 +11,8 @@ encoder:
   target_std: null
   kl_loss_warmup_steps: 1000
   kl_loss_warmup_ratio: null
+  use_logvar_acoustic: false
+  use_instance_norm: false
 
   # --- VQ ---
   vq_config:

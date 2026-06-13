@@ -60,7 +60,8 @@ encoder:
   target_std: 1.0
   kl_loss_warmup_ratio: 0.1
   kl_loss_weight: 0.0
-  use_instance_norm: true
+  use_instance_norm: false
+  use_logvar_acoustic: true
 
   # --- VQ Config ---
   vq_config:
