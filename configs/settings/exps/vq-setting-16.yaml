@@ -24,7 +24,7 @@ training:
   decoder_min_lr: 5.0e-5
   
   # report
-  report_to: wandb
+  report_to: tensorboard
   wandb_project: speech-vae
   wandb_run_name: set16
 
