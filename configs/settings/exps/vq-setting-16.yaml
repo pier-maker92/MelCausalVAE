@@ -9,7 +9,7 @@ sample_rate: 24000
 training:
   num_train_epochs: 10
   dataset_name: librispeech_aligned
-  output_dir: checkpoints/exps/vq-setting-16-fixedIN-noIN
+  output_dir: checkpoints/exps/vq-setting-16
   per_device_train_batch_size: 16
   per_device_eval_batch_size: 4
 
@@ -26,7 +26,7 @@ training:
   # report
   report_to: wandb
   wandb_project: speech-vae
-  wandb_run_name: set16-fixedIN-noIN
+  wandb_run_name: set16
 
   fp16: false
   bf16: true
@@ -52,6 +52,8 @@ training:
 
   generate_and_log_samples: true
 
+  #resume_from_checkpoint: /workspace/MelCausalVAE/checkpoints/exps/vq-setting-16-fixedIN-noIN/checkpoint-5000
+
 
 # Encoder configuration
 encoder:
@@ -61,10 +63,11 @@ encoder:
   n_residual_blocks: 3
   target_std: 1.0
   kl_loss_warmup_ratio: 0.01
-  kl_loss_weight: 1e-2
+  kl_loss_weight: 5e-3
   use_instance_norm: false
-  use_logvar_acoustic: false
+  use_logvar_acoustic: true
   acoustic_dim: 32
+  acoustic_dropout_p: 0.25
 
   # --- VQ Config ---
   vq_config:
@@ -76,15 +79,15 @@ encoder:
     use_ema_codebook: true
 
   # --- Dropout Config ---
-  dropout_regularizer_config:
-    chunk_size: 1
-    strategy: "linear"
-    dropout_start: 0.0
-    dropout_end: 0.8
-    k: 6.0
-    x0: 0.5
-    dropout_hierarchical: false
-    pre_quantization: false
+  dropout_regularizer_config: null
+    # chunk_size: 1
+    # strategy: "linear"
+    # dropout_start: 0.0
+    # dropout_end: 0.8
+    # k: 6.0
+    # x0: 0.5
+    # dropout_hierarchical: false
+    # pre_quantization: false
 
   # --- Semantic Distillation Config ---
   semantic_distillation_config:
