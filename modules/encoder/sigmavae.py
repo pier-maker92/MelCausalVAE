@@ -40,9 +40,8 @@ class SigmaVAEEncoder(nn.Module):
         if logvar is None:
             # Compute in fp32 for numerical stability
             mu_valid = mu[~padding_mask].to(torch.float32)
-            num_valid = (~padding_mask).sum().clamp_min(1)
-            # 0.5 * sum(mu^2) is the exact analytical KL divergence when logvar=0
-            kl = 0.5 * mu_valid.pow(2).sum() / (num_valid * mu.shape[-1])
+            target = torch.zeros_like(mu_valid)
+            kl = F.mse_loss(mu_valid, target)
             return kl.to(dtype) * self.kl_loss_weight
 
         # Compute KL divergence in fp32 for numerical stability with fp16
@@ -51,7 +50,11 @@ class SigmaVAEEncoder(nn.Module):
         # Add clamp to prevent any extreme values before exp()
         logvar_valid = torch.clamp(logvar_valid, min=-30.0, max=20.0)
         num_valid = (~padding_mask).sum().clamp_min(1)
-        kl = -0.5 * torch.sum(1 + logvar_valid - mu_valid.pow(2) - logvar_valid.exp()) / (num_valid * mu.shape[-1])
+        kl = (
+            -0.5
+            * torch.sum(1 + logvar_valid - mu_valid.pow(2) - logvar_valid.exp())
+            / (num_valid * mu.shape[-1])
+        )
         return kl.to(dtype) * self.kl_loss_weight
 
     def kl_divergence_weighted(
@@ -84,7 +87,10 @@ class SigmaVAEEncoder(nn.Module):
     ) -> torch.FloatTensor:
         if std is None:
             std = self.config.target_std
-        weight = torch.randn(mu.shape[0], mu.shape[1], dtype=mu.dtype, device=mu.device) * std
+        weight = (
+            torch.randn(mu.shape[0], mu.shape[1], dtype=mu.dtype, device=mu.device)
+            * std
+        )
         return torch.clamp(weight, min=-2 * std, max=2 * std)
 
     def _resize_padding_mask(

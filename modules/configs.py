@@ -14,7 +14,6 @@ class SigmaVAEEncoderConfig:
     kl_loss_weight: float = 1e-5
     kl_loss_warmup_steps: Optional[int] = None
     kl_loss_warmup_ratio: Optional[float] = None
-    use_slt: bool = False
     use_instance_norm: bool = False
     acoustic_dim: Optional[int] = None
     acoustic_dropout_p: float = 0.0

@@ -81,7 +81,8 @@ class Encoder(SigmaVAEEncoder):
         acoustic_dim = getattr(config, "acoustic_dim", 0) or 0
         if acoustic_dim > 0:
             self.mu_acoustic = nn.Linear(d_model, acoustic_dim)
-            self.logvar_acoustic = nn.Linear(d_model, acoustic_dim)
+            if getattr(config, "use_logvar_acoustic", True):
+                self.logvar_acoustic = nn.Linear(d_model, acoustic_dim)
 
         if semantic_dim + acoustic_dim > 0:
             self.out_proj = nn.Linear(semantic_dim + acoustic_dim, latent_dim)
@@ -103,18 +104,13 @@ class Encoder(SigmaVAEEncoder):
             )
 
         if getattr(config, "speaker_cond_dim", None) is not None:
-            self.speaker_proj = nn.Linear(2 * d_model, config.speaker_cond_dim)
+            speaker_proj_in_dim = 2 * acoustic_dim if acoustic_dim > 0 else 2 * d_model
+            self.speaker_proj = nn.Linear(speaker_proj_in_dim, config.speaker_cond_dim)
 
         if config.freeze_encoder_before_latent_heads:
             self._freeze_encoder_before_latent_heads()
 
         self.config = config
-
-    def slt(self, x: torch.FloatTensor):
-        """The sign-log transform
-        f(x) = sign(x) ln(|x| + 1)
-        """
-        return x.sign() * (x.abs() + 1).log()
 
     def _freeze_encoder_before_latent_heads(self):
         for param in self.parameters():
@@ -137,6 +133,47 @@ class Encoder(SigmaVAEEncoder):
         if hasattr(self, "speaker_proj"):
             for param in self.speaker_proj.parameters():
                 param.requires_grad = True
+
+    def _instance_norm(self, h: torch.FloatTensor, padding_mask: torch.BoolTensor):
+        valid_mask = (~padding_mask).unsqueeze(-1).to(h.dtype)  # [B, T, 1]
+        valid_count = valid_mask.sum(dim=1, keepdim=True).clamp(min=1.0)
+
+        spk_mu = (h * valid_mask).sum(dim=1, keepdim=True) / valid_count
+        spk_sigma = torch.sqrt(
+            ((h - spk_mu) ** 2 * valid_mask).sum(dim=1, keepdim=True) / valid_count
+            + 1e-6
+        )
+
+        h_norm = (h - spk_mu) / (spk_sigma + 1e-6)
+        h_norm = h_norm * valid_mask  # Re-apply mask
+        speaker_embedding = torch.cat(
+            [spk_mu.squeeze(1), spk_sigma.squeeze(1)], dim=-1
+        )
+
+        if hasattr(self, "speaker_proj"):
+            speaker_embedding = self.speaker_proj(speaker_embedding)
+            
+        return h_norm, speaker_embedding
+
+    def _orthogonalization_loss(self, mu_semantic: torch.FloatTensor, mu_acoustic: torch.FloatTensor, padding_mask: torch.BoolTensor, ortho_weight: float):
+        if ortho_weight <= 0.0:
+            return None
+            
+        mask = ~padding_mask
+        h1 = mu_semantic[mask]
+        h2 = mu_acoustic[mask]
+
+        h1_centered = h1 - h1.mean(dim=0, keepdim=True)
+        h2_centered = h2 - h2.mean(dim=0, keepdim=True)
+
+        h1_norm = h1_centered / (h1_centered.std(dim=0, keepdim=True) + 1e-8)
+        h2_norm = h2_centered / (h2_centered.std(dim=0, keepdim=True) + 1e-8)
+
+        N = h1_centered.size(0)
+        cross_corr = torch.matmul(h1_norm.T, h2_norm) / (N - 1 + 1e-8)
+        ortho_loss = (cross_corr**2).mean()
+        
+        return ortho_loss
 
     def forward(
         self,
@@ -163,24 +200,6 @@ class Encoder(SigmaVAEEncoder):
         h = self.transformer(hiddens)  # [B, T/C, 512]
 
         speaker_embedding = None
-        if getattr(self.config, "use_instance_norm", False):
-            valid_mask = (~padding_mask).unsqueeze(-1).to(h.dtype)  # [B, T, 1]
-            valid_count = valid_mask.sum(dim=1, keepdim=True).clamp(min=1.0)
-
-            spk_mu = (h * valid_mask).sum(dim=1, keepdim=True) / valid_count
-            spk_sigma = torch.sqrt(
-                ((h - spk_mu) ** 2 * valid_mask).sum(dim=1, keepdim=True) / valid_count
-                + 1e-6
-            )
-
-            h = (h - spk_mu) / (spk_sigma + 1e-6)
-            h = h * valid_mask  # Re-apply mask
-            speaker_embedding = torch.cat(
-                [spk_mu.squeeze(1), spk_sigma.squeeze(1)], dim=-1
-            )
-
-            if hasattr(self, "speaker_proj"):
-                speaker_embedding = self.speaker_proj(speaker_embedding)
 
         semantic_features = None
         mu_semantic = None
@@ -188,8 +207,6 @@ class Encoder(SigmaVAEEncoder):
         vq_quantized_ste = None
         if hasattr(self, "mu_semantic"):
             mu_semantic = self.mu_semantic(h)
-            if getattr(self.config, "use_slt", False):
-                mu_semantic = self.slt(mu_semantic)
 
             vq_out = self.vq(
                 mu_semantic,
@@ -205,11 +222,13 @@ class Encoder(SigmaVAEEncoder):
         logvar_acoustic = None
         if hasattr(self, "mu_acoustic"):
             mu_acoustic = self.mu_acoustic(h)
-            logvar_acoustic = self.logvar_acoustic(h)
-            if getattr(self.config, "use_slt", False):
-                mu_acoustic = self.slt(mu_acoustic)
+            if getattr(self, "logvar_acoustic", None) is not None:
+                logvar_acoustic = self.logvar_acoustic(h)
 
             z_acoustic = self.reparameterize(mu_acoustic, logvar_acoustic)
+
+            if getattr(self.config, "use_instance_norm", False):
+                z_acoustic, speaker_embedding = self._instance_norm(z_acoustic, padding_mask)
 
             if hasattr(self, "dropout_regularizer"):
                 z_acoustic = self.dropout_regularizer(z_acoustic)
@@ -247,20 +266,9 @@ class Encoder(SigmaVAEEncoder):
                     self.config.semantic_distillation_config.ortho_loss_weight
                 )
 
-            if ortho_weight > 0.0:
-                mask = ~padding_mask
-                h1 = mu_semantic[mask]
-                h2 = mu_acoustic[mask]
-
-                h1_centered = h1 - h1.mean(dim=0, keepdim=True)
-                h2_centered = h2 - h2.mean(dim=0, keepdim=True)
-
-                h1_norm = h1_centered / (h1_centered.std(dim=0, keepdim=True) + 1e-8)
-                h2_norm = h2_centered / (h2_centered.std(dim=0, keepdim=True) + 1e-8)
-
-                N = h1_centered.size(0)
-                cross_corr = torch.matmul(h1_norm.T, h2_norm) / (N - 1 + 1e-8)
-                ortho_loss = (cross_corr**2).mean()
+            ortho_loss = self._orthogonalization_loss(
+                mu_semantic, mu_acoustic, padding_mask, ortho_weight
+            )
 
         kl_loss = None
         if kwargs.get("step", None) is not None and hasattr(self, "mu_acoustic"):
