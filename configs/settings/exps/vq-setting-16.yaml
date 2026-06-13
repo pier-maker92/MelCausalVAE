@@ -2,14 +2,14 @@
 # Global VAE parameters that override configs/main.yaml defaults
 compress_factor: 4
 mel_dim: 100
-latent_dim: 16
+latent_dim: 64
 sample_rate: 24000
 
 # Training configuration
 training:
   num_train_epochs: 10
   dataset_name: librispeech_aligned
-  output_dir: checkpoints/exps/vq-setting-16
+  output_dir: checkpoints/exps/vq-setting-16-fixedIN-noIN
   per_device_train_batch_size: 16
   per_device_eval_batch_size: 4
 
@@ -26,17 +26,17 @@ training:
   # report
   report_to: wandb
   wandb_project: speech-vae
-  wandb_run_name: set16
+  wandb_run_name: set16-fixedIN-noIN
 
   fp16: false
   bf16: true
 
-  save_steps: 2500
+  save_steps: 1000
   logging_steps: 1
 
   # eval 
   eval_strategy: "steps"
-  eval_steps: 2500
+  eval_steps: 1000
   save_total_limit: 3
   load_best_model_at_end: true
   metric_for_best_model: "avg_WER"
@@ -46,9 +46,11 @@ training:
   vq_collapse_threshold: 0.5
   vq_collapse_patience: 5
 
-  gradient_accumulation_steps: 2
+  gradient_accumulation_steps: 1
   dataloader_num_workers: 8
-  eval_num_samples: 100
+  eval_num_samples: 10
+
+  generate_and_log_samples: true
 
 
 # Encoder configuration
@@ -58,10 +60,11 @@ encoder:
   tf_layers: 4
   n_residual_blocks: 3
   target_std: 1.0
-  kl_loss_warmup_ratio: 0.1
-  kl_loss_weight: 0.0
+  kl_loss_warmup_ratio: 0.01
+  kl_loss_weight: 1e-2
   use_instance_norm: false
-  use_logvar_acoustic: true
+  use_logvar_acoustic: false
+  acoustic_dim: 32
 
   # --- VQ Config ---
   vq_config:
@@ -69,7 +72,7 @@ encoder:
     commitment_weight: 0.25
     reset_dead_codes: true
     reset_every_forward: 10
-    dim_to_quantize: 8
+    dim_to_quantize: 24
     use_ema_codebook: true
 
   # --- Dropout Config ---
@@ -87,7 +90,7 @@ encoder:
   semantic_distillation_config:
     wavlm_layer: 18
     cosine_loss_weight: 1.0
-    ortho_loss_weight: 1.0
+    ortho_loss_weight: 0.0
 
   # --- KL Config ---
   kl_chunk_regularizer_config: null

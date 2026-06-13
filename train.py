@@ -666,9 +666,13 @@ class VAEtrainer(Trainer):
         wandb_logs = {}
         total_logged = 0
 
+        model_unwrapped = self.model.module if hasattr(self.model, "module") else self.model
+        was_training = model_unwrapped.training
+        model_unwrapped.eval()
+
         for mode_name, use_quantized, use_tail in modes:
             with torch.no_grad():
-                results = self.model.encode_decode(
+                results = model_unwrapped.encode_decode(
                     audios_srs=audios_srs,
                     num_steps=16,
                     temperature=0.2,
@@ -759,9 +763,14 @@ class VAEtrainer(Trainer):
                 
             total_logged += len(audios_srs)
 
+        if was_training:
+            model_unwrapped.train()
+
         # Log to wandb as simple lists
         if wandb.run is not None:
-            wandb.log(wandb_logs, step=self.state.global_step)
+            # commit=False prevents W&B from committing the step immediately,
+            # allowing HF Trainer to commit this alongside its scalar metrics.
+            wandb.log(wandb_logs, commit=False)
             logger.info(
                 f"Successfully logged {total_logged} reconstruction samples to wandb across {len(modes)} modes"
             )
@@ -894,6 +903,11 @@ def main(cfg: DictConfig):
 
     logger.info("Creating VAE model...")
     model = build_model(cfg_dict)
+    
+    acoustic_dim = getattr(model.config.encoder_config, "acoustic_dim", 0) or 0
+    if acoustic_dim == 0:
+        raise ValueError("acoustic_dim non può essere 0 o None. Deve essere > 0.")
+
     if getattr(model.config.mel_spectrogram_config, "use_bigvgan_mel", False):
         logger.info("Using BigVGAN-compatible mel spectrogram")
 
