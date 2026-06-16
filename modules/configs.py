@@ -47,6 +47,19 @@ class KLChunkRegularizer(RegularizationConfig):
 
 
 @dataclass
+class NoiseConfig(RegularizationConfig):
+    noise_start: float = 0.0
+    noise_end: float = 1.0
+    strategy: str = "linear"  # linear | sigmoid
+    k: float = 1.0
+    x0: float = 0.0
+    noise_type: str = "additive"  # additive (mu + sigma*eps) | interpolate (mu*(1-t) + eps*t)
+    sigma_type: str = "fixed"  # fixed | stochastic
+    use_softplus: bool = False
+    pre_quantization: bool = False
+
+
+@dataclass
 class VQConfig:
     num_embeddings: int = 128
     commitment_weight: float = 0.25
@@ -83,6 +96,7 @@ class EncoderConfig(SigmaVAEEncoderConfig):
     vq_config: Optional[VQConfig] = None
     dropout_regularizer_config: Optional[DropoutConfig] = None
     kl_chunk_regularizer_config: Optional[KLChunkRegularizer] = None
+    noise_regularizer_config: Optional[NoiseConfig] = None
     semantic_distillation_config: Optional[SemanticDistillationConfig] = None
 
 
