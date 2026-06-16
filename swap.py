@@ -1,4 +1,39 @@
 import os
+
+# --- WORKAROUND FOR FAIRSEQ/HYDRA ON PYTHON 3.11 ---
+import dataclasses
+_orig_get_field = dataclasses._get_field
+
+def _patched_get_field(cls, a_name, a_type, *args, **kwargs):
+    try:
+        return _orig_get_field(cls, a_name, a_type, *args, **kwargs)
+    except ValueError as e:
+        if "mutable default" in str(e):
+            default = getattr(cls, a_name, dataclasses.MISSING)
+            actual_default = default.default if isinstance(default, dataclasses.Field) else default
+            if actual_default is not dataclasses.MISSING:
+                default_cls = actual_default.__class__
+                orig_hash = getattr(default_cls, '__hash__', None)
+                try:
+                    default_cls.__hash__ = lambda self: id(self)
+                except TypeError:
+                    pass
+                
+                try:
+                    return _orig_get_field(cls, a_name, a_type, *args, **kwargs)
+                finally:
+                    try:
+                        if orig_hash is None:
+                            default_cls.__hash__ = None
+                        else:
+                            default_cls.__hash__ = orig_hash
+                    except TypeError:
+                        pass
+        raise
+
+dataclasses._get_field = _patched_get_field
+# ---------------------------------------------------
+
 import json
 import torch
 import argparse

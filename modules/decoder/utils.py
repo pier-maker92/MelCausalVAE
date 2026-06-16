@@ -213,7 +213,8 @@ def rotate_half(x):
 
 @autocast(enabled=False)
 def apply_rotary_pos_emb(pos, t):
-    return t * pos.cos() + rotate_half(t) * pos.sin()
+    out = t * pos.cos() + rotate_half(t) * pos.sin()
+    return out.to(t.dtype)
 
 
 # --------- convolutional positional generating module ---------

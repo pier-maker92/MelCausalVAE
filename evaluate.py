@@ -1,4 +1,39 @@
 import os
+
+# --- WORKAROUND FOR FAIRSEQ/HYDRA ON PYTHON 3.11 ---
+import dataclasses
+_orig_get_field = dataclasses._get_field
+
+def _patched_get_field(cls, a_name, a_type, *args, **kwargs):
+    try:
+        return _orig_get_field(cls, a_name, a_type, *args, **kwargs)
+    except ValueError as e:
+        if "mutable default" in str(e):
+            default = getattr(cls, a_name, dataclasses.MISSING)
+            actual_default = default.default if isinstance(default, dataclasses.Field) else default
+            if actual_default is not dataclasses.MISSING:
+                default_cls = actual_default.__class__
+                orig_hash = getattr(default_cls, '__hash__', None)
+                try:
+                    default_cls.__hash__ = lambda self: id(self)
+                except TypeError:
+                    pass
+                
+                try:
+                    return _orig_get_field(cls, a_name, a_type, *args, **kwargs)
+                finally:
+                    try:
+                        if orig_hash is None:
+                            default_cls.__hash__ = None
+                        else:
+                            default_cls.__hash__ = orig_hash
+                    except TypeError:
+                        pass
+        raise
+
+dataclasses._get_field = _patched_get_field
+# ---------------------------------------------------
+
 import json
 import torch
 import torchaudio
@@ -159,17 +194,22 @@ def run_evaluation(
                 "guidance_scale": 1.3,
                 "phoneme_alignments": batch.get("phoneme_alignments", None),
             }
-            if quantized or residual or tail:
+            has_vq = getattr(model.config.encoder_config, "vq_config", None) is not None
+            if tail:
+                if not has_vq:
+                    raise ValueError("The -t flag was passed, but the model's config does not have a vq_config.")
                 params["quantized"] = False
                 params["residual"] = False
-                params["tail"] = False
-
-            if quantized:
-                params["quantized"] = True
-            if residual:
-                params["residual"] = True
-            if tail:
                 params["tail"] = True
+            else:
+                if has_vq:
+                    params["quantized"] = True
+                    params["residual"] = False
+                    params["tail"] = True
+                else:
+                    params["quantized"] = False
+                    params["residual"] = False
+                    params["tail"] = False
             if chunk is not None:
                 params["chunk"] = chunk
             if chunk_size is not None:

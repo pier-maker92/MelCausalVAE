@@ -1,8 +1,50 @@
 import os
 import sys
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if "SCRATCH" in os.environ:
+    os.environ["HF_HOME"] = os.path.join(os.environ["SCRATCH"], ".cache/huggingface")
+    os.environ["TORCH_HOME"] = os.path.join(os.environ["SCRATCH"], ".cache/torch")
 
+# --- WORKAROUND FOR FAIRSEQ/HYDRA ON PYTHON 3.11 ---
+import dataclasses
+
+_orig_get_field = dataclasses._get_field
+
+
+def _patched_get_field(cls, a_name, a_type, *args, **kwargs):
+    try:
+        return _orig_get_field(cls, a_name, a_type, *args, **kwargs)
+    except ValueError as e:
+        if "mutable default" in str(e):
+            default = getattr(cls, a_name, dataclasses.MISSING)
+            actual_default = (
+                default.default if isinstance(default, dataclasses.Field) else default
+            )
+            if actual_default is not dataclasses.MISSING:
+                default_cls = actual_default.__class__
+                orig_hash = getattr(default_cls, "__hash__", None)
+                try:
+                    default_cls.__hash__ = lambda self: id(self)
+                except TypeError:
+                    pass
+
+                try:
+                    return _orig_get_field(cls, a_name, a_type, *args, **kwargs)
+                finally:
+                    try:
+                        if orig_hash is None:
+                            default_cls.__hash__ = None
+                        else:
+                            default_cls.__hash__ = orig_hash
+                    except TypeError:
+                        pass
+        raise
+
+
+dataclasses._get_field = _patched_get_field
+# ---------------------------------------------------
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import wandb
 import json
 import yaml
@@ -13,12 +55,21 @@ import random
 import logging
 import argparse
 import tempfile
+import torch
+import torchaudio
+
+# --- WORKAROUND FOR PYTORCH 2.6 WEIGHTS_ONLY ---
+_orig_torch_load = torch.load
+def _patched_torch_load(*args, **kwargs):
+    kwargs["weights_only"] = False
+    return _orig_torch_load(*args, **kwargs)
+torch.load = _patched_torch_load
+# -----------------------------------------------
+
 from tqdm import tqdm
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import torch
-import torchaudio
 from torch.utils.data import DataLoader
 from vocos import Vocos
 import matplotlib
@@ -33,6 +84,7 @@ from MelCausalVAE.data.libri_tts import LibriTTS
 from MelCausalVAE.data.mls import MLSDataset
 from MelCausalVAE.data.librispeech_align_test import LibriSpeechAlignTestDataset
 from MelCausalVAE.data.audio_dataset import DataCollator, TestDatasetWrapper
+
 # from MelCausalVAE.baseline_models import BaselineAudioCodec
 
 # Whisper ASR for WER/CER
@@ -47,44 +99,26 @@ import utmos
 class UTMOSPredictor:
     def __init__(self, device):
         logger.info("Initializing UTMOS model")
-        try:
-            self.model = utmos.Score()
-            self.device = device
-            self.has_utmos = True
-            logger.info("UTMOS model loaded successfully.")
-        except Exception as e:
-            logger.warning(f"Failed to load UTMOS model: {e}")
-            self.has_utmos = False
+        current_dtype = torch.get_default_dtype()
+        torch.set_default_dtype(torch.float32)
+        current_dtype = torch.get_default_dtype()
+        torch.set_default_dtype(torch.float32)
+        self.model = utmos.Score()
+        self.device = device
+        self.has_utmos = True
+        logger.info("UTMOS model loaded successfully.")
+        torch.set_default_dtype(current_dtype)
 
     @torch.no_grad()
     def predict(self, wav_path):
         if not self.has_utmos:
             return None
-        try:
-            # Force float32 context and disable any potential autocast to bfloat16
-            with torch.autocast(device_type=self.device.type, enabled=False):
-                mos = self.model.calculate_wav_file(str(wav_path))
-                return float(mos)
-        except Exception as e:
-            logger.warning(f"UTMOS prediction failed for {wav_path}: {e}")
-            return None
+        # Force float32 context and disable any potential autocast to bfloat16
+        with torch.autocast(device_type=self.device.type, enabled=False):
+            mos = self.model.calculate_wav_file(str(wav_path))
+            return float(mos)
 
-    @torch.no_grad()
-    def predict_batch(self, input_dir):
-        if not self.has_utmos:
-            return {}
-        try:
-            logger.info(f"Running batch UTMOS prediction on {input_dir}")
-            input_dir_path = Path(input_dir)
-            mos_map = {}
-            with torch.autocast(device_type=self.device.type, enabled=False):
-                for wav_path in input_dir_path.glob("*.wav"):
-                    mos = self.model.calculate_wav_file(str(wav_path))
-                    mos_map[wav_path.name] = float(mos)
-            return mos_map
-        except Exception as e:
-            logger.warning(f"Batch UTMOS prediction failed: {e}")
-            return {}
+
 
 
 logging.basicConfig(
@@ -96,7 +130,9 @@ logger = logging.getLogger(__name__)
 class WhisperASR:
     """Whisper based ASR for WER/CER computation."""
 
-    def __init__(self, device: torch.device, model_name: str = "openai/whisper-medium"):
+    def __init__(
+        self, device: torch.device, model_name: str = "openai/whisper-large-v3"
+    ):
         logger.info(f"Loading Whisper ASR model: {model_name}")
         self.processor = WhisperProcessor.from_pretrained(model_name)
         self.model = WhisperForConditionalGeneration.from_pretrained(model_name).to(
@@ -160,21 +196,16 @@ def build_model_from_config(
 
     mel_cfg = model.config.mel_spectrogram_config
     if getattr(mel_cfg, "use_bigvgan_mel", False):
-        try:
-            base_dir = Path(__file__).parent.absolute()
-            bigvgan_path = str(base_dir / "bigvgan" / "bigvgan_v2_24khz_100band_256x")
-            if bigvgan_path not in sys.path:
-                sys.path.append(bigvgan_path)
-            import bigvgan
+        base_dir = Path(__file__).parent.absolute()
+        bigvgan_path = str(base_dir / "bigvgan" / "bigvgan_v2_24khz_100band_256x")
+        if bigvgan_path not in sys.path:
+            sys.path.append(bigvgan_path)
+        import bigvgan
 
-            vocoder = bigvgan.BigVGAN.from_pretrained(
-                bigvgan_path, use_cuda_kernel=False
-            )
-            vocoder_type = "bigvgan"
-        except Exception as e:
-            logger.error(f"Failed to load BigVGAN vocoder: {e}. Falling back to Vocos.")
-            vocoder = Vocos.from_pretrained("charactr/vocos-mel-24khz")
-            vocoder_type = "vocos"
+        vocoder = bigvgan.BigVGAN.from_pretrained(
+            bigvgan_path, use_cuda_kernel=False
+        )
+        vocoder_type = "bigvgan"
     else:
         vocoder = Vocos.from_pretrained("charactr/vocos-mel-24khz")
         vocoder_type = "vocos"
@@ -212,7 +243,6 @@ def save_wav(path: Path, audio: torch.Tensor, sr: int = 24000):
     torchaudio.save(
         str(path), audio.unsqueeze(0).cpu().to(torch.float32), sample_rate=sr
     )
-
 
 
 def generate_hyperparam_combinations(
@@ -267,6 +297,7 @@ def evaluate_dataset(
     tail: bool = False,
     chunk: Optional[int] = None,
     chunk_size: Optional[int] = None,
+    save_10_audios: bool = False,
 ) -> Dict[str, Any]:
     results: Dict[str, Any] = {"samples": [], "aggregates": {}}
 
@@ -280,20 +311,15 @@ def evaluate_dataset(
     gt_filepath = Path("evaluation/GT") / gt_filename
     gt_metrics_map = {}
     if skip_ref_metrics:
-        try:
-            with open(gt_filepath, "r") as f:
-                gt_data = json.load(f)
-                for sample in gt_data.get("samples", []):
-                    map_id = sample.get("id")
-                    if map_id is not None:
-                        gt_metrics_map[str(map_id)] = {
-                            "ref": sample.get("ref", {}),
-                            "ref_transcription": sample.get("ref_transcription", ""),
-                        }
-        except Exception as e:
-            logger.warning(
-                f"Could not load pre-computed GT metrics from {gt_filepath}: {e}"
-            )
+        with open(gt_filepath, "r") as f:
+            gt_data = json.load(f)
+            for sample in gt_data.get("samples", []):
+                map_id = sample.get("id")
+                if map_id is not None:
+                    gt_metrics_map[str(map_id)] = {
+                        "ref": sample.get("ref", {}),
+                        "ref_transcription": sample.get("ref_transcription", ""),
+                    }
 
     if setting == "LibriSpeech":
         ds = TestDatasetWrapper(
@@ -348,17 +374,26 @@ def evaluate_dataset(
                     "guidance_scale": guidance_scale,
                     "generator": None,
                 }
-                if quantized or residual or tail:
+                has_vq = (
+                    getattr(model.config.encoder_config, "vq_config", None) is not None
+                )
+                if tail:
+                    if not has_vq:
+                        raise ValueError(
+                            "The -t flag was passed, but the model's config does not have a vq_config."
+                        )
                     params["quantized"] = False
                     params["residual"] = False
-                    params["tail"] = False
-
-                if quantized:
-                    params["quantized"] = True
-                if residual:
-                    params["residual"] = True
-                if tail:
                     params["tail"] = True
+                else:
+                    if has_vq:
+                        params["quantized"] = True
+                        params["residual"] = False
+                        params["tail"] = True
+                    else:
+                        params["quantized"] = False
+                        params["residual"] = False
+                        params["tail"] = False
                 if chunk is not None:
                     params["chunk"] = chunk
                 if chunk_size is not None:
@@ -472,6 +507,20 @@ def evaluate_dataset(
             else:
                 ref_scores = {"WER": to_pct(ref_wer_val), "CER": to_pct(ref_cer_val)}
             recon_scores = {"WER": to_pct(recon_wer_val), "CER": to_pct(recon_cer_val)}
+
+            if evaluator is not None and evaluator.has_utmos:
+                if original_audio_only:
+                    orig_mos = evaluator.predict(str(orig_wav))
+                    if orig_mos is not None:
+                        ref_scores["UTMOS"] = round(orig_mos, 2)
+                else:
+                    if not skip_ref_metrics:
+                        orig_mos = evaluator.predict(str(orig_wav))
+                        if orig_mos is not None:
+                            ref_scores["UTMOS"] = round(orig_mos, 2)
+                    recon_mos = evaluator.predict(str(recon_wav))
+                    if recon_mos is not None:
+                        recon_scores["UTMOS"] = round(recon_mos, 2)
             consistency_scores = {
                 "WER": to_pct(consistent_wer_val),
                 "CER": to_pct(consistent_cer_val),
@@ -488,8 +537,6 @@ def evaluate_dataset(
                     "ref": ref_scores,
                     "reconstructed": recon_scores,
                     "consistency": consistency_scores,
-                    "orig_wav_name": orig_wav.name,
-                    "recon_wav_name": recon_wav.name,
                 }
             )
 
@@ -536,7 +583,7 @@ def evaluate_dataset(
                 key = "all"
             if key not in per_language:
                 per_language[key] = {}
-            for m in ["WER", "CER"]:
+            for m in ["WER", "CER", "UTMOS"]:
                 if m in ref_scores and ref_scores[m] is not None:
                     per_language[key].setdefault(f"ref_{m}", [])
                     per_language[key][f"ref_{m}"].append(float(ref_scores[m]))
@@ -557,37 +604,6 @@ def evaluate_dataset(
             break
     pbar.close()
 
-    # --- Batch UTMOS Optimization ---
-    mos_map = {}
-    if evaluator is not None and evaluator.has_utmos:
-        mos_map = evaluator.predict_batch(tmp_audio_dir)
-
-    for sample in results["samples"]:
-        orig_wav_name = sample.pop("orig_wav_name", None)
-        recon_wav_name = sample.pop("recon_wav_name", None)
-        key = sample["language"] if setting == "OOD" else "all"
-
-        if mos_map:
-            if original_audio_only:
-                orig_mos = mos_map.get(orig_wav_name)
-                if orig_mos is not None:
-                    sample["ref"]["UTMOS"] = round(float(orig_mos), 2)
-            else:
-                orig_mos = mos_map.get(orig_wav_name)
-                recon_mos = mos_map.get(recon_wav_name)
-                if orig_mos is not None and not skip_ref_metrics:
-                    sample["ref"]["UTMOS"] = round(float(orig_mos), 2)
-                if recon_mos is not None:
-                    sample["reconstructed"]["UTMOS"] = round(float(recon_mos), 2)
-        # Always aggregate UTMOS from the final per-sample values.
-        # This covers both computed scores and reference scores loaded from GT.
-        ref_utmos = sample.get("ref", {}).get("UTMOS")
-        recon_utmos = sample.get("reconstructed", {}).get("UTMOS")
-        if ref_utmos is not None:
-            per_language[key].setdefault("ref_UTMOS", []).append(float(ref_utmos))
-        if recon_utmos is not None:
-            per_language[key].setdefault("recon_UTMOS", []).append(float(recon_utmos))
-
     # Calculate final delta for all samples
     for sample in results["samples"]:
         delta = {}
@@ -601,15 +617,34 @@ def evaluate_dataset(
                 delta[m] = round(d_val, 2)
         sample["delta"] = delta
 
+    # Save 10 audios if requested
+    if save_10_audios:
+        saved_dir = work_dir / "saved_audios"
+        saved_dir.mkdir(parents=True, exist_ok=True)
+        import shutil
+
+        for sample in results["samples"][:10]:
+            sample_id = sample.get("id")
+            if not sample_id:
+                continue
+            orig_wav = tmp_audio_dir / f"sample_{sample_id}_orig.wav"
+            recon_wav = tmp_audio_dir / f"sample_{sample_id}_recon.wav"
+            prompt_txt = tmp_audio_dir / f"sample_{sample_id}_prompt.txt"
+
+            if orig_wav.exists():
+                shutil.copy(orig_wav, saved_dir / orig_wav.name)
+            if recon_wav.exists():
+                shutil.copy(recon_wav, saved_dir / recon_wav.name)
+            if prompt_txt.exists():
+                shutil.copy(prompt_txt, saved_dir / prompt_txt.name)
+        logger.info(f"Saved at most 10 audios (and prompts) to {saved_dir}")
+
     # Cleanup temporary WAVs if requested
     if not keep_wavs:
         logger.info(f"Cleaning up temporary WAV files in {tmp_audio_dir}")
         import shutil
 
-        try:
-            shutil.rmtree(tmp_audio_dir)
-        except Exception as e:
-            logger.warning(f"Failed to cleanup {tmp_audio_dir}: {e}")
+        shutil.rmtree(tmp_audio_dir)
 
     log_payload = {}
     if images:
@@ -715,13 +750,41 @@ def run_single_eval(
     elif baseline_model_name:
         raise NotImplementedError("Baseline audio codec is disabled for now.")
     else:
+        config_dict = base_args.get("config_dict")
+        if config_dict is None:
+            ckpt_path = Path(checkpoint)
+            ckpt_dir = (
+                ckpt_path.parent
+                if ckpt_path.is_file() and ckpt_path.name == "model.safetensors"
+                else ckpt_path
+            )
+            if ckpt_dir.is_dir():
+                config_files = list(ckpt_dir.glob("*.yaml")) + list(
+                    ckpt_dir.glob("*.json")
+                )
+                config_path = None
+                for cf in config_files:
+                    if "config" in cf.name or "encoder" in cf.name:
+                        config_path = str(cf)
+                        break
+                if not config_path and len(config_files) > 0:
+                    config_path = str(config_files[0])
+
+                if config_path:
+                    logger.info(f"Loading config from {config_path}")
+                    config_dict = load_config(config_path)
+                else:
+                    raise ValueError(f"No config file found in {ckpt_dir}")
+            else:
+                raise ValueError(
+                    f"Internal model evaluation requires --config-path or a config file in the checkpoint directory: {ckpt_dir}"
+                )
+
         # build model
         model, vocoder, vocoder_type, vae_cfg = build_model_from_config(
-            base_args["config_dict"], checkpoint, device
+            config_dict, checkpoint, device
         )
-        assert not model.training, (
-            "Model must be in eval mode during evaluation"
-        )
+        assert not model.training, "Model must be in eval mode during evaluation"
         assert not model.encoder.training, (
             "Encoder must be in eval mode: reparameterization trick and "
             "dropout regularizer are only disabled when training=False"
@@ -791,44 +854,39 @@ def run_single_eval(
     work_dir.mkdir(parents=True, exist_ok=True)
 
     start = time.time()
-    try:
-        eval_output = evaluate_dataset(
-            setting=setting,
-            languages=languages,
-            num_samples=num_samples,
-            batch_size=batch_size,
-            model=model,
-            vocoder=vocoder,
-            vocoder_type=vocoder_type,
-            baseline_model=baseline_model,
-            n_steps=n_steps,
-            temperature=temperature,
-            guidance_scale=guidance_scale,
-            device=device,
-            work_dir=work_dir,
-            evaluator=evaluator,
-            whisper_asr=whisper_asr,
-            log_images=log_images,
-            max_images=wandb_max_images,
-            keep_wavs=base_args.get("keep_wavs", False),
-            filter_librispeech=base_args.get("filter_librispeech", False),
-            original_audio_only=original_audio_only,
-            skip_ref_metrics=base_args.get("skip_ref_metrics", False)
-            and (not original_audio_only),
-            run=run,
-            quantized=base_args.get("quantized", False),
-            residual=base_args.get("residual", False),
-            tail=base_args.get("tail", False),
-            chunk=chunk,
-            chunk_size=chunk_size,
-        )
-        status = "success"
-        error = None
-    except Exception as e:
-        logger.exception("Evaluation failed")
-        eval_output = {}
-        status = "failed"
-        error = str(e)
+    eval_output = evaluate_dataset(
+        setting=setting,
+        languages=languages,
+        num_samples=num_samples,
+        batch_size=batch_size,
+        model=model,
+        vocoder=vocoder,
+        vocoder_type=vocoder_type,
+        baseline_model=baseline_model,
+        n_steps=n_steps,
+        temperature=temperature,
+        guidance_scale=guidance_scale,
+        device=device,
+        work_dir=work_dir,
+        evaluator=evaluator,
+        whisper_asr=whisper_asr,
+        log_images=log_images,
+        max_images=wandb_max_images,
+        keep_wavs=base_args.get("keep_wavs", False),
+        filter_librispeech=base_args.get("filter_librispeech", False),
+        original_audio_only=original_audio_only,
+        skip_ref_metrics=base_args.get("skip_ref_metrics", False)
+        and (not original_audio_only),
+        run=run,
+        quantized=base_args.get("quantized", False),
+        residual=base_args.get("residual", False),
+        tail=base_args.get("tail", False),
+        chunk=chunk,
+        chunk_size=chunk_size,
+        save_10_audios=base_args.get("save_10_audios", False),
+    )
+    status = "success"
+    error = None
     duration = time.time() - start
 
     # save json for this run
@@ -852,7 +910,6 @@ def run_single_eval(
     }
 
 
-
 def main():
     parser = argparse.ArgumentParser(
         description="Evaluate VAE reconstructions with CER and UTMOS"
@@ -863,7 +920,7 @@ def main():
     )
     parser.add_argument("--num-samples", type=int, default=0)
     parser.add_argument("--batch-size", type=int, default=4)
-    parser.add_argument("--n-steps", type=int, default=4)
+    parser.add_argument("--n-steps", type=int, default=8)
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--guidance-scale", type=float, default=1.3)
     parser.add_argument(
@@ -935,14 +992,19 @@ def main():
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--exp-name", type=str, default="default_exp")
+    parser.add_argument("--output-dir", type=str, default="./evaluation")
     parser.add_argument(
-        "--output-dir", type=str, default="./evaluation"
+        "--no_utmos", action="store_true", help="Disable UTMOS computation"
     )
-    parser.add_argument("--UTMOS", action="store_true", help="Enable UTMOS computation")
     parser.add_argument(
         "--keep-wavs",
         action="store_true",
         help="Keep temporary WAV files after evaluation",
+    )
+    parser.add_argument(
+        "--save_10_audios",
+        action="store_true",
+        help="Save at most 10 audios (original, recon, prompt) to the work_dir",
     )
     parser.add_argument(
         "--filter-librispeech",
@@ -993,17 +1055,6 @@ def main():
                 resolved_checkpoints.append(str(safetensors_path))
             else:
                 resolved_checkpoints.append(ckpt)
-
-            if not args.config_path:
-                config_files = list(ckpt_path.glob("*.yaml")) + list(
-                    ckpt_path.glob("*.json")
-                )
-                for cf in config_files:
-                    if "config" in cf.name or "encoder" in cf.name:
-                        args.config_path = str(cf)
-                        break
-                if not args.config_path and len(config_files) > 0:
-                    args.config_path = str(config_files[0])
         else:
             resolved_checkpoints.append(ckpt)
     checkpoints = resolved_checkpoints
@@ -1018,12 +1069,10 @@ def main():
     ) and not checkpoints:
         checkpoints = ["baseline_run" if args.baseline_model else "original_audio"]
 
-    # load config dict once and pass down
+    # load config dict if provided globally
     config_dict = None
     if args.config_path:
         config_dict = load_config(args.config_path)
-    elif args.baseline_model is None and not args.original_audio_only:
-        raise ValueError("Internal model evaluation requires --config-path")
 
     # hyperparam combinations
     if args.hyperparam_sweep:
@@ -1070,7 +1119,7 @@ def main():
         "baseline_model": args.baseline_model,
         "baseline_hz": args.baseline_hz,
         "baseline_tau": args.baseline_tau,
-        "UTMOS": args.UTMOS,
+        "UTMOS": not args.no_utmos,
         "keep_wavs": args.keep_wavs,
         "filter_librispeech": args.filter_librispeech,
         "original_audio_only": args.original_audio_only,
@@ -1080,6 +1129,7 @@ def main():
         "tail": args.tail,
         "chunk": args.chunk,
         "chunk_size": args.chunk_size,
+        "save_10_audios": args.save_10_audios,
     }
 
     # Build task list: checkpoint × hyperparam combinations

@@ -99,17 +99,17 @@ class DiTConfig:
     dit_heads: int
     dit_dropout_rate: float
     use_conv_layer: bool
-    sigma: float
     expansion_factor: int
     mel_dim: int
     uncond_prob: float
     is_causal: bool
     use_window_attention: bool
     window_attention_seconds: float
-    use_group_bidirectional: bool
     kernel_size: int
     causal_convolution: bool
     upsample: str
+    sigma: float = 1e-5
+    use_group_bidirectional: bool = False
     speaker_cond_dim: Optional[int] = None
 
 
