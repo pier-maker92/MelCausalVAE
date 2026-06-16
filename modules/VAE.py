@@ -1,3 +1,4 @@
+import logging
 import torch
 import torch.nn.functional as F
 import safetensors.torch
@@ -8,6 +9,8 @@ from .encoder.encoder import Encoder
 from .utils import count_parameters_by_module
 from .feature_extractor import FeatureExtractor, WavLMFeatureExtractor
 from .output_dataclasses import VAEOutput, DecoderOutput, FeatureExtractorOutput
+
+logger = logging.getLogger(__name__)
 
 
 class VAE(torch.nn.Module):
@@ -228,6 +231,13 @@ class VAE(torch.nn.Module):
             and encoder_output.residual is None
             and encoder_output.tail is None
         ):
+            vq_flags = [k for k in ("quantized", "residual", "tail") if kwargs.get(k) is not None]
+            if vq_flags:
+                logger.warning(
+                    "VQ flags %s were passed but this model has no VQ — "
+                    "using encoder_output.z directly (flags have no effect).",
+                    vq_flags,
+                )
             context_vector = encoder_output.z
         else:
             context_vector = torch.zeros_like(encoder_output.z)

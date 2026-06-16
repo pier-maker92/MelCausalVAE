@@ -26,7 +26,9 @@ def main(args):
     elif torch.backends.mps.is_available():
         device = torch.device("mps")
     else:
-        device = torch.device("cpu")
+        raise RuntimeError(
+            "No CUDA or MPS device is available. CPU inference is not supported."
+        )
 
     print(f"Loading model from {checkpoint_dir}...")
     config_path = os.path.join(checkpoint_dir, "config.json")
@@ -39,6 +41,11 @@ def main(args):
     model.from_pretrained(checkpoint_path)
     model.eval()
     model.to(device)
+    assert not model.training, "Model must be in eval mode"
+    assert not model.encoder.training, (
+        "Encoder must be in eval mode: reparameterization trick and "
+        "dropout regularizer are only disabled when training=False"
+    )
 
     # Initialize Vocoder
     print("Initializing Vocoder...")
