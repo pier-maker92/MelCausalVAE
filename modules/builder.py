@@ -12,6 +12,7 @@ from .configs import (
     DropoutConfig,
     KLChunkRegularizer,
     SemanticDistillationConfig,
+    NoiseConfig,
 )
 
 
@@ -38,6 +39,9 @@ def build_model(cfg_dict: Dict[str, Any]) -> VAE:
     kl_dict = encoder_cfg.pop("kl_chunk_regularizer_config", None)
     kl_config = KLChunkRegularizer(**kl_dict) if kl_dict else None
 
+    noise_dict = encoder_cfg.pop("noise_regularizer_config", None)
+    noise_config = NoiseConfig(**noise_dict) if noise_dict else None
+
     distill_dict = encoder_cfg.pop("semantic_distillation_config", None)
     distill_config = SemanticDistillationConfig(**distill_dict) if distill_dict else None
 
@@ -45,6 +49,7 @@ def build_model(cfg_dict: Dict[str, Any]) -> VAE:
         vq_config=vq_config,
         dropout_regularizer_config=dropout_config,
         kl_chunk_regularizer_config=kl_config,
+        noise_regularizer_config=noise_config,
         semantic_distillation_config=distill_config,
         **encoder_cfg,
     )

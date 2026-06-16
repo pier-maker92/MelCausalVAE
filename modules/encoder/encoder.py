@@ -11,6 +11,7 @@ from .sigmavae import SigmaVAEEncoder
 from .regularization import (
     DropoutRegularizer,
     KLChunkRegularizer,
+    NoiseRegularizer,
 )
 from .utils import (
     TimeCausalConv1d,
@@ -108,6 +109,15 @@ class Encoder(SigmaVAEEncoder):
             self.kl_chunk_regularizer = KLChunkRegularizer(
                 config=config.kl_chunk_regularizer_config,
                 vq_quant_dim=None,
+            )
+
+        if config.noise_regularizer_config:
+            if getattr(config, "use_reparameterization_trick", True):
+                raise ValueError(
+                    "Cannot use both noise_regularizer and use_reparameterization_trick=True"
+                )
+            self.noise_regularizer = NoiseRegularizer(
+                config=config.noise_regularizer_config,
             )
 
         if config.freeze_encoder_before_latent_heads:
@@ -252,7 +262,7 @@ class Encoder(SigmaVAEEncoder):
             # 2. Sample z_stoch (active parts only)
             if self.training and getattr(
                 self.config, "use_reparameterization_trick", True
-            ):
+            ) and not hasattr(self, "noise_regularizer"):
                 z_stoch = self.reparameterize(mu_tail, logvar_tail, std=1.0)
             else:
                 z_stoch = mu_tail
@@ -260,7 +270,7 @@ class Encoder(SigmaVAEEncoder):
             if self.add_vq_residual_to_stoch:
                 if self.training and getattr(
                     self.config, "use_reparameterization_trick", True
-                ):
+                ) and not hasattr(self, "noise_regularizer"):
                     z_stoch_head = self.reparameterize(
                         vq_out.residual, logvar_head, std=0.1
                     )
@@ -272,7 +282,7 @@ class Encoder(SigmaVAEEncoder):
             logvar_stoch = logvar
             if self.training and getattr(
                 self.config, "use_reparameterization_trick", True
-            ):
+            ) and not hasattr(self, "noise_regularizer"):
                 z_stoch = self.reparameterize(mu, logvar)
             else:
                 z_stoch = mu
@@ -282,7 +292,9 @@ class Encoder(SigmaVAEEncoder):
             z_stoch_dropped = self.dropout_regularizer(z_stoch)
         else:
             z_stoch_dropped = z_stoch
-        # z_stoch_dropped = z_stoch
+
+        if hasattr(self, "noise_regularizer"):
+            z_stoch_dropped = self.noise_regularizer(z_stoch_dropped)
 
         # 4. Pad with zeros if residual was skipped
         if hasattr(self, "vq") and not self.add_vq_residual_to_stoch:
@@ -300,8 +312,6 @@ class Encoder(SigmaVAEEncoder):
             z_stoch_dropped = z_stoch_dropped * keep_mask
 
         z = z_quantized + z_stoch_dropped
-        # if hasattr(self, "dropout_regularizer"):
-        #     z = self.dropout_regularizer(z)
 
         kl_loss = None
         if kwargs.get("step", None) is not None:

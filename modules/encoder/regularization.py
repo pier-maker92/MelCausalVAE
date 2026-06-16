@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from typing import Optional
-from ..configs import DropoutConfig, KLChunkRegularizer
+from ..configs import DropoutConfig, KLChunkRegularizer, NoiseConfig
 
 
 def _assert_latent_chunks_divisible(latent_dim: int, chunk_size: int) -> None:
@@ -249,3 +249,88 @@ class KLChunkRegularizer(nn.Module):
         logvar_f = logvar.to(dtype)
         kl_elem = -0.5 * (1 + logvar_f - mu_f.pow(2) - logvar_f.exp())
         return (kl_elem * w * valid).sum().to(mu.dtype)
+
+
+class NoiseRegularizer(nn.Module):
+    def __init__(self, config: NoiseConfig):
+        super().__init__()
+        self.noise_start = config.noise_start
+        self.noise_end = config.noise_end
+        self.chunk_size = config.chunk_size
+        self.strategy = getattr(config, "strategy", "linear")
+        self.k = getattr(config, "k", 1.0)
+        self.x0 = getattr(config, "x0", 0.0)
+        self.noise_type = getattr(config, "noise_type", "additive")
+        self.sigma_type = getattr(config, "sigma_type", "fixed")
+        self.use_softplus = getattr(config, "use_softplus", False)
+        
+        self.std_activation = nn.Softplus() if self.use_softplus else nn.Identity()
+
+    def _latent_chunk_noise_scales(
+        self, num_chunks: int, device: torch.device, dtype: torch.dtype
+    ) -> torch.Tensor:
+        if num_chunks <= 0:
+            raise ValueError("num_chunks must be positive")
+        if num_chunks == 1:
+            return torch.tensor([self.noise_start], device=device, dtype=dtype)
+
+        if self.strategy == "linear":
+            return torch.linspace(
+                self.noise_start,
+                self.noise_end,
+                num_chunks,
+                device=device,
+                dtype=dtype,
+            )
+        elif self.strategy == "sigmoid":
+            x = torch.linspace(0.0, 1.0, num_chunks, device=device, dtype=dtype)
+            s = 1.0 / (1.0 + torch.exp(-self.k * (x - self.x0)))
+            s0 = 1.0 / (
+                1.0
+                + torch.exp(torch.tensor(self.k * self.x0, device=device, dtype=dtype))
+            )
+            s1 = 1.0 / (
+                1.0
+                + torch.exp(
+                    -torch.tensor(self.k * (1.0 - self.x0), device=device, dtype=dtype)
+                )
+            )
+            s = (s - s0) / (s1 - s0)
+            return self.noise_start + (self.noise_end - self.noise_start) * s
+        else:
+            raise ValueError(f"Unknown strategy: {self.strategy!r}")
+
+    def forward(self, z: torch.FloatTensor) -> torch.Tensor:
+        if not self.training:
+            return z
+        
+        B, T, D = z.shape
+        _assert_latent_chunks_divisible(D, self.chunk_size)
+        n_chunks = D // self.chunk_size
+        
+        scales = self._latent_chunk_noise_scales(
+            num_chunks=n_chunks, device=z.device, dtype=z.dtype
+        )
+        
+        zv = z.view(B, T, n_chunks, self.chunk_size)
+        eps = torch.randn_like(zv)
+        
+        scales_view = scales.view(1, 1, n_chunks, 1)
+        
+        if self.sigma_type == "fixed":
+            s_chunk = scales_view
+        elif self.sigma_type == "stochastic":
+            w = torch.randn(B, T, n_chunks, 1, dtype=z.dtype, device=z.device) * scales_view
+            w = self.std_activation(w)
+            s_chunk = torch.clamp(w, min=-2 * scales_view, max=2 * scales_view)
+        else:
+            raise ValueError(f"Unknown sigma_type: {self.sigma_type!r}")
+            
+        if self.noise_type == "additive":
+            zv_noisy = zv + s_chunk * eps
+        elif self.noise_type == "interpolate":
+            zv_noisy = zv * (1 - s_chunk) + eps * s_chunk
+        else:
+            raise ValueError(f"Unknown noise_type: {self.noise_type!r}")
+            
+        return zv_noisy.view(B, T, D)
