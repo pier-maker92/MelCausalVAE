@@ -26,15 +26,14 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from MelCausalVAE.modules.cfm import DiTConfig
-from MelCausalVAE.modules.VAE import VAE, VAEConfig
-from MelCausalVAE.modules.Encoder import ConvformerEncoderConfig
-from MelCausalVAE.modules.melspecEncoder import MelSpectrogramConfig
+from MelCausalVAE.modules.builder import build_model
+from MelCausalVAE.modules.VAE import VAE
+from MelCausalVAE.modules.configs import VAEConfig
 from MelCausalVAE.data.libri_tts import LibriTTS
 from MelCausalVAE.data.mls import MLSDataset
 from MelCausalVAE.data.librispeech_align_test import LibriSpeechAlignTestDataset
 from MelCausalVAE.data.audio_dataset import DataCollator, TestDatasetWrapper
-from MelCausalVAE.baseline_models import BaselineAudioCodec
+# from MelCausalVAE.baseline_models import BaselineAudioCodec
 
 # Whisper ASR for WER/CER
 from transformers import WhisperProcessor, WhisperForConditionalGeneration
@@ -97,12 +96,12 @@ logger = logging.getLogger(__name__)
 class WhisperASR:
     """Whisper based ASR for WER/CER computation."""
 
-    def __init__(
-        self, device: torch.device, model_name: str = "openai/whisper-medium"
-    ):
+    def __init__(self, device: torch.device, model_name: str = "openai/whisper-medium"):
         logger.info(f"Loading Whisper ASR model: {model_name}")
         self.processor = WhisperProcessor.from_pretrained(model_name)
-        self.model = WhisperForConditionalGeneration.from_pretrained(model_name).to(device)
+        self.model = WhisperForConditionalGeneration.from_pretrained(model_name).to(
+            device
+        )
         self.model.eval()
         self.device = device
 
@@ -115,15 +114,21 @@ class WhisperASR:
             audio = audio.mean(dim=0, keepdim=True)
         if sr != 16000:
             audio = torchaudio.functional.resample(audio, sr, 16000)
-        
-        input_features = self.processor(
-            audio.squeeze().cpu().numpy(), sampling_rate=16000, return_tensors="pt"
-        ).input_features.to(self.device).to(self.model.dtype)
-        
+
+        input_features = (
+            self.processor(
+                audio.squeeze().cpu().numpy(), sampling_rate=16000, return_tensors="pt"
+            )
+            .input_features.to(self.device)
+            .to(self.model.dtype)
+        )
+
         # Generate transcription
         predicted_ids = self.model.generate(input_features)
-        transcription = self.processor.batch_decode(predicted_ids, skip_special_tokens=True)[0]
-        
+        transcription = self.processor.batch_decode(
+            predicted_ids, skip_special_tokens=True
+        )[0]
+
         return transcription.lower().strip()
 
 
@@ -136,38 +141,35 @@ def set_seed(seed: int):
 
 def load_config(config_path: str) -> Dict[str, Any]:
     with open(config_path, "r") as f:
+        if config_path.endswith(".json"):
+            return json.load(f)
         return yaml.safe_load(f)
 
 
 def build_model_from_config(
     config_dict: Dict[str, Any], checkpoint_path: Optional[str], device: torch.device
 ) -> Tuple[VAE, torch.nn.Module, str, VAEConfig]:
+    """Build VAE model from a config dict using modules.builder.build_model.
 
-    encoder_cfg = ConvformerEncoderConfig(**config_dict["convformer"])  # type: ignore
-    decoder_cfg = DiTConfig(**config_dict["cfm"])  # type: ignore
-    decoder_cfg.expansion_factor = encoder_cfg.compress_factor_C
-    mel_cfg = MelSpectrogramConfig(
-        use_bigvgan_mel=config_dict["convformer"].get("use_bigvgan_mel", False)
-    )  # type: ignore
-    use_classic_decoder = config_dict.get("use_classic_decoder", False)
-    vae_cfg = VAEConfig(
-        encoder_config=encoder_cfg, decoder_config=decoder_cfg, mel_spec_config=mel_cfg,
-        use_classic_decoder=use_classic_decoder,
-    )
-
-    model = VAE(vae_cfg, dtype=torch.bfloat16).to(device)
+    Follows the same pattern as inference.py for consistency.
+    """
+    model = build_model(config_dict)
     model.from_pretrained(checkpoint_path)
-    model.set_device(device)
-    model.set_dtype(torch.bfloat16)
     model.eval()
+    model.to(device)
 
-    if mel_cfg.use_bigvgan_mel:
+    mel_cfg = model.config.mel_spectrogram_config
+    if getattr(mel_cfg, "use_bigvgan_mel", False):
         try:
-            bigvgan_path = "/home/ec2-user/MelCausalVAE/bigvgan/bigvgan_v2_24khz_100band_256x"
+            base_dir = Path(__file__).parent.absolute()
+            bigvgan_path = str(base_dir / "bigvgan" / "bigvgan_v2_24khz_100band_256x")
             if bigvgan_path not in sys.path:
                 sys.path.append(bigvgan_path)
             import bigvgan
-            vocoder = bigvgan.BigVGAN.from_pretrained(bigvgan_path, use_cuda_kernel=False)
+
+            vocoder = bigvgan.BigVGAN.from_pretrained(
+                bigvgan_path, use_cuda_kernel=False
+            )
             vocoder_type = "bigvgan"
         except Exception as e:
             logger.error(f"Failed to load BigVGAN vocoder: {e}. Falling back to Vocos.")
@@ -178,11 +180,14 @@ def build_model_from_config(
         vocoder_type = "vocos"
 
     vocoder.to(device)
-    return model, vocoder, vocoder_type, vae_cfg
+    return model, vocoder, vocoder_type, model.config
 
 
 def mel_to_audio(
-    vocoder: torch.nn.Module, mel: torch.Tensor, device: torch.device, vocoder_type: str = "vocos"
+    vocoder: torch.nn.Module,
+    mel: torch.Tensor,
+    device: torch.device,
+    vocoder_type: str = "vocos",
 ) -> torch.Tensor:
     # Keep vocoder input dtype aligned with vocoder parameters to avoid
     # conv dtype mismatches (e.g., bf16 input vs fp32 bias).
@@ -195,7 +200,7 @@ def mel_to_audio(
         waveform = vocoder(features)
     else:
         waveform = vocoder.decode(features)  # [1, samples]
-    
+
     waveform = waveform.float().squeeze().detach().cpu()
     # normalize to prevent clipping
     waveform = waveform / (waveform.abs().max() + 1e-8)
@@ -208,17 +213,6 @@ def save_wav(path: Path, audio: torch.Tensor, sr: int = 24000):
         str(path), audio.unsqueeze(0).cpu().to(torch.float32), sample_rate=sr
     )
 
-
-def get_available_gpus() -> List[int]:
-    """Detect available GPUs (CUDA or MPS) without initializing CUDA contexts (safe before forking)."""
-    try:
-        if torch.cuda.is_available():
-            return list(range(torch.cuda.device_count()))
-        if torch.backends.mps.is_available():
-            return [0]
-        return []
-    except Exception:
-        return []
 
 
 def generate_hyperparam_combinations(
@@ -253,7 +247,7 @@ def evaluate_dataset(
     model: Optional[VAE],
     vocoder: Optional[torch.nn.Module],
     vocoder_type: str,
-    baseline_model: Optional[BaselineAudioCodec],
+    baseline_model: Optional[Any],
     n_steps: int,
     temperature: float,
     guidance_scale: float,
@@ -271,6 +265,8 @@ def evaluate_dataset(
     quantized: bool = False,
     residual: bool = False,
     tail: bool = False,
+    chunk: Optional[int] = None,
+    chunk_size: Optional[int] = None,
 ) -> Dict[str, Any]:
     results: Dict[str, Any] = {"samples": [], "aggregates": {}}
 
@@ -280,8 +276,8 @@ def evaluate_dataset(
         gt_filename = "librispeech.json"
     elif setting == "LibriTTS":
         gt_filename = "libritts.json"
-        
-    gt_filepath = Path("/home/ec2-user/MelCausalVAE/evaluation/GT") / gt_filename
+
+    gt_filepath = Path("evaluation/GT") / gt_filename
     gt_metrics_map = {}
     if skip_ref_metrics:
         try:
@@ -292,10 +288,12 @@ def evaluate_dataset(
                     if map_id is not None:
                         gt_metrics_map[str(map_id)] = {
                             "ref": sample.get("ref", {}),
-                            "ref_transcription": sample.get("ref_transcription", "")
+                            "ref_transcription": sample.get("ref_transcription", ""),
                         }
         except Exception as e:
-            logger.warning(f"Could not load pre-computed GT metrics from {gt_filepath}: {e}")
+            logger.warning(
+                f"Could not load pre-computed GT metrics from {gt_filepath}: {e}"
+            )
 
     if setting == "LibriSpeech":
         ds = TestDatasetWrapper(
@@ -326,7 +324,7 @@ def evaluate_dataset(
     else:
         total_samples = len(ds)
     pbar = tqdm(total=total_samples, desc="Evaluating dataset")
-    dtype = torch.bfloat16
+    dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
     images = []
     reconstructed_audios = []
     original_audios = []
@@ -335,7 +333,7 @@ def evaluate_dataset(
         sr = audios_srs[0][1]
         lang = batch["language"]
         gt_text = batch["transcription"]
-        batch_ids = batch.get("ids") # NO FALLBACK
+        batch_ids = batch.get("ids")  # NO FALLBACK
         audios_srs = [(audio.to(device, dtype=dtype), sr) for audio, sr in audios_srs]
 
         if original_audio_only:
@@ -361,24 +359,28 @@ def evaluate_dataset(
                     params["residual"] = True
                 if tail:
                     params["tail"] = True
+                if chunk is not None:
+                    params["chunk"] = chunk
+                if chunk_size is not None:
+                    params["chunk_size"] = chunk_size
 
-                out = model.encode_and_sample(**params)
-            original_mel = out["original_mel"].detach().cpu()
-            reconstructed_mel = out["reconstructed_mel"].detach().cpu()
-            padding_mask = out["padding_mask"].detach().cpu()
+                out = model.encode_decode(**params)
+            original_mel = out["feature_extractor_output"].audio_features.detach().cpu()
+            reconstructed_mel = out["decoder_output"].audio_features.detach().cpu()
+            padding_mask = out["decoder_output"].padding_mask.detach().cpu()
 
         # save wavs, prompts, compute metrics
         for idx in range(len(audios_srs)):
             global_idx = processed + idx
             sample_id = batch_ids[idx]
-            
+
             orig_wav = tmp_audio_dir / f"sample_{sample_id}_orig.wav"
             recon_wav = tmp_audio_dir / f"sample_{sample_id}_recon.wav"
             prompt_txt = tmp_audio_dir / f"sample_{sample_id}_prompt.txt"
 
             if original_audio_only:
                 audio, original_sr = audios_srs[idx]
-                original_audio = audio.squeeze().cpu()
+                original_audio = audio.squeeze().cpu().float()
                 original_audio = original_audio / (original_audio.abs().max() + 1e-8)
                 save_wav(orig_wav, original_audio, original_sr)
                 prompt_txt.write_text(gt_text[idx])
@@ -390,8 +392,8 @@ def evaluate_dataset(
                 audio, original_sr = audios_srs[idx]
                 reconstructed, out_sr = baseline_model.reconstruct(audio, original_sr)
 
-                original_audio = audio.squeeze().cpu()
-                reconstructed_audio = reconstructed.cpu()
+                original_audio = audio.squeeze().cpu().float()
+                reconstructed_audio = reconstructed.cpu().float()
 
                 # normalize to prevent clipping
                 original_audio = original_audio / (original_audio.abs().max() + 1e-8)
@@ -437,7 +439,7 @@ def evaluate_dataset(
                     ref_hyp = whisper_asr.transcribe(str(orig_wav))
                 else:
                     ref_info = gt_metrics_map.get(str(sample_id))
-                    ref_hyp = ref_info.get("ref_transcription", "")
+                    ref_hyp = ref_info.get("ref_transcription", "") if ref_info else ""
                 recon_hyp = whisper_asr.transcribe(str(recon_wav))
 
             # WER / CER for original (reference audio)
@@ -446,7 +448,7 @@ def evaluate_dataset(
                 ref_cer_val = float(compute_cer(ref_text_normalized, ref_hyp))
             else:
                 ref_wer_val = ref_cer_val = float("nan")
-                
+
             if ref_text_normalized and not original_audio_only:
                 recon_wer_val = float(compute_wer(ref_text_normalized, recon_hyp))
                 recon_cer_val = float(compute_cer(ref_text_normalized, recon_hyp))
@@ -513,9 +515,9 @@ def evaluate_dataset(
                 out_img_path = img_dir / f"sample_{global_idx}.png"
                 fig.tight_layout()
                 fig.savefig(out_img_path)
-                plt.close(fig)
                 image_count += 1
-                images.append(wandb.Image(fig))
+                images.append(wandb.Image(str(out_img_path)))
+                plt.close(fig)
 
             if log_images and image_count < max_images:
                 # also log audio to wandb as audio files
@@ -523,7 +525,9 @@ def evaluate_dataset(
                     wandb.Audio(original_audio.numpy(), sample_rate=sr)
                 )
                 if not original_audio_only:
-                    reconstructed_audios.append(wandb.Audio(reconstructed_audio.numpy(), sample_rate=sr))
+                    reconstructed_audios.append(
+                        wandb.Audio(reconstructed_audio.numpy(), sample_rate=sr)
+                    )
 
             # aggregate per language (partial)
             if setting == "OOD":
@@ -614,7 +618,7 @@ def evaluate_dataset(
         log_payload["original_audios"] = original_audios
     if reconstructed_audios:
         log_payload["reconstructed_audios"] = reconstructed_audios
-    
+
     if run is not None and log_payload:
         run.log(log_payload)
 
@@ -671,12 +675,6 @@ def evaluate_dataset(
             "delta": discrepancy,
         }
 
-    # cleanup temp wavs
-    try:
-        shutil.rmtree(tmp_audio_dir)
-    except Exception:
-        pass
-
     return results
 
 
@@ -700,7 +698,9 @@ def run_single_eval(
     elif torch.backends.mps.is_available():
         device = torch.device("mps")
     else:
-        device = torch.device("cpu")
+        raise RuntimeError(
+            "No CUDA or MPS device is available. CPU evaluation is not supported."
+        )
     set_seed(base_args.get("seed", 42))
 
     baseline_model_name = base_args.get("baseline_model")
@@ -711,21 +711,20 @@ def run_single_eval(
     baseline_model = None
 
     if original_audio_only:
-        pass # Skip loading everything
+        pass  # Skip loading everything
     elif baseline_model_name:
-        baseline_hz = base_args.get("baseline_hz")
-        baseline_tau = base_args.get("baseline_tau")
-        logger.info(f"Using baseline model: {baseline_model_name}")
-        baseline_model = BaselineAudioCodec(
-            model_name=baseline_model_name,
-            device=device,
-            baseline_hz=baseline_hz,
-            baseline_tau=baseline_tau,
-        )
+        raise NotImplementedError("Baseline audio codec is disabled for now.")
     else:
         # build model
         model, vocoder, vocoder_type, vae_cfg = build_model_from_config(
             base_args["config_dict"], checkpoint, device
+        )
+        assert not model.training, (
+            "Model must be in eval mode during evaluation"
+        )
+        assert not model.encoder.training, (
+            "Encoder must be in eval mode: reparameterization trick and "
+            "dropout regularizer are only disabled when training=False"
         )
 
     # Whisper ASR for WER/CER
@@ -746,11 +745,16 @@ def run_single_eval(
     guidance_scale = float(
         hyperparams.get("guidance_scale", base_args["guidance_scale"])
     )
+    chunk_val = hyperparams.get("chunk", base_args.get("chunk"))
+    chunk = int(chunk_val) if chunk_val is not None else None
+    chunk_size = base_args.get("chunk_size")
     log_images = bool(base_args.get("wandb_log_images", False))
     wandb_max_images = int(base_args.get("wandb_max_images", 10))
 
     if original_audio_only:
-        work_dir = Path(base_args["output_dir"]) / base_args["exp_name"] / "original_audio"
+        work_dir = (
+            Path(base_args["output_dir"]) / base_args["exp_name"] / "original_audio"
+        )
     elif baseline_model_name:
         # Reorganized baseline structure: evaluation/baseline_run/<exp_name>/[param_disambiguation]
         work_dir = (
@@ -770,12 +774,20 @@ def run_single_eval(
             if ckpt_path.name == "model.safetensors"
             else ckpt_path.name
         )
-        work_dir = (
-            Path(base_args["output_dir"])
-            / base_args["exp_name"]
-            / ckpt_dir_name
-            / f"gpu{gpu_index}_n{n_steps}_t{temperature}_g{guidance_scale}"
-        )
+        if chunk is not None or chunk_size is not None:
+            work_dir = (
+                Path(base_args["output_dir"])
+                / base_args["exp_name"]
+                / ckpt_dir_name
+                / f"chunk_size_{chunk_size}_n_chunks_{chunk}"
+            )
+        else:
+            work_dir = (
+                Path(base_args["output_dir"])
+                / base_args["exp_name"]
+                / ckpt_dir_name
+                / f"gpu{gpu_index}_n{n_steps}_t{temperature}_g{guidance_scale}"
+            )
     work_dir.mkdir(parents=True, exist_ok=True)
 
     start = time.time()
@@ -801,11 +813,14 @@ def run_single_eval(
             keep_wavs=base_args.get("keep_wavs", False),
             filter_librispeech=base_args.get("filter_librispeech", False),
             original_audio_only=original_audio_only,
-            skip_ref_metrics=(not base_args.get("compute_ref_metrics", False)) and (not original_audio_only),
+            skip_ref_metrics=base_args.get("skip_ref_metrics", False)
+            and (not original_audio_only),
             run=run,
             quantized=base_args.get("quantized", False),
             residual=base_args.get("residual", False),
             tail=base_args.get("tail", False),
+            chunk=chunk,
+            chunk_size=chunk_size,
         )
         status = "success"
         error = None
@@ -837,98 +852,10 @@ def run_single_eval(
     }
 
 
-def orchestrate(
-    checkpoints: List[str],
-    base_args: Dict[str, Any],
-    hyperparam_combinations: Optional[List[Dict[str, Any]]],
-    max_workers: Optional[int],
-    timeout: int,
-    multi_gpu: bool,
-) -> List[Dict[str, Any]]:
-    import multiprocessing as mp
-    from concurrent.futures import ProcessPoolExecutor, as_completed
-
-    # generate task list
-    if hyperparam_combinations is None:
-        hyperparam_combinations = [{}]
-    tasks: List[Tuple[str, Dict[str, Any]]] = []
-    for ckpt in checkpoints:
-        for combo in hyperparam_combinations:
-            tasks.append((ckpt, combo))
-
-    gpus = get_available_gpus()
-
-    use_wandb = base_args.get("report_to") == "wandb"
-    run = None
-    if use_wandb:
-        run = wandb.init(
-            project="MelCausalVAE-eval",
-            name=base_args["exp_name"],
-            config={
-                "setting": base_args["setting"],
-                "languages": base_args["languages"],
-            },
-        )
-
-    # Single-process path (default): run sequentially on first GPU (or CPU if none)
-    if not multi_gpu:
-        if gpus:
-            gpu_index = gpus[0]
-        else:
-            gpu_index = (
-                0  # will run on CPU inside run_single_eval if CUDA not available
-            )
-        logger.info(
-            f"Running in single-process mode on gpu_index={gpu_index} (available_gpus={gpus}) with {len(tasks)} task(s)"
-        )
-        results: List[Dict[str, Any]] = []
-        for i, (ckpt, combo) in enumerate(tasks):
-            logger.info(f"Running task {i+1}/{len(tasks)}: ckpt={ckpt}, combo={combo}")
-            res = run_single_eval(ckpt, gpu_index, base_args, combo, timeout, run)
-            logger.info(
-                f"Task completed: {res.get('checkpoint')} on GPU {res.get('gpu_index')} status={res.get('status')}"
-            )
-            results.append(res)
-        return results
-
-    # Multi-GPU parallel path
-    if not gpus:
-        raise RuntimeError("No available GPUs found for --multi-gpu mode")
-    max_workers = max_workers or len(gpus)
-
-    # Use 'spawn' to avoid CUDA fork-related deadlocks
-    ctx = mp.get_context("spawn")
-
-    results: List[Dict[str, Any]] = []
-    with ProcessPoolExecutor(max_workers=max_workers, mp_context=ctx) as ex:
-        futures = {}
-        for i, (ckpt, combo) in enumerate(tasks):
-            gpu_index = gpus[i % len(gpus)]
-            logger.info(f"Submitting task: ckpt={ckpt}, gpu={gpu_index}, combo={combo}")
-            futures[
-                ex.submit(
-                    run_single_eval, ckpt, gpu_index, base_args, combo, timeout, run
-                )
-            ] = (
-                ckpt,
-                combo,
-                gpu_index,
-            )
-        for fut in as_completed(futures):
-            res = fut.result()
-            logger.info(
-                f"Task completed: {res.get('checkpoint')} on GPU {res.get('gpu_index')} status={res.get('status')}"
-            )
-            results.append(res)
-
-    if run is not None:
-        run.finish()
-    return results
-
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Evaluate VAE reconstructions with CER and UTMOS, with GPU orchestration"
+        description="Evaluate VAE reconstructions with CER and UTMOS"
     )
     parser.add_argument("--config-path", type=str, default=None)
     parser.add_argument(
@@ -940,7 +867,10 @@ def main():
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--guidance-scale", type=float, default=1.3)
     parser.add_argument(
-        "--setting", type=str, default="LibriSpeech", choices=["LibriTTS", "OOD", "LibriSpeech"]
+        "--setting",
+        type=str,
+        default="LibriSpeech",
+        choices=["LibriTTS", "OOD", "LibriSpeech"],
     )
     parser.add_argument(
         "--languages",
@@ -980,14 +910,14 @@ def main():
         help="Tau merging_threshold for flexicodec (e.g. 1.0, 0.91, 0.867)",
     )
 
-    # orchestration inputs
+    # checkpoint inputs
     parser.add_argument(
         "--checkpoints", nargs="+", help="List of checkpoints to evaluate"
     )
     parser.add_argument(
         "--checkpoints-file", type=str, help="File with one checkpoint path per line"
     )
-    
+
     parser.add_argument(
         "--original-audio-only",
         action="store_true",
@@ -1003,15 +933,10 @@ def main():
         type=str,
         help="JSON path for hyperparam sweep with keys: n_steps, temperature, guidance_scale",
     )
-    parser.add_argument("--max-workers", type=int, default=None)
-    parser.add_argument("--timeout", type=int, default=3600)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--exp-name", type=str, default="default_exp")
     parser.add_argument(
-        "--output-dir", type=str, default="/home/ec2-user/MelCausalVAE/evaluation"
-    )
-    parser.add_argument(
-        "--multi-gpu", action="store_true", help="Enable multi-GPU parallel inference"
+        "--output-dir", type=str, default="./evaluation"
     )
     parser.add_argument("--UTMOS", action="store_true", help="Enable UTMOS computation")
     parser.add_argument(
@@ -1027,11 +952,29 @@ def main():
     parser.add_argument("-q", "--quantized", action="store_true")
     parser.add_argument("-r", "--residual", action="store_true")
     parser.add_argument("-t", "--tail", action="store_true")
+    parser.add_argument(
+        "--chunk", type=int, default=None, help="Number of chunks of tail to use"
+    )
+    parser.add_argument("--chunk-size", type=int, default=None, help="Fixed chunk size")
+    parser.add_argument(
+        "--chunks-sweep",
+        type=int,
+        nargs="+",
+        default=None,
+        help="List of chunk numbers to sweep over",
+    )
 
     args = parser.parse_args()
 
-    # set default dtype to bfloat16
-    torch.set_default_dtype(torch.bfloat16)
+    # set default dtype and validate that a supported accelerator is present
+    if torch.cuda.is_available():
+        torch.set_default_dtype(torch.bfloat16)
+    elif torch.backends.mps.is_available():
+        torch.set_default_dtype(torch.float32)
+    else:
+        raise RuntimeError(
+            "No CUDA or MPS device is available. CPU evaluation is not supported."
+        )
 
     # resolve checkpoints (not required for baselines)
     checkpoints: List[str] = []
@@ -1041,13 +984,38 @@ def main():
     if args.checkpoints:
         checkpoints.extend(args.checkpoints)
 
+    resolved_checkpoints = []
+    for ckpt in checkpoints:
+        ckpt_path = Path(ckpt)
+        if ckpt_path.is_dir():
+            safetensors_path = ckpt_path / "model.safetensors"
+            if safetensors_path.exists():
+                resolved_checkpoints.append(str(safetensors_path))
+            else:
+                resolved_checkpoints.append(ckpt)
+
+            if not args.config_path:
+                config_files = list(ckpt_path.glob("*.yaml")) + list(
+                    ckpt_path.glob("*.json")
+                )
+                for cf in config_files:
+                    if "config" in cf.name or "encoder" in cf.name:
+                        args.config_path = str(cf)
+                        break
+                if not args.config_path and len(config_files) > 0:
+                    args.config_path = str(config_files[0])
+        else:
+            resolved_checkpoints.append(ckpt)
+    checkpoints = resolved_checkpoints
+
     if args.baseline_model is None and not checkpoints and not args.original_audio_only:
         raise ValueError(
             "No checkpoints provided. Use --checkpoints or --checkpoints-file"
         )
 
-    if (args.baseline_model is not None or args.original_audio_only) and not checkpoints:
-        # Dummy checkpoint for iteration
+    if (
+        args.baseline_model is not None or args.original_audio_only
+    ) and not checkpoints:
         checkpoints = ["baseline_run" if args.baseline_model else "original_audio"]
 
     # load config dict once and pass down
@@ -1063,13 +1031,19 @@ def main():
             sweep_cfg = json.load(f)
         hyperparam_combinations = generate_hyperparam_combinations(sweep_cfg)
     else:
-        hyperparam_combinations = generate_hyperparam_combinations(
-            {
-                "n_steps": [args.n_steps],
-                "temperature": [args.temperature],
-                "guidance_scale": [args.guidance_scale],
-            }
-        )
+        sweep_dict = {
+            "n_steps": [args.n_steps],
+            "temperature": [args.temperature],
+            "guidance_scale": [args.guidance_scale],
+        }
+        if args.chunks_sweep:
+            sweep_dict["chunk"] = args.chunks_sweep
+        elif args.chunk is not None:
+            sweep_dict["chunk"] = [args.chunk]
+        else:
+            sweep_dict["chunk"] = [None]
+
+        hyperparam_combinations = generate_hyperparam_combinations(sweep_dict)
         # collapse if singular defaults
         if len(hyperparam_combinations) == 1:
             hyperparam_combinations = None
@@ -1104,67 +1078,41 @@ def main():
         "quantized": args.quantized,
         "residual": args.residual,
         "tail": args.tail,
+        "chunk": args.chunk,
+        "chunk_size": args.chunk_size,
     }
 
-    # orchestrate one job per GPU
-    results = orchestrate(
-        checkpoints=checkpoints,
-        base_args=base_args,
-        hyperparam_combinations=hyperparam_combinations,
-        max_workers=args.max_workers,
-        timeout=args.timeout,
-        multi_gpu=args.multi_gpu,
-    )
+    # Build task list: checkpoint × hyperparam combinations
+    if hyperparam_combinations is None:
+        hyperparam_combinations = [{}]
+    tasks: List[Tuple[str, Dict[str, Any]]] = []
+    for ckpt in checkpoints:
+        for combo in hyperparam_combinations:
+            tasks.append((ckpt, combo))
 
-    # # wandb: upload json metrics, and optionally images
-    # if args.report_to == "wandb":
-    #     try:
-    #         import wandb
+    # Optional wandb init
+    run = None
+    if args.report_to == "wandb":
+        run = wandb.init(
+            project="MelCausalVAE-eval",
+            name=args.exp_name,
+            config={"setting": args.setting, "languages": args.languages},
+        )
 
-    #         wandb.save(str(summary_path))
-    #         if args.wandb_log_images:
-    #             # collect image files across runs up to the cap
-    #             image_files: List[str] = []
-    #             for res in results:
-    #                 work_dir = res.get("work_dir")
-    #                 if not work_dir:
-    #                     continue
-    #                 img_dir = Path(work_dir) / "images"
-    #                 if img_dir.exists():
-    #                     for p in sorted(img_dir.glob("*.png")):
-    #                         image_files.append(str(p))
-    #                         if len(image_files) >= args.wandb_max_images:
-    #                             break
-    #                 if len(image_files) >= args.wandb_max_images:
-    #                     break
-    #             if image_files:
-    #                 wandb.log({"mel_spectrograms": [wandb.Image(p) for p in image_files]})
-    #         run.finish()
-    #     except Exception:
-    #         logger.warning("W&B logging failed; continuing without upload")
+    # Run tasks sequentially
+    logger.info(f"Running {len(tasks)} evaluation task(s) sequentially")
+    results: List[Dict[str, Any]] = []
+    for i, (ckpt, combo) in enumerate(tasks):
+        logger.info(f"Running task {i+1}/{len(tasks)}: ckpt={ckpt}, combo={combo}")
+        res = run_single_eval(ckpt, 0, base_args, combo, 3600, run)
+        logger.info(
+            f"Task completed: {res.get('checkpoint')} status={res.get('status')}"
+        )
+        results.append(res)
+
+    if run is not None:
+        run.finish()
 
 
 if __name__ == "__main__":
     main()
-
-# python eval.py \
-#   --config-path /home/ec2-user/MelCausalVAE/configs/settings/setting1.yaml \
-#   --checkpoints /home/ec2-user/checkpoints/setting1/checkpoint-44000/model.safetensors \
-#   --setting ID \
-#   --num-samples 24 --batch-size 4 \
-#   --n-steps 4 --temperature 0.2 --guidance-scale 1.3 \
-#   --exp-name ID_eval \
-#   --output-dir /home/ec2-user/MelCausalVAE/evaluation \
-#   --report-to wandb \
-#   --wandb-log-images \
-#   --wandb-max-images 24
-
-# LibriSpeech test set evaluation with HuBERT ASR:
-# python eval.py \
-#   --config-path /home/ec2-user/MelCausalVAE/configs/settings/exps/1d.yaml \
-#   --checkpoints /home/ec2-user/MelCausalVAE/checkpoints/exps/1d-8x-NAR-AE/model.safetensors \
-#   --setting LibriSpeech \
-#   --num-samples 250 --batch-size 8 \
-#   --n-steps 6 --temperature 0.4 --guidance-scale 1.3 \
-#   --exp-name LibriSpeech-exps \
-#   --output-dir /home/ec2-user/MelCausalVAE/evaluation 

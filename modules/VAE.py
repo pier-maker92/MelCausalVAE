@@ -237,7 +237,20 @@ class VAE(torch.nn.Module):
             if kwargs.get("residual", True) and encoder_output.residual is not None:
                 context_vector[..., :qd] += encoder_output.residual
             if kwargs.get("tail", True) and encoder_output.tail is not None:
-                context_vector[..., qd:] += encoder_output.tail
+                tail = encoder_output.tail
+                chunk_idx = kwargs.get("chunk")
+                if chunk_idx is not None:
+                    chunk_size = 2
+                    if kwargs.get("chunk_size") is not None:
+                        chunk_size = kwargs.get("chunk_size")
+                    elif hasattr(self.config.encoder_config, "kl_chunk_regularizer_config") and self.config.encoder_config.kl_chunk_regularizer_config is not None:
+                        chunk_size = self.config.encoder_config.kl_chunk_regularizer_config.chunk_size
+                    keep_dim = chunk_idx * chunk_size
+                    if tail.shape[-1] > keep_dim:
+                        tail_mask = torch.ones_like(tail)
+                        tail_mask[..., keep_dim:] = 0.0
+                        tail = tail * tail_mask
+                context_vector[..., qd:] += tail
 
         reconstructed_mel, reconstructed_padding_mask = self.sample(
             num_steps=num_steps,

@@ -80,13 +80,30 @@ def run_evaluation(
     quantized: bool = False,
     residual: bool = False,
     tail: bool = False,
+    chunk: Optional[int] = None,
+    chunk_size: Optional[int] = None,
 ) -> Dict[str, float]:
     """
     Perform evaluation on 100 samples from the test set.
     Calculates UTMOS, WER, CER for ground truth and reconstructed audio.
     Logs to wandb and saves to local CSV.
     """
+    if device.type not in ("cuda", "mps"):
+        raise RuntimeError(
+            f"Device '{device}' is not supported for evaluation. "
+            "Use a CUDA or MPS device — CPU execution is not allowed."
+        )
+
     model.eval()
+
+    assert not model.training, (
+        "Model must be in eval mode during evaluation"
+    )
+    assert not model.encoder.training, (
+        "Encoder must be in eval mode: reparameterization trick and "
+        "dropout regularizer are only disabled when training=False"
+    )
+
     eval_dir = Path("evaluation")
     gt_cache_path = eval_dir / f"{dataset_name}_ground_truth.json"
     
@@ -153,6 +170,10 @@ def run_evaluation(
                 params["residual"] = True
             if tail:
                 params["tail"] = True
+            if chunk is not None:
+                params["chunk"] = chunk
+            if chunk_size is not None:
+                params["chunk_size"] = chunk_size
 
             reconstruction_results = model.encode_decode(**params)
 
