@@ -101,3 +101,11 @@ ablations/
 
 # Ignore all hidden directories and their contents
 **/.*/**
+
+# Evaluation
+evaluation/*
+!evaluation/GT/
+evaluation/GT/*
+!evaluation/GT/original_audio/
+evaluation/GT/original_audio/*
+!evaluation/GT/original_audio/metrics.json
