@@ -659,6 +659,12 @@ class VAEtrainer(Trainer):
         else:
             device_id = 0
 
+        tb_writer = None
+        for cb in self.callback_handler.callbacks:
+            if cb.__class__.__name__ == "TensorBoardCallback":
+                tb_writer = getattr(cb, "tb_writer", None)
+                break
+
         audios = []
         audio_paths = []
         segmentation_plots = []
@@ -674,13 +680,22 @@ class VAEtrainer(Trainer):
                 device_id=device_id,
             )
 
-            # Convert matplotlib figure to wandb Image
-            images.append(
-                wandb.Image(
-                    fig,
-                    caption=f"Sample {idx} - Step {self.state.global_step} - Device {device_id}",
+            if wandb.run is not None:
+                # Convert matplotlib figure to wandb Image
+                images.append(
+                    wandb.Image(
+                        fig,
+                        caption=f"Sample {idx} - Step {self.state.global_step} - Device {device_id}",
+                    )
                 )
-            )
+            
+            if tb_writer is not None:
+                tb_writer.add_figure(
+                    f"reconstructions/sample_{idx}_device_{device_id}",
+                    fig,
+                    global_step=self.state.global_step,
+                )
+
             plt.close(fig)
 
             # Decode reconstructed mel to audio
@@ -707,14 +722,24 @@ class VAEtrainer(Trainer):
             # normalize waveform to -1 to 1
             waveform = waveform / (waveform.abs().max() + 1e-8)
             sr = audios_srs[idx][1]
-            # Log as wandb audio as well
-            audios.append(
-                wandb.Audio(
-                    waveform.numpy(),
-                    sample_rate=sr,
-                    caption=f"Sample {idx} - Step {self.state.global_step} - Device {device_id}",
+            
+            if wandb.run is not None:
+                # Log as wandb audio as well
+                audios.append(
+                    wandb.Audio(
+                        waveform.numpy(),
+                        sample_rate=sr,
+                        caption=f"Sample {idx} - Step {self.state.global_step} - Device {device_id}",
+                    )
                 )
-            )
+            
+            if tb_writer is not None:
+                tb_writer.add_audio(
+                    f"reconstructions_audio/sample_{idx}_device_{device_id}",
+                    waveform.unsqueeze(0),
+                    global_step=self.state.global_step,
+                    sample_rate=sr,
+                )
 
         # Log to wandb as a table for better visualization
         # Log to wandb as simple lists (reverting to what worked before but with correct data)
@@ -729,6 +754,11 @@ class VAEtrainer(Trainer):
 
             logger.info(
                 f"Successfully logged {len(images)} reconstruction samples to wandb"
+            )
+        
+        if tb_writer is not None:
+            logger.info(
+                f"Successfully logged reconstruction samples to TensorBoard"
             )
 
     def _create_mel_comparison_plot(

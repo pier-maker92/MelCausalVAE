@@ -1,5 +1,6 @@
 from typing import Optional, List
 from dataclasses import dataclass, field, asdict
+import json
 
 
 #########################
@@ -202,3 +203,7 @@ class VAEConfig:
         d = asdict(self)
         d["model_type"] = "VAE"
         return d
+
+    def to_json_string(self):
+        """Convert config to JSON string for Hugging Face Trainer compatibility"""
+        return json.dumps(self.to_dict(), indent=2)
