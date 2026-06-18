@@ -5,8 +5,11 @@ from typing import Dict, Any
 from .VAE import VAE
 from .configs import (
     VAEConfig,
+    VAEStandardConfig,
     EncoderConfig,
     DiTConfig,
+    StandardDecoderConfig,
+    DiscriminatorConfig,
     MelSpectrogramConfig,
     VQConfig,
     DropoutConfig,
@@ -75,3 +78,79 @@ def build_model(cfg_dict: Dict[str, Any]) -> VAE:
     )
 
     return VAE(config=vae_config)
+
+
+def build_standard_model(cfg_dict: Dict[str, Any]):
+    """Builds a VAEWithStandardDecoder from a configuration dictionary."""
+    from .VAE_standard import VAEWithStandardDecoder
+
+    encoder_cfg = cfg_dict.get("encoder_config", cfg_dict.get("encoder", {})).copy()
+    decoder_cfg = cfg_dict.get("decoder_config", cfg_dict.get("decoder", {})).copy()
+    mel_spec_cfg = cfg_dict.get("mel_spectrogram_config", {}).copy()
+
+    # Pop discriminator sub-keys from decoder config
+    discrim_keys = ("recon_loss_weight", "adv_loss_weight", "fm_loss_weight", "discrim_lr")
+    discrim_kwargs = {k: decoder_cfg.pop(k) for k in discrim_keys if k in decoder_cfg}
+    discrim_cfg = DiscriminatorConfig(**discrim_kwargs)
+
+    # Remove keys not in StandardDecoderConfig
+    for k in ("decoder_type", "dit_dim", "dit_depth", "dit_heads", "dit_dropout_rate",
+               "use_conv_layer", "sigma", "uncond_prob", "is_causal", "use_window_attention",
+               "window_attention_seconds", "use_group_bidirectional", "speaker_cond_dim",
+               "kernel_size", "causal_convolution", "upsample", "expansion_factor",
+               "mel_dim", "audio_latent_dim", "compress_factor"):
+        decoder_cfg.pop(k, None)
+
+    decoder_config = StandardDecoderConfig(
+        audio_latent_dim=cfg_dict.get("latent_dim"),
+        mel_dim=cfg_dict.get("mel_dim"),
+        compress_factor=cfg_dict.get("compress_factor"),
+        **decoder_cfg,
+    )
+
+    vq_dict = encoder_cfg.pop("vq_config", None)
+    vq_config = VQConfig(**vq_dict) if vq_dict else None
+
+    dropout_dict = encoder_cfg.pop("dropout_regularizer_config", None)
+    dropout_config = DropoutConfig(**dropout_dict) if dropout_dict else None
+
+    kl_dict = encoder_cfg.pop("kl_chunk_regularizer_config", None)
+    kl_config = KLChunkRegularizer(**kl_dict) if kl_dict else None
+
+    noise_dict = encoder_cfg.pop("noise_regularizer_config", None)
+    noise_config = NoiseConfig(**noise_dict) if noise_dict else None
+
+    distill_dict = encoder_cfg.pop("semantic_distillation_config", None)
+    distill_config = SemanticDistillationConfig(**distill_dict) if distill_dict else None
+
+    encoder_config = EncoderConfig(
+        vq_config=vq_config,
+        dropout_regularizer_config=dropout_config,
+        kl_chunk_regularizer_config=kl_config,
+        noise_regularizer_config=noise_config,
+        semantic_distillation_config=distill_config,
+        **encoder_cfg,
+    )
+
+    mel_spec_cfg["use_bigvgan_mel"] = cfg_dict.get(
+        "use_bigvgan_mel", mel_spec_cfg.get("use_bigvgan_mel", False)
+    )
+    mel_spec_config = MelSpectrogramConfig(**mel_spec_cfg)
+
+    from .configs import WavLMConfig
+    wavlm_dict = cfg_dict.get("wavlm_config", None)
+    wavlm_config = WavLMConfig(**wavlm_dict) if wavlm_dict else None
+
+    vae_config = VAEStandardConfig(
+        mel_dim=cfg_dict.get("mel_dim"),
+        latent_dim=cfg_dict.get("latent_dim"),
+        sample_rate=cfg_dict.get("sample_rate"),
+        compress_factor=cfg_dict.get("compress_factor"),
+        encoder_config=encoder_config,
+        decoder_config=decoder_config,
+        discriminator_config=discrim_cfg,
+        mel_spectrogram_config=mel_spec_config,
+        wavlm_config=wavlm_config,
+    )
+
+    return VAEWithStandardDecoder(config=vae_config)

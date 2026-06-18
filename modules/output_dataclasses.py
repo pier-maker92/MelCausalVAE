@@ -63,3 +63,20 @@ class DecoderOutput(ModelOutput):
 class FeatureExtractorOutput(ModelOutput):
     audio_features: Optional[torch.FloatTensor] = None
     padding_mask: Optional[torch.BoolTensor] = None
+
+
+@dataclass
+class VAEStandardOutput(ModelOutput):
+    """Output of VAEWithStandardDecoder.forward() — carries both losses and raw tensors."""
+    audio_loss: Optional[torch.FloatTensor] = None
+    kl_loss: Optional[torch.FloatTensor] = None
+    mu_mean: Optional[torch.FloatTensor] = None
+    mu_var: Optional[torch.FloatTensor] = None
+    vq_loss: Optional[torch.FloatTensor] = None
+    vq_stats: Optional["VQStats"] = None
+    distill_cosine_loss: Optional[torch.FloatTensor] = None
+    distill_ortho_loss: Optional[torch.FloatTensor] = None
+    # Raw tensors needed by the GAN trainer
+    mel_pred: Optional[torch.FloatTensor] = None
+    mel_target: Optional[torch.FloatTensor] = None
+    padding_mask: Optional[torch.BoolTensor] = None

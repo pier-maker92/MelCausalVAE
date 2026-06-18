@@ -129,6 +129,31 @@ class DiTConfig:
 
 
 #########################
+#   standard decoder    #
+#########################
+
+
+@dataclass
+class StandardDecoderConfig:
+    audio_latent_dim: int
+    mel_dim: int
+    compress_factor: int
+    d_model: int = 512
+    tf_heads: int = 8
+    tf_layers: int = 4
+    n_residual_blocks: int = 3
+    drop_p: float = 0.1
+
+
+@dataclass
+class DiscriminatorConfig:
+    recon_loss_weight: float = 45.0   # L1 reconstruction loss scale (HiFi-GAN style)
+    adv_loss_weight: float = 1.0
+    fm_loss_weight: float = 2.0
+    discrim_lr: float = 2e-4
+
+
+#########################
 #      spectrogram      #
 #########################
 
@@ -206,4 +231,50 @@ class VAEConfig:
 
     def to_json_string(self):
         """Convert config to JSON string for Hugging Face Trainer compatibility"""
+        return json.dumps(self.to_dict(), indent=2)
+
+
+@dataclass(kw_only=True)
+class VAEStandardConfig:
+    """Config for VAEWithStandardDecoder (CNN decoder + GAN discriminator)."""
+    mel_dim: int
+    latent_dim: int
+    sample_rate: int
+    compress_factor: int
+    encoder_config: EncoderConfig = field(default_factory=EncoderConfig)
+    decoder_config: StandardDecoderConfig = field(default_factory=lambda: StandardDecoderConfig(
+        audio_latent_dim=64, mel_dim=100, compress_factor=8
+    ))
+    discriminator_config: DiscriminatorConfig = field(default_factory=DiscriminatorConfig)
+    mel_spectrogram_config: MelSpectrogramConfig = field(
+        default_factory=MelSpectrogramConfig
+    )
+    wavlm_config: Optional[WavLMConfig] = None
+
+    def __post_init__(self):
+        self.mel_spectrogram_config.n_mels = self.mel_dim
+        self.mel_spectrogram_config.sampling_rate = self.sample_rate
+
+        if self.wavlm_config is not None:
+            self.encoder_config.mel_dim = 1024
+        else:
+            self.encoder_config.mel_dim = self.mel_dim
+
+        self.encoder_config.latent_dim = self.latent_dim
+        self.encoder_config.compress_factor_C = self.compress_factor
+
+        self.decoder_config.mel_dim = self.mel_dim
+        self.decoder_config.audio_latent_dim = self.latent_dim
+        self.decoder_config.compress_factor = self.compress_factor
+
+    @property
+    def hidden_size(self) -> int:
+        return max(self.encoder_config.d_model, self.decoder_config.d_model)
+
+    def to_dict(self):
+        d = asdict(self)
+        d["model_type"] = "VAEStandard"
+        return d
+
+    def to_json_string(self):
         return json.dumps(self.to_dict(), indent=2)

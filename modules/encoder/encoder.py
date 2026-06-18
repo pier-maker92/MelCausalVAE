@@ -173,9 +173,20 @@ class Encoder(SigmaVAEEncoder):
 
         speaker_embedding = None
         if getattr(self.config, "use_instance_norm", False):
-            spk_mu = mu_original.mean(dim=1, keepdim=True)
-            spk_sigma = mu_original.std(dim=1, keepdim=True)
-            mu_original = (mu_original - spk_mu) / (spk_sigma + 1e-6)
+            if hasattr(self, "vq"):
+                # Apply IN only to the tail (continuous dims), not the quantized head.
+                qd = self.config.vq_config.dim_to_quantize
+                mu_head_raw = mu_original[..., :qd]
+                mu_tail_raw = mu_original[..., qd:]
+                spk_mu = mu_tail_raw.mean(dim=1, keepdim=True)
+                spk_sigma = mu_tail_raw.std(dim=1, keepdim=True)
+                mu_original = torch.cat(
+                    [mu_head_raw, (mu_tail_raw - spk_mu) / (spk_sigma + 1e-6)], dim=-1
+                )
+            else:
+                spk_mu = mu_original.mean(dim=1, keepdim=True)
+                spk_sigma = mu_original.std(dim=1, keepdim=True)
+                mu_original = (mu_original - spk_mu) / (spk_sigma + 1e-6)
             speaker_embedding = torch.cat(
                 [spk_mu.squeeze(1), spk_sigma.squeeze(1)], dim=-1
             )

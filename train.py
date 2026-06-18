@@ -905,6 +905,12 @@ def main(cfg: DictConfig):
         model.from_pretrained(from_pretrained)
         logger.info(f"Loaded pretrained model from {from_pretrained}")
 
+    freeze_encoder = training_cfg.pop("freeze_encoder", False)
+    if freeze_encoder:
+        for param in model.encoder.parameters():
+            param.requires_grad = False
+        logger.info("Encoder fully frozen.")
+
     if "lr_scheduler_type" not in training_cfg:
         training_cfg["lr_scheduler_type"] = "constant"
 
