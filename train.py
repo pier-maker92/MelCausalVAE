@@ -173,7 +173,8 @@ class VAEtrainer(Trainer):
             "mu_mean",
             "mu_var",
         ]
-        if getattr(self.model.encoder.config, "vq_config", None) is not None:
+        if (getattr(self.model.encoder.config, "vq_config", None) is not None
+                or getattr(self.model.encoder.config, "bsq_config", None) is not None):
             granular_losses.extend(
                 [
                     "vq_loss",
@@ -864,6 +865,10 @@ def main(cfg: DictConfig):
         from data.librispeech_align import LibriSpeechAlignDataset
 
         dataset = LibriSpeechAlignDataset()
+    elif dataset_name in ["libritts-r", "libritts_r"]:
+        from data.libri_tts_r import LibriTTSR
+
+        dataset = LibriTTSR()
     else:
         raise ValueError(f"Dataset {dataset_name} not supported")
     train_dataset = TrainDatasetWrapper(dataset, "train")
@@ -909,7 +914,10 @@ def main(cfg: DictConfig):
     if freeze_encoder:
         for param in model.encoder.parameters():
             param.requires_grad = False
-        logger.info("Encoder fully frozen.")
+        if hasattr(model.encoder, "vq_pre_proj"):
+            for param in model.encoder.vq_pre_proj.parameters():
+                param.requires_grad = True
+        logger.info("Encoder frozen (vq_pre_proj kept trainable).")
 
     if "lr_scheduler_type" not in training_cfg:
         training_cfg["lr_scheduler_type"] = "constant"

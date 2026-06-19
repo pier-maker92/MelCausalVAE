@@ -57,17 +57,17 @@ class VAE(torch.nn.Module):
     @torch.no_grad()
     def extract_features(self, audios_srs, **kwargs):
         features_extractor_output = self.feature_extractor(audios_srs)
-        features = features_extractor_output.audio_features
+        features = features_extractor_output.audio_features.to(self.dtype)
         padding_mask = features_extractor_output.padding_mask
 
         distill_features = None
         if self.distill_wavlm_extractor is not None:
-            distill_features = self.distill_wavlm_extractor(audios_srs).audio_features
+            distill_features = self.distill_wavlm_extractor(audios_srs).audio_features.to(self.dtype)
 
         if self.wavlm_extractor is not None:
             wavlm_output = self.wavlm_extractor(audios_srs)
             return (
-                wavlm_output.audio_features,
+                wavlm_output.audio_features.to(self.dtype),
                 wavlm_output.padding_mask,
                 features,
                 padding_mask,
@@ -241,7 +241,7 @@ class VAE(torch.nn.Module):
             context_vector = encoder_output.z
         else:
             context_vector = torch.zeros_like(encoder_output.z)
-            qd = self.config.encoder_config.vq_config.dim_to_quantize
+            qd = self.encoder._qd
             if kwargs.get("quantized", True) and encoder_output.quantized is not None:
                 context_vector[..., :qd] += encoder_output.quantized
             if kwargs.get("residual", True) and encoder_output.residual is not None:

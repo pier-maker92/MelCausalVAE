@@ -3,7 +3,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from dataclasses import dataclass
 from typing import Optional, Tuple
-from ..configs import VQConfig
+import math
+from ..configs import VQConfig, BSQConfig
 from ..output_dataclasses import VQVAEOutput, VQStats
 
 
@@ -316,4 +317,58 @@ class FiniteScalarQuantizer(nn.Module):
             residual=z_residual,
             stats=stats,
             loss=vq_loss,
+        )
+
+
+class BinarySphericalQuantizer(nn.Module):
+    """Binary spherical quantizer (BSQ) — lookup-free, no learnable codebook.
+
+    Maps each latent dim to ±1/sqrt(dim) via sign(). Straight-through estimator
+    is used during training. Loss is always 0 (no commitment term).
+
+    Reference: https://arxiv.org/abs/2406.07548
+    """
+
+    def __init__(self, config: BSQConfig) -> None:
+        super().__init__()
+        self.codebook_size = config.codebook_size
+        self.dim = int(math.log2(config.codebook_size))
+        self.register_buffer(
+            "codebook_value",
+            torch.tensor(1.0 / math.sqrt(self.dim)),
+            persistent=False,
+        )
+        self.register_buffer(
+            "mask",
+            2 ** torch.arange(self.dim - 1, -1, -1),
+            persistent=False,
+        )
+
+    def forward(
+        self,
+        z: torch.Tensor,
+        padding_mask: Optional[torch.BoolTensor] = None,
+        global_step: Optional[int] = None,
+    ) -> VQVAEOutput:
+        B, T, D = z.shape
+        if D != self.dim:
+            raise ValueError(f"BinarySphericalQuantizer: expected last dim {self.dim}, got {D}")
+
+        codes = torch.where(z > 0, self.codebook_value, -self.codebook_value)
+        indices_bt = ((codes > 0) * self.mask).sum(dim=-1).long()
+        z_residual = z - codes.detach()
+
+        if padding_mask is None:
+            valid = torch.ones(B, T, dtype=torch.bool, device=z.device)
+        else:
+            valid = ~padding_mask
+
+        stats = _batch_vq_stats(indices_bt, valid, self.codebook_size, z)
+
+        return VQVAEOutput(
+            indices=indices_bt,
+            quantized=codes,
+            residual=z_residual,
+            stats=stats,
+            loss=z.new_zeros(()),
         )

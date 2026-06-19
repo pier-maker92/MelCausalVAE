@@ -12,6 +12,7 @@ from .configs import (
     DiscriminatorConfig,
     MelSpectrogramConfig,
     VQConfig,
+    BSQConfig,
     DropoutConfig,
     KLChunkRegularizer,
     SemanticDistillationConfig,
@@ -36,6 +37,9 @@ def build_model(cfg_dict: Dict[str, Any]) -> VAE:
     vq_dict = encoder_cfg.pop("vq_config", None)
     vq_config = VQConfig(**vq_dict) if vq_dict else None
 
+    bsq_dict = encoder_cfg.pop("bsq_config", None)
+    bsq_config = BSQConfig(**bsq_dict) if bsq_dict else None
+
     dropout_dict = encoder_cfg.pop("dropout_regularizer_config", None)
     dropout_config = DropoutConfig(**dropout_dict) if dropout_dict else None
 
@@ -50,6 +54,7 @@ def build_model(cfg_dict: Dict[str, Any]) -> VAE:
 
     encoder_config = EncoderConfig(
         vq_config=vq_config,
+        bsq_config=bsq_config,
         dropout_regularizer_config=dropout_config,
         kl_chunk_regularizer_config=kl_config,
         noise_regularizer_config=noise_config,
@@ -111,6 +116,9 @@ def build_standard_model(cfg_dict: Dict[str, Any]):
     vq_dict = encoder_cfg.pop("vq_config", None)
     vq_config = VQConfig(**vq_dict) if vq_dict else None
 
+    bsq_dict = encoder_cfg.pop("bsq_config", None)
+    bsq_config = BSQConfig(**bsq_dict) if bsq_dict else None
+
     dropout_dict = encoder_cfg.pop("dropout_regularizer_config", None)
     dropout_config = DropoutConfig(**dropout_dict) if dropout_dict else None
 
@@ -125,6 +133,7 @@ def build_standard_model(cfg_dict: Dict[str, Any]):
 
     encoder_config = EncoderConfig(
         vq_config=vq_config,
+        bsq_config=bsq_config,
         dropout_regularizer_config=dropout_config,
         kl_chunk_regularizer_config=kl_config,
         noise_regularizer_config=noise_config,

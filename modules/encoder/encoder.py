@@ -4,7 +4,7 @@ import random
 import torch.nn as nn
 from typing import Optional
 import torch.nn.functional as F
-from .vq import HardVectorQuantizer, FiniteScalarQuantizer
+from .vq import HardVectorQuantizer, FiniteScalarQuantizer, BinarySphericalQuantizer
 from ..configs import EncoderConfig, VQConfig
 from ..output_dataclasses import EncoderOutput
 from .sigmavae import SigmaVAEEncoder
@@ -89,11 +89,40 @@ class Encoder(SigmaVAEEncoder):
             self.add_vq_residual_to_stoch = config.vq_config.add_vq_residual_to_stoch
 
             qd = config.vq_config.dim_to_quantize
+            self._qd = qd
             tail_dim = config.latent_dim - qd
 
             if tail_dim > 0:
                 self.ortho_proj_head = nn.Linear(qd, qd)
                 self.ortho_proj_tail = nn.Linear(tail_dim, qd)
+
+        elif config.bsq_config:
+            if config.bsq_config.dim_to_quantize > config.latent_dim:
+                raise ValueError(
+                    f"BSQ dim_to_quantize ({config.bsq_config.dim_to_quantize}) must be <= latent_dim ({config.latent_dim})."
+                )
+            self.vq = BinarySphericalQuantizer(config.bsq_config)
+            self.residual_and_tail_dropout_p = config.bsq_config.residual_and_tail_dropout_p
+            self.add_vq_residual_to_stoch = config.bsq_config.add_vq_residual_to_stoch
+
+            qd = config.bsq_config.dim_to_quantize
+            self._qd = qd
+            tail_dim = config.latent_dim - qd
+
+            if tail_dim > 0:
+                self.ortho_proj_head = nn.Linear(qd, qd)
+                self.ortho_proj_tail = nn.Linear(tail_dim, qd)
+
+        if hasattr(self, "vq"):
+            self.vq_pre_proj = nn.Linear(self._qd, self._qd)
+
+        if getattr(config, "use_instance_norm", False) and getattr(config, "speaker_embedding_dim", 0) > 0:
+            if config.vq_config or config.bsq_config:
+                qd_val = config.vq_config.dim_to_quantize if config.vq_config else config.bsq_config.dim_to_quantize
+                spk_raw_dim = (config.latent_dim - qd_val) * 2
+            else:
+                spk_raw_dim = config.latent_dim * 2
+            self.spk_proj = nn.Linear(spk_raw_dim, config.speaker_embedding_dim)
 
         if config.dropout_regularizer_config:
             self.dropout_regularizer = DropoutRegularizer(
@@ -142,6 +171,12 @@ class Encoder(SigmaVAEEncoder):
         if hasattr(self, "vq"):
             for param in self.vq.parameters():
                 param.requires_grad = True
+        if hasattr(self, "vq_pre_proj"):
+            for param in self.vq_pre_proj.parameters():
+                param.requires_grad = True
+        if hasattr(self, "spk_proj"):
+            for param in self.spk_proj.parameters():
+                param.requires_grad = True
 
     def forward(
         self,
@@ -175,7 +210,7 @@ class Encoder(SigmaVAEEncoder):
         if getattr(self.config, "use_instance_norm", False):
             if hasattr(self, "vq"):
                 # Apply IN only to the tail (continuous dims), not the quantized head.
-                qd = self.config.vq_config.dim_to_quantize
+                qd = self._qd
                 mu_head_raw = mu_original[..., :qd]
                 mu_tail_raw = mu_original[..., qd:]
                 spk_mu = mu_tail_raw.mean(dim=1, keepdim=True)
@@ -190,6 +225,8 @@ class Encoder(SigmaVAEEncoder):
             speaker_embedding = torch.cat(
                 [spk_mu.squeeze(1), spk_sigma.squeeze(1)], dim=-1
             )
+            if hasattr(self, "spk_proj"):
+                speaker_embedding = self.spk_proj(speaker_embedding)
 
         if self.use_pre_quant_dropout:
             mu = self.dropout_regularizer(mu_original)
@@ -204,7 +241,7 @@ class Encoder(SigmaVAEEncoder):
         ortho_loss = None
         # vq
         if hasattr(self, "vq"):
-            qd = self.config.vq_config.dim_to_quantize
+            qd = self._qd
             mu_head = mu[..., :qd]
             mu_tail = mu[..., qd:]
 
@@ -247,6 +284,9 @@ class Encoder(SigmaVAEEncoder):
 
                 # 4. Sottrai beta e eleva al quadrato
                 ortho_loss = (mean_abs_cos_sim - beta) ** 2
+
+            if hasattr(self, "vq_pre_proj"):
+                mu_head = self.vq_pre_proj(mu_head)
 
             vq_out = self.vq(
                 mu_head,
@@ -331,9 +371,7 @@ class Encoder(SigmaVAEEncoder):
                     mu_stoch, logvar_stoch, padding_mask
                 )
             else:
-                _qd = (
-                    self.config.vq_config.dim_to_quantize if hasattr(self, "vq") else 0
-                )
+                _qd = self._qd if hasattr(self, "vq") else 0
                 kl_term = self.kl_divergence(
                     (
                         mu_stoch

@@ -20,6 +20,7 @@ class SigmaVAEEncoderConfig:
     use_slt: bool = False
     use_reparameterization_trick: bool = False
     use_instance_norm: bool = False
+    speaker_embedding_dim: int = 0
 
 
 @dataclass
@@ -77,6 +78,22 @@ class VQConfig:
 
 
 @dataclass
+class BSQConfig:
+    """Binary Spherical Quantization config. codebook_size must be a power of 2;
+    dim_to_quantize is derived as log2(codebook_size)."""
+    codebook_size: int = 4096
+    residual_and_tail_dropout_p: float = 0.0
+    add_vq_residual_to_stoch: bool = False
+
+    def __post_init__(self):
+        import math
+        dim = int(math.log2(self.codebook_size))
+        if 2 ** dim != self.codebook_size:
+            raise ValueError(f"BSQConfig.codebook_size must be a power of 2, got {self.codebook_size}")
+        self.dim_to_quantize = dim
+
+
+@dataclass
 class SemanticDistillationConfig:
     wavlm_layer: int = 18
     cosine_loss_weight: float = 1.0
@@ -95,6 +112,7 @@ class EncoderConfig(SigmaVAEEncoderConfig):
     freeze_encoder_before_latent_heads: bool = False
     # Optional Modules
     vq_config: Optional[VQConfig] = None
+    bsq_config: Optional[BSQConfig] = None
     dropout_regularizer_config: Optional[DropoutConfig] = None
     kl_chunk_regularizer_config: Optional[KLChunkRegularizer] = None
     noise_regularizer_config: Optional[NoiseConfig] = None
