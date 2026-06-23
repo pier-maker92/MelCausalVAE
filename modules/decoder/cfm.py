@@ -224,6 +224,7 @@ class DiT(torch.nn.Module):
         generator: Optional[torch.Generator] = None,
         padding_mask: Optional[torch.BoolTensor] = None,
         speaker_embedding: Optional[torch.FloatTensor] = None,
+        guide_only_speaker: bool = False,
         **kwargs,
     ):
         cfg_scale = guidance_scale
@@ -250,6 +251,7 @@ class DiT(torch.nn.Module):
                 context_vector=context_vector,
                 attention_mask=~upsampled_padding_mask,
                 speaker_embedding=speaker_embedding,
+                guide_only_speaker=guide_only_speaker,
             )
             return features
 
@@ -271,6 +273,7 @@ class DiT(torch.nn.Module):
         context_vector: torch.FloatTensor,
         attention_mask: Optional[torch.BoolTensor] = None,
         speaker_embedding: Optional[torch.FloatTensor] = None,
+        guide_only_speaker: bool = False,
     ):
         times = times.repeat(state.shape[0])
         cond_state = self.noise_proj(torch.cat([context_vector, state], dim=-1))
@@ -285,9 +288,12 @@ class DiT(torch.nn.Module):
         if cfg_scale == 1.0:
             return cond_out
 
-        uncond_state = self.noise_proj(
-            torch.cat([torch.zeros_like(context_vector), state], dim=-1)
-        )
+        if guide_only_speaker:
+            uncond_state = cond_state
+        else:
+            uncond_state = self.noise_proj(
+                torch.cat([torch.zeros_like(context_vector), state], dim=-1)
+            )
         if speaker_embedding is not None:
             uncond_speaker_embedding = torch.zeros_like(speaker_embedding)
         else:

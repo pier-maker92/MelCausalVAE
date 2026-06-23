@@ -102,7 +102,9 @@ class Encoder(SigmaVAEEncoder):
                     f"BSQ dim_to_quantize ({config.bsq_config.dim_to_quantize}) must be <= latent_dim ({config.latent_dim})."
                 )
             self.vq = BinarySphericalQuantizer(config.bsq_config)
-            self.residual_and_tail_dropout_p = config.bsq_config.residual_and_tail_dropout_p
+            self.residual_and_tail_dropout_p = (
+                config.bsq_config.residual_and_tail_dropout_p
+            )
             self.add_vq_residual_to_stoch = config.bsq_config.add_vq_residual_to_stoch
 
             qd = config.bsq_config.dim_to_quantize
@@ -113,16 +115,8 @@ class Encoder(SigmaVAEEncoder):
                 self.ortho_proj_head = nn.Linear(qd, qd)
                 self.ortho_proj_tail = nn.Linear(tail_dim, qd)
 
-        if hasattr(self, "vq"):
-            self.vq_pre_proj = nn.Linear(self._qd, self._qd)
-
-        if getattr(config, "use_instance_norm", False) and getattr(config, "speaker_embedding_dim", 0) > 0:
-            if config.vq_config or config.bsq_config:
-                qd_val = config.vq_config.dim_to_quantize if config.vq_config else config.bsq_config.dim_to_quantize
-                spk_raw_dim = (config.latent_dim - qd_val) * 2
-            else:
-                spk_raw_dim = config.latent_dim * 2
-            self.spk_proj = nn.Linear(spk_raw_dim, config.speaker_embedding_dim)
+        # if hasattr(self, "vq"):
+        #     self.vq_pre_proj = nn.Linear(self._qd, self._qd)
 
         if config.dropout_regularizer_config:
             self.dropout_regularizer = DropoutRegularizer(
@@ -141,7 +135,7 @@ class Encoder(SigmaVAEEncoder):
             )
 
         if config.noise_regularizer_config:
-            if getattr(config, "use_reparameterization_trick", True):
+            if getattr(config, "use_reparameterization_trick"):
                 raise ValueError(
                     "Cannot use both noise_regularizer and use_reparameterization_trick=True"
                 )
@@ -164,19 +158,16 @@ class Encoder(SigmaVAEEncoder):
         for param in self.parameters():
             param.requires_grad = False
         for param in self.mu.parameters():
-            param.requires_grad = True
+            param.requires_grad = False
         if hasattr(self, "logvar"):
             for param in self.logvar.parameters():
-                param.requires_grad = True
+                param.requires_grad = False
         if hasattr(self, "vq"):
             for param in self.vq.parameters():
                 param.requires_grad = True
-        if hasattr(self, "vq_pre_proj"):
-            for param in self.vq_pre_proj.parameters():
-                param.requires_grad = True
-        if hasattr(self, "spk_proj"):
-            for param in self.spk_proj.parameters():
-                param.requires_grad = True
+        # if hasattr(self, "vq_pre_proj"):
+        #     for param in self.vq_pre_proj.parameters():
+        #         param.requires_grad = True
 
     def forward(
         self,
@@ -208,25 +199,35 @@ class Encoder(SigmaVAEEncoder):
 
         speaker_embedding = None
         if getattr(self.config, "use_instance_norm", False):
-            if hasattr(self, "vq"):
-                # Apply IN only to the tail (continuous dims), not the quantized head.
-                qd = self._qd
-                mu_head_raw = mu_original[..., :qd]
-                mu_tail_raw = mu_original[..., qd:]
-                spk_mu = mu_tail_raw.mean(dim=1, keepdim=True)
-                spk_sigma = mu_tail_raw.std(dim=1, keepdim=True)
-                mu_original = torch.cat(
-                    [mu_head_raw, (mu_tail_raw - spk_mu) / (spk_sigma + 1e-6)], dim=-1
-                )
+            # Compute valid mask: True for valid tokens, False for padding
+            if padding_mask is not None:
+                valid_mask = ~padding_mask
             else:
-                spk_mu = mu_original.mean(dim=1, keepdim=True)
-                spk_sigma = mu_original.std(dim=1, keepdim=True)
-                mu_original = (mu_original - spk_mu) / (spk_sigma + 1e-6)
+                valid_mask = torch.ones(
+                    (mu_original.shape[0], mu_original.shape[1]),
+                    device=mu_original.device,
+                    dtype=torch.bool,
+                )
+
+            valid_lens = valid_mask.sum(dim=1, keepdim=True).float()
+            valid_lens = valid_lens.clamp(min=1.0)
+            valid_lens = valid_lens.unsqueeze(-1)
+            valid_mask_expanded = valid_mask.unsqueeze(-1).to(mu_original.dtype)
+
+            spk_mu = (mu_original * valid_mask_expanded).sum(
+                dim=1, keepdim=True
+            ) / valid_lens
+            spk_variance = (((mu_original - spk_mu) ** 2) * valid_mask_expanded).sum(
+                dim=1, keepdim=True
+            ) / valid_lens
+            spk_sigma = torch.sqrt(spk_variance + 1e-6)
+
+            mu_original = (mu_original - spk_mu) / (spk_sigma + 1e-6)
+            mu_original = mu_original * valid_mask_expanded
+
             speaker_embedding = torch.cat(
                 [spk_mu.squeeze(1), spk_sigma.squeeze(1)], dim=-1
             )
-            if hasattr(self, "spk_proj"):
-                speaker_embedding = self.spk_proj(speaker_embedding)
 
         if self.use_pre_quant_dropout:
             mu = self.dropout_regularizer(mu_original)
@@ -311,17 +312,21 @@ class Encoder(SigmaVAEEncoder):
                 logvar_stoch = logvar_tail  # [B, T, D-qd]
 
             # 2. Sample z_stoch (active parts only)
-            if self.training and getattr(
-                self.config, "use_reparameterization_trick", True
-            ) and not hasattr(self, "noise_regularizer"):
+            if (
+                self.training
+                and getattr(self.config, "use_reparameterization_trick", True)
+                and not hasattr(self, "noise_regularizer")
+            ):
                 z_stoch = self.reparameterize(mu_tail, logvar_tail, std=1.0)
             else:
                 z_stoch = mu_tail
 
             if self.add_vq_residual_to_stoch:
-                if self.training and getattr(
-                    self.config, "use_reparameterization_trick", True
-                ) and not hasattr(self, "noise_regularizer"):
+                if (
+                    self.training
+                    and getattr(self.config, "use_reparameterization_trick", True)
+                    and not hasattr(self, "noise_regularizer")
+                ):
                     z_stoch_head = self.reparameterize(
                         vq_out.residual, logvar_head, std=0.1
                     )
@@ -331,9 +336,11 @@ class Encoder(SigmaVAEEncoder):
         else:
             mu_stoch = mu
             logvar_stoch = logvar
-            if self.training and getattr(
-                self.config, "use_reparameterization_trick", True
-            ) and not hasattr(self, "noise_regularizer"):
+            if (
+                self.training
+                and getattr(self.config, "use_reparameterization_trick", True)
+                and not hasattr(self, "noise_regularizer")
+            ):
                 z_stoch = self.reparameterize(mu, logvar)
             else:
                 z_stoch = mu

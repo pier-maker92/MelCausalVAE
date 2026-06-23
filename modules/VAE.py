@@ -186,6 +186,7 @@ class VAE(torch.nn.Module):
         generator: Optional[torch.Generator] = None,
         padding_mask: Optional[torch.BoolTensor] = None,
         speaker_embedding: Optional[torch.FloatTensor] = None,
+        guide_only_speaker: bool = False,
         **kwargs,
     ):
         assert z is not None or mu is not None, "Either z or mu must be provided"
@@ -198,6 +199,7 @@ class VAE(torch.nn.Module):
             context_vector=context_vector,
             guidance_scale=guidance_scale,
             speaker_embedding=speaker_embedding,
+            guide_only_speaker=guide_only_speaker,
         )
         reconstructed_mel = decoder_output.audio_features
         reconstructed_padding_mask = decoder_output.padding_mask
@@ -262,6 +264,10 @@ class VAE(torch.nn.Module):
                         tail = tail * tail_mask
                 context_vector[..., qd:] += tail
 
+        speaker_embedding = getattr(encoder_output, "speaker_embedding", None)
+        if kwargs.get("zero_speaker", False) and speaker_embedding is not None:
+            speaker_embedding = torch.zeros_like(speaker_embedding)
+
         reconstructed_mel, reconstructed_padding_mask = self.sample(
             num_steps=num_steps,
             temperature=temperature,
@@ -269,7 +275,8 @@ class VAE(torch.nn.Module):
             z=context_vector,
             generator=generator,
             padding_mask=encoder_output.padding_mask,
-            speaker_embedding=getattr(encoder_output, "speaker_embedding", None),
+            speaker_embedding=speaker_embedding,
+            guide_only_speaker=kwargs.get("guide_only_speaker", False),
         )
         if self.config.mel_spectrogram_config.normalize:
             dec_features = self.denormalize_mel(dec_features)

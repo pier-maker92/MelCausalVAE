@@ -20,7 +20,6 @@ class SigmaVAEEncoderConfig:
     use_slt: bool = False
     use_reparameterization_trick: bool = False
     use_instance_norm: bool = False
-    speaker_embedding_dim: int = 0
 
 
 @dataclass
@@ -232,6 +231,10 @@ class VAEConfig:
             self.decoder_config.expansion_factor = 2 * self.compress_factor
         else:
             self.decoder_config.expansion_factor = self.compress_factor
+
+        if getattr(self.encoder_config, "use_instance_norm", False):
+            spk_dim = self.latent_dim * 2
+            self.decoder_config.speaker_cond_dim = spk_dim
 
     @property
     def hidden_size(self) -> int:

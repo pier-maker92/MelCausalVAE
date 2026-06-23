@@ -112,6 +112,12 @@ def main(args):
             params["residual"] = True
         if args.tail:
             params["tail"] = True
+            
+        if getattr(args, "zero_speaker", False):
+            params["zero_speaker"] = True
+            
+        if getattr(args, "guide_only_speaker", False):
+            params["guide_only_speaker"] = True
 
         out = model.encode_decode(**params)
 
@@ -142,7 +148,9 @@ if __name__ == "__main__":
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--guidance_scale", type=float, default=1.3)
     parser.add_argument("-q", "--quantized", action="store_true")
+    parser.add_argument("-qq", "--zero_speaker", action="store_true", help="Zero out speaker embedding")
     parser.add_argument("-r", "--residual", action="store_true")
     parser.add_argument("-t", "--tail", action="store_true")
+    parser.add_argument("--guide_only_speaker", action="store_true", help="Apply guidance scale only to speaker embedding")
     args = parser.parse_args()
     main(args)
