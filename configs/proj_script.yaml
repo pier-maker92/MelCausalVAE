@@ -1,0 +1,23 @@
+# Configurazione Dataset
+dataset_name: librispeech_aligned # oppure mls, libritts, ecc.
+num_workers: 0
+
+# Modello MelCausalVAE
+checkpoint_dir: checkpoints/wavlm_64_chunk_4
+
+# Parametri per l'addestramento dei proiettori lineari
+wavlm_dim: 768
+vae_dim: 64
+
+# Indici di slicing del latente
+c0: 0
+c1: 20
+c2: 40
+c3: 64
+
+# Iperparametri di addestramento
+epochs: 100
+lr: 0.001
+lambda_ortho: 0.1
+log_every: 1
+batch_size: 2

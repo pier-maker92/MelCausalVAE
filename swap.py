@@ -2,7 +2,9 @@ import os
 
 # --- WORKAROUND FOR FAIRSEQ/HYDRA ON PYTHON 3.11 ---
 import dataclasses
+
 _orig_get_field = dataclasses._get_field
+
 
 def _patched_get_field(cls, a_name, a_type, *args, **kwargs):
     try:
@@ -10,15 +12,17 @@ def _patched_get_field(cls, a_name, a_type, *args, **kwargs):
     except ValueError as e:
         if "mutable default" in str(e):
             default = getattr(cls, a_name, dataclasses.MISSING)
-            actual_default = default.default if isinstance(default, dataclasses.Field) else default
+            actual_default = (
+                default.default if isinstance(default, dataclasses.Field) else default
+            )
             if actual_default is not dataclasses.MISSING:
                 default_cls = actual_default.__class__
-                orig_hash = getattr(default_cls, '__hash__', None)
+                orig_hash = getattr(default_cls, "__hash__", None)
                 try:
                     default_cls.__hash__ = lambda self: id(self)
                 except TypeError:
                     pass
-                
+
                 try:
                     return _orig_get_field(cls, a_name, a_type, *args, **kwargs)
                 finally:
@@ -30,6 +34,7 @@ def _patched_get_field(cls, a_name, a_type, *args, **kwargs):
                     except TypeError:
                         pass
         raise
+
 
 dataclasses._get_field = _patched_get_field
 # ---------------------------------------------------
@@ -129,16 +134,26 @@ def main(args):
                 tail_tg = out_tg.tail  # [B, T_tg, tail_dim]
                 if tail_tg.shape[1] != T_in:
                     tail_tg = tail_tg.permute(0, 2, 1)
-                    tail_tg = torch.nn.functional.interpolate(tail_tg, size=T_in, mode="linear", align_corners=False)
+                    tail_tg = torch.nn.functional.interpolate(
+                        tail_tg, size=T_in, mode="linear", align_corners=False
+                    )
                     tail_tg = tail_tg.permute(0, 2, 1)
 
             chunk_size = args.chunk_size
             n_chunks = tail_dim // chunk_size
             in_chunks = args.chunk_idx if args.chunk_idx is not None else n_chunks
-            tg_chunks = args.target_chunk_idx if args.target_chunk_idx is not None else 0
+            tg_chunks = (
+                args.target_chunk_idx if args.target_chunk_idx is not None else 0
+            )
 
             # Build tail as zeros, then fill in
-            tail = torch.zeros(context_vector.shape[0], T_in, tail_dim, device=context_vector.device, dtype=context_vector.dtype)
+            tail = torch.zeros(
+                context_vector.shape[0],
+                T_in,
+                tail_dim,
+                device=context_vector.device,
+                dtype=context_vector.dtype,
+            )
 
             # Fill first in_chunks from input
             in_keep = min(in_chunks * chunk_size, tail_dim)
@@ -151,11 +166,13 @@ def main(args):
                 tail[..., -tg_keep:] = tail_tg[..., -tg_keep:]
 
             if in_keep < tail_dim or tg_keep > 0:
-                print(f"Tail ({tail_dim}d, {n_chunks} chunks of {chunk_size}): "
-                      f"input[:{ in_keep}] + zeros[{in_keep}:{tail_dim - tg_keep}] + target[{tail_dim - tg_keep}:]")
+                print(
+                    f"Tail ({tail_dim}d, {n_chunks} chunks of {chunk_size}): "
+                    f"input[:{ in_keep}] + zeros[{in_keep}:{tail_dim - tg_keep}] + target[{tail_dim - tg_keep}:]"
+                )
 
             context_vector[..., qd:] += tail
-                
+
         padding_mask = out_in.padding_mask
 
         # Use the speaker embedding from the target audio
@@ -212,11 +229,32 @@ if __name__ == "__main__":
     parser.add_argument("--num_steps", type=int, default=32)
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--guidance_scale", type=float, default=1.5)
-    parser.add_argument("-q", "--quantized", action="store_true", help="Use only quantized head for content")
-    parser.add_argument("--chunk_idx", type=int, default=None, help="Number of tail chunks to keep from INPUT (from start). Default: all")
-    parser.add_argument("--target_chunk_idx", type=int, default=None, help="Number of tail chunks to keep from TARGET (from end). Default: 0")
-    parser.add_argument("--chunk_size", type=int, default=2, help="Size of each tail chunk (default: 2)")
-    parser.add_argument("--guide_only_speaker", action="store_true", help="Apply guidance scale only to speaker embedding")
+    parser.add_argument(
+        "-q",
+        "--quantized",
+        action="store_true",
+        help="Use only quantized head for content",
+    )
+    parser.add_argument(
+        "--chunk_idx",
+        type=int,
+        default=None,
+        help="Number of tail chunks to keep from INPUT (from start). Default: all",
+    )
+    parser.add_argument(
+        "--target_chunk_idx",
+        type=int,
+        default=None,
+        help="Number of tail chunks to keep from TARGET (from end). Default: 0",
+    )
+    parser.add_argument(
+        "--chunk_size", type=int, default=2, help="Size of each tail chunk (default: 2)"
+    )
+    parser.add_argument(
+        "--guide_only_speaker",
+        action="store_true",
+        help="Apply guidance scale only to speaker embedding",
+    )
 
     args = parser.parse_args()
     main(args)
