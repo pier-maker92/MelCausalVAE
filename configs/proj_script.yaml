@@ -5,14 +5,17 @@ num_workers: 0
 # Modello MelCausalVAE
 checkpoint_dir: checkpoints/wavlm_64_chunk_4
 
-# Parametri per l'addestramento dei proiettori lineari
-vae_dim: 64
-
-# Indici di slicing del latente
-c0: 0
-c1: 20
-c2: 40
-c3: 64
+# Indici di slicing del latente (supporta overlapping)
+components:
+  phonetic:
+    start: 0
+    end: 20
+  prosody:
+    start: 20
+    end: 40
+  timbre:
+    start: 40
+    end: 64
 
 # Iperparametri di addestramento
 epochs: 100

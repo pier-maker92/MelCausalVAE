@@ -16,30 +16,30 @@ from modules.builder import build_model
 
 
 class OrthogonalProjectors(nn.Module):
-    def __init__(self, wavlm_dim, c0, c1, c2, c3):
+    def __init__(self, wavlm_dim, components_cfg):
         """
         Args:
-            wavlm_dim: Dimensione delle feature di WavLM Layer 6 (es. 768)
-            c0, c1, c2, c3: Indici di canale per suddividere il latente globale Z
+            wavlm_dim: Dimensione delle feature di WavLM Layer 6 (es. 1024)
+            components_cfg: Dict con i nomi dei componenti e indici start/end
         """
         super().__init__()
         self.D = wavlm_dim
         
-        self.dim_sem = c1 - c0
-        self.dim_pros = c2 - c1
-        self.dim_timb = c3 - c2
+        self.projectors = nn.ModuleDict()
+        self.slices = {}
         
-        self.proj_sem = nn.Linear(self.D, self.dim_sem)
-        self.proj_pros = nn.Linear(self.D, self.dim_pros)
-        self.proj_timb = nn.Linear(self.D, self.dim_timb)
+        for comp_name, comp_info in components_cfg.items():
+            start, end = comp_info["start"], comp_info["end"]
+            dim = end - start
+            self.projectors[comp_name] = nn.Linear(self.D, dim)
+            self.slices[comp_name] = (start, end)
 
     def forward(self, x):
         # x: [..., T, D]
-        z_hat_sem = self.proj_sem(x)
-        z_hat_pros = self.proj_pros(x)
-        z_hat_timb = self.proj_timb(x)
-        
-        return z_hat_sem, z_hat_pros, z_hat_timb
+        preds = {}
+        for comp_name, proj in self.projectors.items():
+            preds[comp_name] = proj(x)
+        return preds
 
 
 def orthogonality_loss(W1, W2):
@@ -140,38 +140,34 @@ def train_projectors(dataloader, wavlm_extractor, vae_model, device, cfg):
             if model is None:
                 actual_wavlm_dim = valid_wavlm.shape[-1]
                 print(f"Inizializzazione dinamica proiettori con WavLM dim = {actual_wavlm_dim}")
-                model = OrthogonalProjectors(actual_wavlm_dim, cfg.c0, cfg.c1, cfg.c2, cfg.c3).to(device)
+                model = OrthogonalProjectors(actual_wavlm_dim, cfg.components).to(device)
                 optimizer = optim.Adam(model.parameters(), lr=cfg.lr)
                 model.train()
 
             optimizer.zero_grad()
 
             # Slicing dei target Z
-            z_sem = valid_z[:, cfg.c0:cfg.c1]
-            z_pros = valid_z[:, cfg.c1:cfg.c2]
-            z_timb = valid_z[:, cfg.c2:cfg.c3]
+            z_targets = {}
+            for comp_name, (start, end) in model.slices.items():
+                z_targets[comp_name] = valid_z[:, start:end]
             
             # Predizioni
-            z_hat_sem, z_hat_pros, z_hat_timb = model(valid_wavlm)
+            preds = model(valid_wavlm)
             
             # --- LOSS CALCULATION ---
             # 3A. Loss di Ricostruzione (MSE)
-            loss_rec_sem = F.mse_loss(z_hat_sem, z_sem)
-            loss_rec_pros = F.mse_loss(z_hat_pros, z_pros)
-            loss_rec_timb = F.mse_loss(z_hat_timb, z_timb)
-            
-            L_rec = loss_rec_sem + loss_rec_pros + loss_rec_timb
+            L_rec = 0
+            for comp_name in preds.keys():
+                L_rec += F.mse_loss(preds[comp_name], z_targets[comp_name])
             
             # 3B. Loss di Ortogonalità (Soft Constraint)
-            W_sem = model.proj_sem.weight
-            W_pros = model.proj_pros.weight
-            W_timb = model.proj_timb.weight
-            
-            loss_ortho_sem_pros = orthogonality_loss(W_sem, W_pros)
-            loss_ortho_sem_timb = orthogonality_loss(W_sem, W_timb)
-            loss_ortho_pros_timb = orthogonality_loss(W_pros, W_timb)
-            
-            L_ortho = loss_ortho_sem_pros + loss_ortho_sem_timb + loss_ortho_pros_timb
+            L_ortho = 0
+            comp_names = list(model.projectors.keys())
+            for i in range(len(comp_names)):
+                for j in range(i + 1, len(comp_names)):
+                    W1 = model.projectors[comp_names[i]].weight
+                    W2 = model.projectors[comp_names[j]].weight
+                    L_ortho += orthogonality_loss(W1, W2)
             
             # Loss Totale
             L_total = L_rec + cfg.lambda_ortho * L_ortho
