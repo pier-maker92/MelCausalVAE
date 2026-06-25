@@ -6,7 +6,6 @@ num_workers: 0
 checkpoint_dir: checkpoints/wavlm_64_chunk_4
 
 # Parametri per l'addestramento dei proiettori lineari
-wavlm_dim: 768
 vae_dim: 64
 
 # Indici di slicing del latente
