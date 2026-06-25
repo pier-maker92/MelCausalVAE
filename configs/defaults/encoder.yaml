@@ -15,6 +15,7 @@ encoder:
   use_slt: false
   use_softplus: false
   use_reparameterization_trick: false
+  use_instance_norm: false
 
   # --- VQ ---
   vq_config:
@@ -27,7 +28,7 @@ encoder:
     ema_decay: 0.99
     ema_epsilon: 1.0e-5
     dim_to_quantize: 32
-    residual_and_tail_dropout_p: 0.3
+    residual_and_tail_dropout_p: 0.0
     fsq_levels: null
 
   dropout_regularizer_config: null

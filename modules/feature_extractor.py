@@ -227,8 +227,8 @@ class WavLMFeatureExtractor(nn.Module):
 
         with torch.no_grad():
             outputs = self.wavlm(
-                padded_audios, 
-                attention_mask=(~padding_mask).long(), 
+                padded_audios.float(),  # WavLM weights are always fp32
+                attention_mask=(~padding_mask).long(),
                 output_hidden_states=True
             )
             features = outputs.hidden_states[self.layer]

@@ -66,9 +66,28 @@ class VAE(torch.nn.Module):
 
         if self.wavlm_extractor is not None:
             wavlm_output = self.wavlm_extractor(audios_srs)
+            wavlm_feats = wavlm_output.audio_features.to(self.dtype)  # [B, T_w, 1024]
+            T_mel = features.shape[1]
+            # Causal upsample ×2 (repeat), then interpolate to exact mel length
+            wavlm_feats = wavlm_feats.repeat_interleave(2, dim=1)    # [B, 2*T_w, 1024]
+            wavlm_feats = F.interpolate(
+                wavlm_feats.float().transpose(1, 2),
+                size=T_mel,
+                mode="linear",
+                align_corners=False,
+            ).transpose(1, 2).to(wavlm_feats.dtype)                   # [B, T_mel, 1024]
+            enc_padding_mask = (
+                F.interpolate(
+                    wavlm_output.padding_mask.float().unsqueeze(1),
+                    size=T_mel,
+                    mode="nearest",
+                )
+                .squeeze(1)
+                .bool()
+            )
             return (
-                wavlm_output.audio_features.to(self.dtype),
-                wavlm_output.padding_mask,
+                wavlm_feats,
+                enc_padding_mask,
                 features,
                 padding_mask,
                 distill_features,
@@ -240,7 +259,40 @@ class VAE(torch.nn.Module):
                     "using encoder_output.z directly (flags have no effect).",
                     vq_flags,
                 )
-            context_vector = encoder_output.z
+            context_vector = encoder_output.z.clone()
+            chunk_idx = kwargs.get("chunk")
+            exclude_chunk_idx = kwargs.get("exclude_chunk")
+            exclude_start = kwargs.get("exclude_start_chunk")
+            exclude_end = kwargs.get("exclude_end_chunk")
+            if chunk_idx is not None or exclude_chunk_idx is not None or (exclude_start is not None and exclude_end is not None):
+                chunk_size = 2
+                if kwargs.get("chunk_size") is not None:
+                    chunk_size = kwargs.get("chunk_size")
+                elif hasattr(self.config.encoder_config, "kl_chunk_regularizer_config") and self.config.encoder_config.kl_chunk_regularizer_config is not None:
+                    chunk_size = self.config.encoder_config.kl_chunk_regularizer_config.chunk_size
+                
+                mask = torch.ones_like(context_vector)
+                if chunk_idx is not None:
+                    keep_dim = chunk_idx * chunk_size
+                    if context_vector.shape[-1] > keep_dim:
+                        mask[..., keep_dim:] = 0.0
+                        
+                if exclude_chunk_idx is not None:
+                    exclude_dim = exclude_chunk_idx * chunk_size
+                    if context_vector.shape[-1] >= exclude_dim:
+                        mask[..., :exclude_dim] = 0.0
+                    else:
+                        mask[..., :] = 0.0
+                
+                if exclude_start is not None and exclude_end is not None:
+                    start_dim = exclude_start * chunk_size
+                    end_dim = exclude_end * chunk_size
+                    if context_vector.shape[-1] >= end_dim:
+                        mask[..., start_dim:end_dim] = 0.0
+                    elif context_vector.shape[-1] > start_dim:
+                        mask[..., start_dim:] = 0.0
+                        
+                context_vector = context_vector * mask
         else:
             context_vector = torch.zeros_like(encoder_output.z)
             qd = self.encoder._qd
@@ -251,17 +303,38 @@ class VAE(torch.nn.Module):
             if kwargs.get("tail", True) and encoder_output.tail is not None:
                 tail = encoder_output.tail
                 chunk_idx = kwargs.get("chunk")
-                if chunk_idx is not None:
+                exclude_chunk_idx = kwargs.get("exclude_chunk")
+                exclude_start = kwargs.get("exclude_start_chunk")
+                exclude_end = kwargs.get("exclude_end_chunk")
+                if chunk_idx is not None or exclude_chunk_idx is not None or (exclude_start is not None and exclude_end is not None):
                     chunk_size = 2
                     if kwargs.get("chunk_size") is not None:
                         chunk_size = kwargs.get("chunk_size")
                     elif hasattr(self.config.encoder_config, "kl_chunk_regularizer_config") and self.config.encoder_config.kl_chunk_regularizer_config is not None:
                         chunk_size = self.config.encoder_config.kl_chunk_regularizer_config.chunk_size
-                    keep_dim = chunk_idx * chunk_size
-                    if tail.shape[-1] > keep_dim:
-                        tail_mask = torch.ones_like(tail)
-                        tail_mask[..., keep_dim:] = 0.0
-                        tail = tail * tail_mask
+                    
+                    tail_mask = torch.ones_like(tail)
+                    if chunk_idx is not None:
+                        keep_dim = chunk_idx * chunk_size
+                        if tail.shape[-1] > keep_dim:
+                            tail_mask[..., keep_dim:] = 0.0
+                            
+                    if exclude_chunk_idx is not None:
+                        exclude_dim = exclude_chunk_idx * chunk_size
+                        if tail.shape[-1] >= exclude_dim:
+                            tail_mask[..., :exclude_dim] = 0.0
+                        else:
+                            tail_mask[..., :] = 0.0
+                            
+                    if exclude_start is not None and exclude_end is not None:
+                        start_dim = exclude_start * chunk_size
+                        end_dim = exclude_end * chunk_size
+                        if tail.shape[-1] >= end_dim:
+                            tail_mask[..., start_dim:end_dim] = 0.0
+                        elif tail.shape[-1] > start_dim:
+                            tail_mask[..., start_dim:] = 0.0
+                            
+                    tail = tail * tail_mask
                 context_vector[..., qd:] += tail
 
         speaker_embedding = getattr(encoder_output, "speaker_embedding", None)
@@ -295,7 +368,8 @@ class VAE(torch.nn.Module):
 
     @property
     def dtype(self):
-        return next(self.parameters()).dtype
+        # WavLM is frozen fp32 and registered first, so skip it
+        return next(self.encoder.parameters()).dtype
 
     @property
     def device(self):

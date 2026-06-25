@@ -206,7 +206,7 @@ class VAEWithStandardDecoder(nn.Module):
         )
         encoder_output = self.encode(enc_features, enc_padding_mask, **kwargs)
 
-        context_vector = encoder_output.z
+        context_vector = encoder_output.z.clone()
         # Support partial latent selection (same API as VAE)
         if (
             encoder_output.quantized is not None
@@ -220,7 +220,75 @@ class VAEWithStandardDecoder(nn.Module):
             if kwargs.get("residual", True) and encoder_output.residual is not None:
                 context_vector[..., :qd] += encoder_output.residual
             if kwargs.get("tail", True) and encoder_output.tail is not None:
-                context_vector[..., qd:] += encoder_output.tail
+                tail = encoder_output.tail
+                chunk_idx = kwargs.get("chunk")
+                exclude_chunk_idx = kwargs.get("exclude_chunk")
+                exclude_start = kwargs.get("exclude_start_chunk")
+                exclude_end = kwargs.get("exclude_end_chunk")
+                if chunk_idx is not None or exclude_chunk_idx is not None or (exclude_start is not None and exclude_end is not None):
+                    chunk_size = 2
+                    if kwargs.get("chunk_size") is not None:
+                        chunk_size = kwargs.get("chunk_size")
+                    elif hasattr(self.config.encoder_config, "kl_chunk_regularizer_config") and self.config.encoder_config.kl_chunk_regularizer_config is not None:
+                        chunk_size = self.config.encoder_config.kl_chunk_regularizer_config.chunk_size
+                    
+                    tail_mask = torch.ones_like(tail)
+                    if chunk_idx is not None:
+                        keep_dim = chunk_idx * chunk_size
+                        if tail.shape[-1] > keep_dim:
+                            tail_mask[..., keep_dim:] = 0.0
+                            
+                    if exclude_chunk_idx is not None:
+                        exclude_dim = exclude_chunk_idx * chunk_size
+                        if tail.shape[-1] >= exclude_dim:
+                            tail_mask[..., :exclude_dim] = 0.0
+                        else:
+                            tail_mask[..., :] = 0.0
+                            
+                    if exclude_start is not None and exclude_end is not None:
+                        start_dim = exclude_start * chunk_size
+                        end_dim = exclude_end * chunk_size
+                        if tail.shape[-1] >= end_dim:
+                            tail_mask[..., start_dim:end_dim] = 0.0
+                        elif tail.shape[-1] > start_dim:
+                            tail_mask[..., start_dim:] = 0.0
+                            
+                    tail = tail * tail_mask
+                context_vector[..., qd:] += tail
+        else:
+            chunk_idx = kwargs.get("chunk")
+            exclude_chunk_idx = kwargs.get("exclude_chunk")
+            exclude_start = kwargs.get("exclude_start_chunk")
+            exclude_end = kwargs.get("exclude_end_chunk")
+            if chunk_idx is not None or exclude_chunk_idx is not None or (exclude_start is not None and exclude_end is not None):
+                chunk_size = 2
+                if kwargs.get("chunk_size") is not None:
+                    chunk_size = kwargs.get("chunk_size")
+                elif hasattr(self.config.encoder_config, "kl_chunk_regularizer_config") and self.config.encoder_config.kl_chunk_regularizer_config is not None:
+                    chunk_size = self.config.encoder_config.kl_chunk_regularizer_config.chunk_size
+                
+                mask = torch.ones_like(context_vector)
+                if chunk_idx is not None:
+                    keep_dim = chunk_idx * chunk_size
+                    if context_vector.shape[-1] > keep_dim:
+                        mask[..., keep_dim:] = 0.0
+                        
+                if exclude_chunk_idx is not None:
+                    exclude_dim = exclude_chunk_idx * chunk_size
+                    if context_vector.shape[-1] >= exclude_dim:
+                        mask[..., :exclude_dim] = 0.0
+                    else:
+                        mask[..., :] = 0.0
+                
+                if exclude_start is not None and exclude_end is not None:
+                    start_dim = exclude_start * chunk_size
+                    end_dim = exclude_end * chunk_size
+                    if context_vector.shape[-1] >= end_dim:
+                        mask[..., start_dim:end_dim] = 0.0
+                    elif context_vector.shape[-1] > start_dim:
+                        mask[..., start_dim:] = 0.0
+                        
+                context_vector = context_vector * mask
 
         reconstructed_mel, reconstructed_padding_mask = self.sample(
             z=context_vector,

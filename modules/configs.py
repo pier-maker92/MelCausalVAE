@@ -227,10 +227,7 @@ class VAEConfig:
 
         self.decoder_config.mel_dim = self.mel_dim
         self.decoder_config.audio_latent_dim = self.latent_dim
-        if self.wavlm_config is not None:
-            self.decoder_config.expansion_factor = 2 * self.compress_factor
-        else:
-            self.decoder_config.expansion_factor = self.compress_factor
+        self.decoder_config.expansion_factor = self.compress_factor
 
         if getattr(self.encoder_config, "use_instance_norm", False):
             spk_dim = self.latent_dim * 2

@@ -1,0 +1,85 @@
+# @package _global_
+# WavLM-large layer6, latent_dim=64, noise chunk_size=1.
+
+compress_factor: 4
+mel_dim: 100
+latent_dim: 64
+sample_rate: 24000
+
+wavlm_config:
+  pretrained_model_name: "microsoft/wavlm-large"
+  layer: 6
+  sampling_rate: 16000
+  normalize: true
+
+encoder:
+  d_model: 1024
+  tf_heads: 8
+  tf_layers: 4
+  n_residual_blocks: 3
+  logvar_layer: false
+  target_std: 1.0
+  kl_loss_warmup_ratio: 0.01
+  kl_loss_weight: 1.0e-8
+  use_reparameterization_trick: false
+
+  vq_config: null
+  dropout_regularizer_config: null
+  kl_chunk_regularizer_config: null
+  semantic_distillation_config: null
+
+  noise_regularizer_config:
+    chunk_size: 1
+    noise_start: 0.0
+    noise_end: 0.8
+    strategy: "linear"
+    noise_type: "additive"
+    sigma_type: "fixed"
+    use_softplus: false
+
+decoder:
+  dit_dim: 768
+  dit_depth: 6
+  dit_heads: 12
+  dit_dropout_rate: 0.1
+  use_conv_layer: true
+  uncond_prob: 0.15
+  is_causal: true
+  use_window_attention: true
+  window_attention_seconds: 3.0
+  kernel_size: 7
+  causal_convolution: false
+
+training:
+  num_train_epochs: 10
+  output_dir: checkpoints/agent/wavlm-s1-chunk1
+
+  per_device_train_batch_size: 32
+  per_device_eval_batch_size: 16
+  gradient_accumulation_steps: 1
+
+  learning_rate: 1.0e-4
+  encoder_lr: 3.0e-4
+  decoder_lr: 1.0e-4
+  encoder_warmup_ratio: 0.01
+  decoder_warmup_ratio: 0.05
+  lr_scheduler_type: "cosine"
+  encoder_min_lr: 1.0e-4
+  decoder_min_lr: 5.0e-5
+
+  report_to: wandb
+  wandb_project: speech-vae
+  wandb_run_name: wavlm-s1-chunk1
+
+  fp16: false
+  bf16: true
+
+  save_steps: 2500
+  logging_steps: 10
+  eval_strategy: "steps"
+  eval_steps: 2500
+  save_total_limit: 2
+  load_best_model_at_end: false
+
+  dataloader_num_workers: 8
+  eval_num_samples: 10

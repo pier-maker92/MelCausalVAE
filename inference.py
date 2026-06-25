@@ -119,6 +119,17 @@ def main(args):
         if getattr(args, "guide_only_speaker", False):
             params["guide_only_speaker"] = True
 
+        if getattr(args, "chunk_size", None) is not None:
+            params["chunk_size"] = args.chunk_size
+        if getattr(args, "chunk", None) is not None:
+            params["chunk"] = args.chunk
+        if getattr(args, "exclude_chunk", None) is not None:
+            params["exclude_chunk"] = args.exclude_chunk
+        if getattr(args, "exclude_start_chunk", None) is not None:
+            params["exclude_start_chunk"] = args.exclude_start_chunk
+        if getattr(args, "exclude_end_chunk", None) is not None:
+            params["exclude_end_chunk"] = args.exclude_end_chunk
+
         out = model.encode_decode(**params)
 
         reconstructed_mel = out["decoder_output"].audio_features
@@ -152,5 +163,10 @@ if __name__ == "__main__":
     parser.add_argument("-r", "--residual", action="store_true")
     parser.add_argument("-t", "--tail", action="store_true")
     parser.add_argument("--guide_only_speaker", action="store_true", help="Apply guidance scale only to speaker embedding")
+    parser.add_argument("--chunk_size", type=int, default=None, help="Chunk size for the bottleneck tail")
+    parser.add_argument("--chunk", type=int, default=None, help="Number of chunks to use, starting from the bottom of the bottleneck")
+    parser.add_argument("--exclude_chunk", type=int, default=None, help="Number of chunks to exclude, starting from the bottom of the bottleneck")
+    parser.add_argument("--exclude_start_chunk", type=int, default=None, help="Start chunk to exclude")
+    parser.add_argument("--exclude_end_chunk", type=int, default=None, help="End chunk to exclude")
     args = parser.parse_args()
     main(args)

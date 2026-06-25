@@ -1,0 +1,76 @@
+# @package _global_
+# Fine-tune setting30 checkpoint: frozen backbone + BSQ (4096 codes, 12 dims) + instance norm.
+# Backbone frozen via freeze_encoder_before_latent_heads; only mu + decoder train.
+
+compress_factor: 4
+mel_dim: 100
+latent_dim: 64
+sample_rate: 24000
+
+encoder:
+  d_model: 1024
+  tf_heads: 8
+  tf_layers: 4
+  n_residual_blocks: 3
+  logvar_layer: false
+  target_std: 1.0
+  kl_loss_warmup_ratio: 0.01
+  kl_loss_weight: 0.0
+  use_reparameterization_trick: false
+  use_instance_norm: true
+  freeze_encoder_before_latent_heads: true
+
+  bsq_config:
+    codebook_size: 4096   # dim_to_quantize = 12; 52 stochastic tail dims
+  vq_config: null
+  dropout_regularizer_config: null
+  kl_chunk_regularizer_config: null
+  noise_regularizer_config: null    # disabled: decoder learns from clean BSQ latents
+  semantic_distillation_config: null
+
+decoder:
+  dit_dim: 768
+  dit_depth: 6
+  dit_heads: 12
+  dit_dropout_rate: 0.1
+  use_conv_layer: true
+  uncond_prob: 0.15
+  is_causal: true
+  use_window_attention: true
+  window_attention_seconds: 3.0
+  kernel_size: 7
+  causal_convolution: false
+
+training:
+  from_pretrained: "checkpoints/paper/setting30/model.safetensors"
+  max_steps: 1000
+  num_train_epochs: 10
+  output_dir: checkpoints/agent/s30-bsq-ft
+  per_device_train_batch_size: 4
+  per_device_eval_batch_size: 4
+  gradient_accumulation_steps: 4
+
+  learning_rate: 1.0e-4
+  encoder_lr: 3.0e-4    # applies to trainable mu only (backbone frozen)
+  decoder_lr: 1.0e-4
+  encoder_warmup_ratio: 0.01
+  decoder_warmup_ratio: 0.05
+  lr_scheduler_type: "cosine"
+  encoder_min_lr: 1.0e-4
+  decoder_min_lr: 5.0e-5
+
+  report_to: wandb
+  wandb_project: speech-vae
+
+  fp16: false
+  bf16: true
+
+  save_steps: 1000
+  logging_steps: 10
+  eval_strategy: "steps"
+  eval_steps: 1000
+  save_total_limit: 1
+  load_best_model_at_end: false
+
+  dataloader_num_workers: 8
+  eval_num_samples: 10

@@ -1,0 +1,80 @@
+# @package _global_
+# Fine-tune setting30: frozen backbone + BSQ(256 tokens, 8 dims) + instance norm + speaker FiLM.
+# Encoder backbone frozen; mu, spk_proj, vq trainable. DiT decoder fully trainable.
+
+compress_factor: 4
+mel_dim: 100
+latent_dim: 64
+sample_rate: 24000
+
+encoder:
+  d_model: 1024
+  tf_heads: 8
+  tf_layers: 4
+  n_residual_blocks: 3
+  logvar_layer: false
+  target_std: 1.0
+  kl_loss_warmup_ratio: 0.01
+  kl_loss_weight: 0.0
+  use_reparameterization_trick: false
+  use_instance_norm: true
+  speaker_embedding_dim: 128
+  freeze_encoder_before_latent_heads: true
+
+  bsq_config:
+    codebook_size: 256             # dim_to_quantize=8; tail_dim=56; spk_raw=112
+    residual_and_tail_dropout_p: 0.05  # 5% of samples use only quantized head
+  vq_config: null
+  dropout_regularizer_config: null
+  kl_chunk_regularizer_config: null
+  noise_regularizer_config: null
+  semantic_distillation_config: null
+
+decoder:
+  dit_dim: 768
+  dit_depth: 6
+  dit_heads: 12
+  dit_dropout_rate: 0.1
+  use_conv_layer: true
+  uncond_prob: 0.15
+  is_causal: true
+  use_window_attention: true
+  window_attention_seconds: 3.0
+  kernel_size: 7
+  causal_convolution: false
+  speaker_cond_dim: 128
+
+training:
+  dataset_name: libritts-r
+  from_pretrained: "checkpoints/exps/18-June-2026/11:13:26_vq-def_30.yaml/checkpoint-27500/model.safetensors"
+  max_steps: -1
+  num_train_epochs: 5
+  output_dir: checkpoints/agent/s30-bsq-spk-ft
+  per_device_train_batch_size: 32
+  per_device_eval_batch_size: 4
+  gradient_accumulation_steps: 1
+
+  learning_rate: 1.0e-4
+  encoder_lr: 3.0e-4    # only mu + spk_proj (backbone frozen)
+  decoder_lr: 1.0e-4
+  encoder_warmup_ratio: 0.01
+  decoder_warmup_ratio: 0.05
+  lr_scheduler_type: "cosine"
+  encoder_min_lr: 1.0e-4
+  decoder_min_lr: 5.0e-5
+
+  report_to: wandb
+  wandb_project: speech-vae
+
+  fp16: false
+  bf16: true
+
+  save_steps: 2500
+  logging_steps: 50
+  eval_strategy: "steps"
+  eval_steps: 2500
+  save_total_limit: 2
+  load_best_model_at_end: false
+
+  dataloader_num_workers: 8
+  eval_num_samples: 10

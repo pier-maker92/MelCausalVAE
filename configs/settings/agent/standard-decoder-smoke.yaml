@@ -1,0 +1,91 @@
+# @package _global_
+# Smoke test: standard CNN decoder + GAN discriminator.
+# Fixes vs run 14361313: EMA codebook, lower encoder_lr, explicit max_grad_norm.
+
+compress_factor: 8
+mel_dim: 100
+latent_dim: 64
+sample_rate: 24000
+use_bigvgan_mel: false
+
+# ── Encoder ─────────────────────────────────────────────────────────────────
+encoder:
+  d_model: 512
+  tf_heads: 8
+  tf_layers: 4
+  n_residual_blocks: 3
+  drop_p: 0.1
+  logvar_layer: true
+  kl_loss_weight: 1.0e-3
+  kl_loss_warmup_ratio: 0.05
+  use_reparameterization_trick: false
+  use_slt: false
+  use_softplus: false
+
+  vq_config:
+    num_embeddings: 128
+    commitment_weight: 0.25
+    reset_dead_codes: true
+    reset_every_forward: 1
+    dim_to_quantize: 32
+    residual_and_tail_dropout_p: 0.3
+    use_ema_codebook: true        # KEY FIX: EMA prevents VQ collapse under large G gradients
+    add_vq_residual_to_stoch: false
+
+  dropout_regularizer_config: null
+  kl_chunk_regularizer_config: null
+  noise_regularizer_config: null
+  semantic_distillation_config: null
+
+# ── Decoder ─────────────────────────────────────────────────────────────────
+decoder:
+  decoder_type: standard
+  d_model: 512
+  tf_heads: 8
+  tf_layers: 4
+  n_residual_blocks: 3
+  drop_p: 0.1
+  recon_loss_weight: 45.0
+  adv_loss_weight: 1.0
+  fm_loss_weight: 2.0
+  discrim_lr: 2.0e-4
+
+# ── Training ─────────────────────────────────────────────────────────────────
+training:
+  num_train_epochs: 30
+  per_device_train_batch_size: 8
+  per_device_eval_batch_size: 4
+  gradient_accumulation_steps: 1
+
+  learning_rate: 1.0e-4           # lower than original (was 3e-4)
+  encoder_lr: 1.0e-4              # KEY FIX: was 3e-4, too high for VQ stability
+  decoder_lr: 1.0e-4
+  encoder_warmup_ratio: 0.02
+  decoder_warmup_ratio: 0.05
+  lr_scheduler_type: cosine
+  encoder_min_lr: 3.0e-5
+  decoder_min_lr: 3.0e-5
+  min_learning_rate: 0.0
+
+  max_grad_norm: 1.0              # explicit clip (Trainer default but good to pin)
+
+  bf16: true
+  fp16: false
+
+  save_steps: 500
+  logging_steps: 10
+  eval_strategy: steps
+  eval_steps: 500
+  save_total_limit: 1
+  load_best_model_at_end: false
+
+  eval_num_samples: 10            # C8
+
+  vq_collapse_threshold: 0.5
+  vq_collapse_patience: 3
+
+  report_to: wandb
+  wandb_project: speech-vae
+
+  dataloader_num_workers: 8
+  generate_and_log_samples: false
