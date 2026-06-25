@@ -92,37 +92,19 @@ def train_projectors(dataloader, wavlm_extractor, vae_model, device, cfg):
 
             # --- ESTRAZIONE FEATURE ---
             with torch.no_grad():
-                # 1. Feature Mel per ottenere T_mel (molto veloce)
-                mel_output = vae_model.feature_extractor(audios_srs)
-                T_mel = mel_output.audio_features.shape[1]
+                # 1. Feature VAE (incluso WavLM interno già allineato temporalmente a T_mel)
+                # Nota: usando extract_features garantiamo che la normalizzazione (mean/std) sia 
+                # identica a quella addestrata.
+                enc_features, enc_padding_mask, _, _, _ = vae_model.extract_features(audios_srs)
                 
-                # 2. Estrai WavLM (una sola volta!)
-                wavlm_output = wavlm_extractor(audios_srs)
-                wavlm_feats_raw = wavlm_output.audio_features # [B, T_w, D]
-                
-                # 3. Allineamento temporale WavLM -> T_mel
-                # a) Causal upsample x2 (repeat)
-                wavlm_feats_aligned = wavlm_feats_raw.repeat_interleave(2, dim=1) # [B, 2*T_w, D]
-                # b) Interpolate to match Mel spectrogram length
-                wavlm_feats_aligned = F.interpolate(
-                    wavlm_feats_aligned.float().transpose(1, 2),
-                    size=T_mel,
-                    mode="linear",
-                    align_corners=False,
-                ).transpose(1, 2).to(wavlm_feats_raw.dtype) # [B, T_mel, D]
-                
-                enc_padding_mask = F.interpolate(
-                    wavlm_output.padding_mask.float().unsqueeze(1),
-                    size=T_mel,
-                    mode="nearest",
-                ).squeeze(1).bool()
-                
-                # 4. Encode per ottenere il latente Z
-                encoder_output = vae_model.encode(wavlm_feats_aligned, enc_padding_mask)
+                # 2. Encode per ottenere il latente Z
+                encoder_output = vae_model.encode(enc_features, enc_padding_mask)
                 z = encoder_output.z # [B, T_z, C]
                 
-                # 5. Downsample WavLM per i proiettori (Avg pooling by C)
-                wavlm_feats = F.avg_pool1d(wavlm_feats_aligned.transpose(1, 2), kernel_size=C, stride=C) # [B, D, T_mel // C]
+                # 3. Downsample WavLM per i proiettori
+                # Se WavLM era usato nel modello, enc_features è già il tensore WavLM allineato a T_mel.
+                # Lo downsampliamo con Avg pooling by C per matchare la lunghezza di Z.
+                wavlm_feats = F.avg_pool1d(enc_features.transpose(1, 2), kernel_size=C, stride=C)
                 wavlm_feats = wavlm_feats.transpose(1, 2) # [B, T_mel // C, D]
                 
                 # Gestione di lievi discrepanze temporali dovute agli arrotondamenti
@@ -252,12 +234,12 @@ def main(cfg: DictConfig):
     vae_model.to(device)
     vae_model.eval()
     
-    print("Loading WavLMFeatureExtractor...")
-    if getattr(vae_model.config, "wavlm_config", None) is not None:
+    print("Impostazione WavLMFeatureExtractor dal VAE...")
+    if getattr(vae_model, "wavlm_extractor", None) is not None:
+        wavlm_extractor = vae_model.wavlm_extractor
         print(f"Usando WavLM config dal checkpoint: {vae_model.config.wavlm_config.pretrained_model_name}")
-        wavlm_extractor = WavLMFeatureExtractor(config=vae_model.config.wavlm_config).to(device)
     else:
-        print("Usando WavLM config di default")
+        print("Il VAE non usa WavLM come encoder_input. Fallback.")
         wavlm_config = WavLMConfig()
         wavlm_extractor = WavLMFeatureExtractor(config=wavlm_config).to(device)
     wavlm_extractor.eval()
