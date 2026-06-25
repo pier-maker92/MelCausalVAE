@@ -92,31 +92,37 @@ def train_projectors(dataloader, wavlm_extractor, vae_model, device, cfg):
 
             # --- ESTRAZIONE FEATURE ---
             with torch.no_grad():
-                # 1. Feature Mel e VAE Latent Z
-                # Utilizziamo extract_features per ottenere il padding_mask e il T_mel
-                enc_features, enc_padding_mask, _, _, _ = vae_model.extract_features(audios_srs)
-                T_mel = enc_features.shape[1]
+                # 1. Feature Mel per ottenere T_mel (molto veloce)
+                mel_output = vae_model.feature_extractor(audios_srs)
+                T_mel = mel_output.audio_features.shape[1]
                 
-                # Encode per ottenere il latente Z
-                encoder_output = vae_model.encode(enc_features, enc_padding_mask)
-                z = encoder_output.z # [B, T_z, C]
-                
-                # 2. Feature WavLM
+                # 2. Estrai WavLM (una sola volta!)
                 wavlm_output = wavlm_extractor(audios_srs)
-                wavlm_feats = wavlm_output.audio_features # [B, T_w, D]
+                wavlm_feats_raw = wavlm_output.audio_features # [B, T_w, D]
                 
-                # 3. Allineamento temporale (come specificato)
+                # 3. Allineamento temporale WavLM -> T_mel
                 # a) Causal upsample x2 (repeat)
-                wavlm_feats = wavlm_feats.repeat_interleave(2, dim=1) # [B, 2*T_w, D]
+                wavlm_feats_aligned = wavlm_feats_raw.repeat_interleave(2, dim=1) # [B, 2*T_w, D]
                 # b) Interpolate to match Mel spectrogram length
-                wavlm_feats = F.interpolate(
-                    wavlm_feats.float().transpose(1, 2),
+                wavlm_feats_aligned = F.interpolate(
+                    wavlm_feats_aligned.float().transpose(1, 2),
                     size=T_mel,
                     mode="linear",
                     align_corners=False,
-                ) # [B, D, T_mel]
-                # c) Avg pooling by compress_factor_C
-                wavlm_feats = F.avg_pool1d(wavlm_feats, kernel_size=C, stride=C) # [B, D, T_mel // C]
+                ).transpose(1, 2).to(wavlm_feats_raw.dtype) # [B, T_mel, D]
+                
+                enc_padding_mask = F.interpolate(
+                    wavlm_output.padding_mask.float().unsqueeze(1),
+                    size=T_mel,
+                    mode="nearest",
+                ).squeeze(1).bool()
+                
+                # 4. Encode per ottenere il latente Z
+                encoder_output = vae_model.encode(wavlm_feats_aligned, enc_padding_mask)
+                z = encoder_output.z # [B, T_z, C]
+                
+                # 5. Downsample WavLM per i proiettori (Avg pooling by C)
+                wavlm_feats = F.avg_pool1d(wavlm_feats_aligned.transpose(1, 2), kernel_size=C, stride=C) # [B, D, T_mel // C]
                 wavlm_feats = wavlm_feats.transpose(1, 2) # [B, T_mel // C, D]
                 
                 # Gestione di lievi discrepanze temporali dovute agli arrotondamenti
