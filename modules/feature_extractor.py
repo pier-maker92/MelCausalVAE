@@ -83,6 +83,7 @@ class FeatureExtractor(nn.Module):
         sr = unique_sampling_rates.pop()
         if sr != self.sampling_rate:
             import torchaudio.functional as F
+
             audios = [F.resample(audio, sr, self.sampling_rate) for audio in audios]
         dtype = audios[0].dtype
         device = audios[0].device
@@ -159,17 +160,19 @@ class WavLMFeatureExtractor(nn.Module):
     ):
         super().__init__()
         if WavLMModel is None:
-            raise ImportError("transformers is not installed. Please install it using `pip install transformers` to use WavLMFeatureExtractor.")
-            
+            raise ImportError(
+                "transformers is not installed. Please install it using `pip install transformers` to use WavLMFeatureExtractor."
+            )
+
         self.sampling_rate = config.sampling_rate
         self.layer = config.layer
         self.normalize = config.normalize
-        
+
         self.wavlm = WavLMModel.from_pretrained(config.pretrained_model_name)
         self.wavlm.eval()
         for param in self.wavlm.parameters():
             param.requires_grad = False
-            
+
         self.register_buffer("std", torch.tensor(1.0))
         self.register_buffer("mean", torch.tensor(0.0))
 
@@ -181,7 +184,7 @@ class WavLMFeatureExtractor(nn.Module):
         if valid_features.numel() > 0:
             self.std.copy_(self.std * 0.99 + valid_features.std() * 0.01)
             self.mean.copy_(self.mean * 0.99 + valid_features.mean() * 0.01)
-            
+
     def forward(self, audios_srs: List[Tuple[torch.FloatTensor, int]], **kwargs):
         audios, sampling_rates = zip(*audios_srs)
         unique_sampling_rates = set(sampling_rates)
@@ -194,11 +197,12 @@ class WavLMFeatureExtractor(nn.Module):
         sr = unique_sampling_rates.pop()
         if sr != self.sampling_rate:
             import torchaudio.functional as F
+
             audios = [F.resample(audio, sr, self.sampling_rate) for audio in audios]
-        
+
         dtype = audios[0].dtype
         device = audios[0].device
-        
+
         if len(audios) > 1:
             max_length = max(audio.size(-1) for audio in audios)
             batch_size = len(audios)
@@ -229,12 +233,12 @@ class WavLMFeatureExtractor(nn.Module):
             outputs = self.wavlm(
                 padded_audios.float(),  # WavLM weights are always fp32
                 attention_mask=(~padding_mask).long(),
-                output_hidden_states=True
+                output_hidden_states=True,
             )
             features = outputs.hidden_states[self.layer]
-            
+
         features = features.to(dtype)
-        
+
         feat_padding_mask = (
             torch.nn.functional.interpolate(
                 padding_mask.unsqueeze(1).to(torch.float32),

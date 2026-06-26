@@ -111,6 +111,9 @@ class Encoder(SigmaVAEEncoder):
             self._qd = qd
             tail_dim = config.latent_dim - qd
 
+            # Projection from full latent_dim → bsq dim_to_quantize before quantization
+            self.bsq_pre_proj = nn.Linear(config.latent_dim, qd)
+
             if tail_dim > 0:
                 self.ortho_proj_head = nn.Linear(qd, qd)
                 self.ortho_proj_tail = nn.Linear(tail_dim, qd)
@@ -165,9 +168,9 @@ class Encoder(SigmaVAEEncoder):
         if hasattr(self, "vq"):
             for param in self.vq.parameters():
                 param.requires_grad = True
-        # if hasattr(self, "vq_pre_proj"):
-        #     for param in self.vq_pre_proj.parameters():
-        #         param.requires_grad = True
+        if hasattr(self, "bsq_pre_proj"):
+            for param in self.bsq_pre_proj.parameters():
+                param.requires_grad = True
 
     def forward(
         self,
@@ -243,7 +246,10 @@ class Encoder(SigmaVAEEncoder):
         # vq
         if hasattr(self, "vq"):
             qd = self._qd
-            mu_head = mu[..., :qd]
+            if hasattr(self, "bsq_pre_proj"):
+                mu_head = self.bsq_pre_proj(mu)
+            else:
+                mu_head = mu[..., :qd]
             mu_tail = mu[..., qd:]
 
             ortho_weight = 1.0

@@ -1,6 +1,6 @@
 # Configurazione Dataset
 dataset_name: librispeech_aligned # oppure mls, libritts, ecc.
-num_workers: 0
+num_workers: 8
 
 # Modello MelCausalVAE
 checkpoint_dir: checkpoints/wavlm_64_chunk_4
@@ -9,17 +9,24 @@ checkpoint_dir: checkpoints/wavlm_64_chunk_4
 components:
   phonetic:
     start: 0
-    end: 20
+    end: 8
   prosody:
-    start: 20
-    end: 40
+    start: 8
+    end: 24
   timbre:
-    start: 40
+    start: 24
     end: 64
 
 # Iperparametri di addestramento
 epochs: 100
-lr: 0.001
-lambda_ortho: 0.1
+lr: 1e-3
 log_every: 1
-batch_size: 2
+batch_size: 12
+use_bfloat16: True
+mlp_layers: 0
+mlp_hidden_dim: 256
+decode_every: 100  # Ogni quanti steps decodificare e salvare audio (0 = disabilitato)
+
+# Parametri per la Soft Orthogonality
+use_soft_orthogonality: True
+soft_ortho_lambda: 100.0

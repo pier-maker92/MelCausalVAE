@@ -919,6 +919,12 @@ def main(cfg: DictConfig):
                 param.requires_grad = True
         logger.info("Encoder frozen (vq_pre_proj kept trainable).")
 
+    freeze_decoder = training_cfg.pop("freeze_decoder", False)
+    if freeze_decoder:
+        for param in model.decoder.parameters():
+            param.requires_grad = False
+        logger.info("Decoder frozen.")
+
     if "lr_scheduler_type" not in training_cfg:
         training_cfg["lr_scheduler_type"] = "constant"
 
