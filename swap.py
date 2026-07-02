@@ -128,11 +128,28 @@ def main(args):
             # Get input tail
             tail_in = out_in.tail  # [B, T_in, tail_dim] or None
 
-            # Get target tail (interpolated to match input length)
+            # Get target tail (interpolated or averaged to match input length)
             tail_tg = None
             if out_tg.tail is not None:
                 tail_tg = out_tg.tail  # [B, T_tg, tail_dim]
-                if tail_tg.shape[1] != T_in:
+
+                if getattr(args, "temporal_smooth", False):
+                    k = getattr(args, "smooth_size", 5)
+                    pad_left = k // 2
+                    pad_right = k - 1 - pad_left
+                    tail_tg_perm = tail_tg.permute(0, 2, 1)  # [B, tail_dim, T_tg]
+                    tail_tg_pad = torch.nn.functional.pad(
+                        tail_tg_perm, (pad_left, pad_right), mode="replicate"
+                    )
+                    tail_tg = torch.nn.functional.avg_pool1d(
+                        tail_tg_pad, kernel_size=k, stride=1
+                    )
+                    tail_tg = tail_tg.permute(0, 2, 1)
+
+                if getattr(args, "target_avg", False):
+                    # Average over time and expand to T_in
+                    tail_tg = tail_tg.mean(dim=1, keepdim=True).expand(-1, T_in, -1)
+                elif tail_tg.shape[1] != T_in:
                     tail_tg = tail_tg.permute(0, 2, 1)
                     tail_tg = torch.nn.functional.interpolate(
                         tail_tg, size=T_in, mode="linear", align_corners=False
@@ -141,10 +158,6 @@ def main(args):
 
             chunk_size = args.chunk_size
             n_chunks = tail_dim // chunk_size
-            in_chunks = args.chunk_idx if args.chunk_idx is not None else n_chunks
-            tg_chunks = (
-                args.target_chunk_idx if args.target_chunk_idx is not None else 0
-            )
 
             # Build tail as zeros, then fill in
             tail = torch.zeros(
@@ -155,32 +168,42 @@ def main(args):
                 dtype=context_vector.dtype,
             )
 
-            # Fill first in_chunks from input
-            in_keep = min(in_chunks * chunk_size, tail_dim)
-            if in_keep > 0 and tail_in is not None:
-                tail[..., :in_keep] = tail_in[..., :in_keep]
-
-            # Fill last tg_chunks from target
-            tg_keep = min(tg_chunks * chunk_size, tail_dim)
-            if tg_keep > 0 and tail_tg is not None:
-                tail[..., -tg_keep:] = tail_tg[..., -tg_keep:]
-
-            if in_keep < tail_dim or tg_keep > 0:
+            if args.target_start_chunk is not None and args.target_end_chunk is not None:
+                # Mode: Zeros everywhere except for the specified chunk range from TARGET
+                start_idx = min(args.target_start_chunk * chunk_size, tail_dim)
+                end_idx = min(args.target_end_chunk * chunk_size, tail_dim)
+                if tail_tg is not None:
+                    tail[..., start_idx:end_idx] = tail_tg[..., start_idx:end_idx]
                 print(
                     f"Tail ({tail_dim}d, {n_chunks} chunks of {chunk_size}): "
-                    f"input[:{ in_keep}] + zeros[{in_keep}:{tail_dim - tg_keep}] + target[{tail_dim - tg_keep}:]"
+                    f"zeros everywhere except target[{start_idx}:{end_idx}]"
                 )
+            else:
+                in_chunks = args.chunk_idx if args.chunk_idx is not None else n_chunks
+                tg_chunks = args.target_chunk_idx if args.target_chunk_idx is not None else 0
+
+                # Fill first in_chunks from input
+                in_keep = min(in_chunks * chunk_size, tail_dim)
+                if in_keep > 0 and tail_in is not None:
+                    tail[..., :in_keep] = tail_in[..., :in_keep]
+
+                # Fill last tg_chunks from target
+                tg_keep = min(tg_chunks * chunk_size, tail_dim)
+                if tg_keep > 0 and tail_tg is not None:
+                    tail[..., -tg_keep:] = tail_tg[..., -tg_keep:]
+
+                if in_keep < tail_dim or tg_keep > 0:
+                    print(
+                        f"Tail ({tail_dim}d, {n_chunks} chunks of {chunk_size}): "
+                        f"input[:{in_keep}] + zeros[{in_keep}:{tail_dim - tg_keep}] + target[{tail_dim - tg_keep}:]"
+                    )
 
             context_vector[..., qd:] += tail
 
         padding_mask = out_in.padding_mask
 
-        # Use the speaker embedding from the target audio
+        # Use the speaker embedding from the target audio (may be None if no instance norm)
         speaker_embedding_tg = getattr(out_tg, "speaker_embedding", None)
-        if speaker_embedding_tg is None:
-            raise RuntimeError(
-                "target speaker embedding is None. Ensure the model was trained with use_instance_norm=True."
-            )
 
         # Decode the mixed latent representation
         reconstructed_mel, reconstructed_padding_mask = model.sample(
@@ -248,12 +271,40 @@ if __name__ == "__main__":
         help="Number of tail chunks to keep from TARGET (from end). Default: 0",
     )
     parser.add_argument(
+        "--target_start_chunk",
+        type=int,
+        default=None,
+        help="Start chunk index to copy from TARGET tail (source tail will be zeros)",
+    )
+    parser.add_argument(
+        "--target_end_chunk",
+        type=int,
+        default=None,
+        help="End chunk index to copy from TARGET tail",
+    )
+    parser.add_argument(
         "--chunk_size", type=int, default=2, help="Size of each tail chunk (default: 2)"
     )
     parser.add_argument(
         "--guide_only_speaker",
         action="store_true",
         help="Apply guidance scale only to speaker embedding",
+    )
+    parser.add_argument(
+        "--target_avg",
+        action="store_true",
+        help="Average the target tail over time before applying it to the source",
+    )
+    parser.add_argument(
+        "--temporal_smooth",
+        action="store_true",
+        help="Apply temporal smoothing to the target tail",
+    )
+    parser.add_argument(
+        "--smooth_size",
+        type=int,
+        default=5,
+        help="Window size (in frames) for temporal smoothing",
     )
 
     args = parser.parse_args()
