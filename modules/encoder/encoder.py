@@ -396,10 +396,10 @@ class Encoder(SigmaVAEEncoder):
             # To drop the residual part inside z_semantic, we can't easily do it if it's already added.
             # I will skip the residual dropout here for simplicity, or we should drop it before addition.
 
-        kl_loss = None
+        kl_loss = torch.tensor(0.0, device=z_acoustic.device)
         kl_weight = self.get_kl_cosine_schedule(kwargs["step"]) if kwargs.get("step", None) is not None else 0.0
         # KL loss computation
-        if self.training and kl_weight > 0.0:
+        if self.training:
             if hasattr(self, "vq") and self.add_vq_residual_to_stoch and getattr(self, "semantic_downsample_factor", 1) > 1:
                 # We must compute KL for head and tail separately because they have different lengths!
                 _qd = self._qd
@@ -417,7 +417,7 @@ class Encoder(SigmaVAEEncoder):
                     vq_dict["mu_stoch_head"],
                     vq_dict["logvar_head"],
                     padding_mask_vq,
-                    dtype=z_semantic.dtype,
+                    dtype=z_semantic.dtype if z_semantic is not None else z_acoustic.dtype,
                 )
                 kl_term = kl_term_tail + kl_term_head
             else:

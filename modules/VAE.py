@@ -319,52 +319,13 @@ class VAE(torch.nn.Module):
             if vq_flags:
                 logger.warning(
                     "VQ flags %s were passed but this model has no VQ — "
-                    "using encoder_output.z directly (flags have no effect).",
+                    "using encoder_output.z_acoustic directly (flags have no effect).",
                     vq_flags,
                 )
-            context_vector = encoder_output.z.clone()
-            chunk_idx = kwargs.get("chunk")
-            exclude_chunk_idx = kwargs.get("exclude_chunk")
-            exclude_start = kwargs.get("exclude_start_chunk")
-            exclude_end = kwargs.get("exclude_end_chunk")
-            if chunk_idx is not None or exclude_chunk_idx is not None or (exclude_start is not None and exclude_end is not None):
-                chunk_size = 2
-                if kwargs.get("chunk_size") is not None:
-                    chunk_size = kwargs.get("chunk_size")
-                elif hasattr(self.config.encoder_config, "kl_chunk_regularizer_config") and self.config.encoder_config.kl_chunk_regularizer_config is not None:
-                    chunk_size = self.config.encoder_config.kl_chunk_regularizer_config.chunk_size
-                
-                mask = torch.ones_like(context_vector)
-                if chunk_idx is not None:
-                    keep_dim = chunk_idx * chunk_size
-                    if context_vector.shape[-1] > keep_dim:
-                        mask[..., keep_dim:] = 0.0
-                        
-                if exclude_chunk_idx is not None:
-                    exclude_dim = exclude_chunk_idx * chunk_size
-                    if context_vector.shape[-1] >= exclude_dim:
-                        mask[..., :exclude_dim] = 0.0
-                    else:
-                        mask[..., :] = 0.0
-                
-                if exclude_start is not None and exclude_end is not None:
-                    start_dim = exclude_start * chunk_size
-                    end_dim = exclude_end * chunk_size
-                    if context_vector.shape[-1] >= end_dim:
-                        mask[..., start_dim:end_dim] = 0.0
-                    elif context_vector.shape[-1] > start_dim:
-                        mask[..., start_dim:] = 0.0
-                        
-                context_vector = context_vector * mask
-        else:
-            context_vector = torch.zeros_like(encoder_output.z)
-            qd = self.encoder._qd
-            if kwargs.get("quantized", True) and encoder_output.quantized is not None:
-                context_vector[..., :qd] += encoder_output.quantized
-            if kwargs.get("residual", True) and encoder_output.residual is not None:
-                context_vector[..., :qd] += encoder_output.residual
-            if kwargs.get("tail", True) and encoder_output.tail is not None:
-                tail = encoder_output.tail
+            z_semantic = encoder_output.z_semantic
+            z_acoustic = encoder_output.z_acoustic.clone() if encoder_output.z_acoustic is not None else None
+            
+            if z_acoustic is not None:
                 chunk_idx = kwargs.get("chunk")
                 exclude_chunk_idx = kwargs.get("exclude_chunk")
                 exclude_start = kwargs.get("exclude_start_chunk")
@@ -376,29 +337,84 @@ class VAE(torch.nn.Module):
                     elif hasattr(self.config.encoder_config, "kl_chunk_regularizer_config") and self.config.encoder_config.kl_chunk_regularizer_config is not None:
                         chunk_size = self.config.encoder_config.kl_chunk_regularizer_config.chunk_size
                     
-                    tail_mask = torch.ones_like(tail)
+                    mask = torch.ones_like(z_acoustic)
                     if chunk_idx is not None:
                         keep_dim = chunk_idx * chunk_size
-                        if tail.shape[-1] > keep_dim:
-                            tail_mask[..., keep_dim:] = 0.0
+                        if z_acoustic.shape[-1] > keep_dim:
+                            mask[..., keep_dim:] = 0.0
                             
                     if exclude_chunk_idx is not None:
                         exclude_dim = exclude_chunk_idx * chunk_size
-                        if tail.shape[-1] >= exclude_dim:
-                            tail_mask[..., :exclude_dim] = 0.0
+                        if z_acoustic.shape[-1] >= exclude_dim:
+                            mask[..., :exclude_dim] = 0.0
                         else:
-                            tail_mask[..., :] = 0.0
-                            
+                            mask[..., :] = 0.0
+                    
                     if exclude_start is not None and exclude_end is not None:
                         start_dim = exclude_start * chunk_size
                         end_dim = exclude_end * chunk_size
-                        if tail.shape[-1] >= end_dim:
-                            tail_mask[..., start_dim:end_dim] = 0.0
-                        elif tail.shape[-1] > start_dim:
-                            tail_mask[..., start_dim:] = 0.0
+                        if z_acoustic.shape[-1] >= end_dim:
+                            mask[..., start_dim:end_dim] = 0.0
+                        elif z_acoustic.shape[-1] > start_dim:
+                            mask[..., start_dim:] = 0.0
                             
-                    tail = tail * tail_mask
-                context_vector[..., qd:] += tail
+                    z_acoustic = z_acoustic * mask
+        else:
+            # Semantic part
+            if getattr(encoder_output, "quantized", None) is not None:
+                z_semantic = torch.zeros_like(encoder_output.quantized)
+            elif getattr(encoder_output, "residual", None) is not None:
+                z_semantic = torch.zeros_like(encoder_output.residual)
+            else:
+                z_semantic = None
+
+            if z_semantic is not None:
+                if kwargs.get("quantized", True) and encoder_output.quantized is not None:
+                    z_semantic += encoder_output.quantized
+                if kwargs.get("residual", True) and encoder_output.residual is not None:
+                    z_semantic += encoder_output.residual
+                    
+            # Acoustic part
+            if getattr(encoder_output, "tail", None) is not None:
+                z_acoustic = torch.zeros_like(encoder_output.tail)
+                if kwargs.get("tail", True):
+                    tail = encoder_output.tail.clone()
+                    chunk_idx = kwargs.get("chunk")
+                    exclude_chunk_idx = kwargs.get("exclude_chunk")
+                    exclude_start = kwargs.get("exclude_start_chunk")
+                    exclude_end = kwargs.get("exclude_end_chunk")
+                    if chunk_idx is not None or exclude_chunk_idx is not None or (exclude_start is not None and exclude_end is not None):
+                        chunk_size = 2
+                        if kwargs.get("chunk_size") is not None:
+                            chunk_size = kwargs.get("chunk_size")
+                        elif hasattr(self.config.encoder_config, "kl_chunk_regularizer_config") and self.config.encoder_config.kl_chunk_regularizer_config is not None:
+                            chunk_size = self.config.encoder_config.kl_chunk_regularizer_config.chunk_size
+                        
+                        tail_mask = torch.ones_like(tail)
+                        if chunk_idx is not None:
+                            keep_dim = chunk_idx * chunk_size
+                            if tail.shape[-1] > keep_dim:
+                                tail_mask[..., keep_dim:] = 0.0
+                                
+                        if exclude_chunk_idx is not None:
+                            exclude_dim = exclude_chunk_idx * chunk_size
+                            if tail.shape[-1] >= exclude_dim:
+                                tail_mask[..., :exclude_dim] = 0.0
+                            else:
+                                tail_mask[..., :] = 0.0
+                                
+                        if exclude_start is not None and exclude_end is not None:
+                            start_dim = exclude_start * chunk_size
+                            end_dim = exclude_end * chunk_size
+                            if tail.shape[-1] >= end_dim:
+                                tail_mask[..., start_dim:end_dim] = 0.0
+                            elif tail.shape[-1] > start_dim:
+                                tail_mask[..., start_dim:] = 0.0
+                                
+                        tail = tail * tail_mask
+                    z_acoustic += tail
+            else:
+                z_acoustic = None
 
         speaker_embedding = getattr(encoder_output, "speaker_embedding", None)
         if kwargs.get("zero_speaker", False) and speaker_embedding is not None:
@@ -408,7 +424,8 @@ class VAE(torch.nn.Module):
             num_steps=num_steps,
             temperature=temperature,
             guidance_scale=guidance_scale,
-            z=context_vector,
+            z_semantic=z_semantic,
+            z_acoustic=z_acoustic,
             generator=generator,
             padding_mask=encoder_output.padding_mask,
             speaker_embedding=speaker_embedding,
