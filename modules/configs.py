@@ -1,6 +1,20 @@
 from typing import Optional, List
 from dataclasses import dataclass, field, asdict
 import json
+import warnings
+
+class DeprecatedConfigMixin:
+    @property
+    def deprecated_attributes(self):
+        """Returns a dict mapping deprecated attribute names to a tuple of (default_value, warning_message)."""
+        return {}
+
+    def check_deprecated(self):
+        for attr, (default_val, msg) in self.deprecated_attributes.items():
+            if hasattr(self, attr):
+                val = getattr(self, attr)
+                if val != default_val:
+                    warnings.warn(f"Deprecated feature '{attr}' used: {msg}", DeprecationWarning, stacklevel=2)
 
 
 #########################
@@ -9,7 +23,7 @@ import json
 
 
 @dataclass
-class SigmaVAEEncoderConfig:
+class SigmaVAEEncoderConfig(DeprecatedConfigMixin):
     latent_dim: int = 64
     target_std: float = 1.0
     logvar_layer: bool = False
@@ -21,6 +35,15 @@ class SigmaVAEEncoderConfig:
     use_reparameterization_trick: bool = False
     use_instance_norm: bool = False
 
+    @property
+    def deprecated_attributes(self):
+        return {
+            "use_slt": (False, "use_slt is no longer supported and will be ignored.")
+        }
+
+    def __post_init__(self):
+        self.check_deprecated()
+
 
 @dataclass
 class RegularizationConfig:
@@ -28,7 +51,7 @@ class RegularizationConfig:
 
 
 @dataclass
-class DropoutConfig(RegularizationConfig):
+class DropoutConfig(RegularizationConfig, DeprecatedConfigMixin):
     dropout_start: float = 0.0
     dropout_end: float = 0.8
     dropout_hierarchical: bool = False  # independent dropout for each chunk
@@ -36,6 +59,15 @@ class DropoutConfig(RegularizationConfig):
     k: float = 1.0
     x0: float = 0.0
     pre_quantization: bool = False
+
+    @property
+    def deprecated_attributes(self):
+        return {
+            "pre_quantization": (False, "pre_quantization is deprecated. Dropout is now always applied before quantization.")
+        }
+
+    def __post_init__(self):
+        self.check_deprecated()
 
 
 @dataclass
@@ -48,7 +80,7 @@ class KLChunkRegularizer(RegularizationConfig):
 
 
 @dataclass
-class NoiseConfig(RegularizationConfig):
+class NoiseConfig(RegularizationConfig, DeprecatedConfigMixin):
     noise_start: float = 0.0
     noise_end: float = 1.0
     strategy: str = "linear"  # linear | sigmoid
@@ -58,6 +90,15 @@ class NoiseConfig(RegularizationConfig):
     sigma_type: str = "fixed"  # fixed | stochastic
     use_softplus: bool = False
     pre_quantization: bool = False
+
+    @property
+    def deprecated_attributes(self):
+        return {
+            "pre_quantization": (False, "pre_quantization is deprecated. Noise is now always applied before quantization.")
+        }
+
+    def __post_init__(self):
+        self.check_deprecated()
 
 
 @dataclass
