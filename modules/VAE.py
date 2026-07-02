@@ -43,8 +43,28 @@ class VAE(torch.nn.Module):
         self.encoder = Encoder(config.encoder_config)
         self.decoder = DiT(config.decoder_config)
 
+        self.semantic_downsample_factor = getattr(config.encoder_config, "semantic_downsample_factor", 1)
+        if self.semantic_downsample_factor > 1:
+            from .encoder.utils import TimeCausalConv1d
+            qd = config.encoder_config.vq_config.dim_to_quantize if config.encoder_config.vq_config else config.encoder_config.latent_dim
+            # Upsampler: casual Conv1d. We will use repeat_interleave and then a causal Conv1d for smoothing, 
+            # or just a causal Conv1d with stride=1 to smooth after repeat.
+            self.semantic_upsampler_conv = TimeCausalConv1d(
+                qd, qd, k=self.semantic_downsample_factor * 2, d=1, s=1
+            )
+
         count_parameters_by_module(self.encoder, "Encoder")
         count_parameters_by_module(self.decoder, "Decoder")
+
+    def semantic_upsample(self, z_semantic):
+        if self.semantic_downsample_factor <= 1 or z_semantic is None:
+            return z_semantic
+        # z_semantic is [B, T/factor, qd]
+        z_semantic = z_semantic.repeat_interleave(self.semantic_downsample_factor, dim=1)
+        z_semantic = z_semantic.transpose(1, 2)
+        z_semantic = self.semantic_upsampler_conv(z_semantic)
+        z_semantic = z_semantic.transpose(1, 2)
+        return z_semantic
 
     def from_pretrained(self, checkpoint_path: str):
         state_dict = safetensors.torch.load_file(
@@ -103,6 +123,37 @@ class VAE(torch.nn.Module):
         )
         return encoder_output
 
+    def decode(
+        self,
+        z_semantic: Optional[torch.Tensor],
+        z_acoustic: Optional[torch.Tensor],
+        target_features: Optional[torch.Tensor],
+        target_padding_mask: Optional[torch.BoolTensor],
+        speaker_embedding: Optional[torch.FloatTensor] = None,
+    ):
+        z_semantic = self.semantic_upsample(z_semantic)
+        if z_semantic is not None and z_acoustic is not None:
+            # We must ensure they have exactly the same length if padding or rounding caused differences
+            min_len = min(z_semantic.shape[1], z_acoustic.shape[1])
+            z_semantic = z_semantic[:, :min_len, :]
+            z_acoustic = z_acoustic[:, :min_len, :]
+            z = torch.cat([z_semantic, z_acoustic], dim=-1)
+        else:
+            z = z_acoustic if z_semantic is None else z_semantic
+
+        if target_features is not None and target_padding_mask is not None:
+            # truncate target to match z
+            target_features = target_features[:, :z.shape[1], :]
+            target_padding_mask = target_padding_mask[:, :z.shape[1]]
+            
+        decoder_output = self.decoder(
+            target=target_features,
+            target_padding_mask=target_padding_mask,
+            context_vector=z,
+            speaker_embedding=speaker_embedding,
+        )
+        return decoder_output
+
     def forward(self, audios_srs, **kwargs):
         # extract features
         (
@@ -116,12 +167,14 @@ class VAE(torch.nn.Module):
         encoder_output = self.encode(enc_features, enc_padding_mask, **kwargs)
 
         # decode from latent space
-        audio_loss = self.decoder(
-            target=dec_features,
+        decoder_output = self.decode(
+            z_semantic=encoder_output.z_semantic,
+            z_acoustic=encoder_output.z_acoustic,
+            target_features=dec_features,
             target_padding_mask=dec_padding_mask,
-            context_vector=encoder_output.z,
             speaker_embedding=getattr(encoder_output, "speaker_embedding", None),
-        ).loss
+        )
+        audio_loss = decoder_output.loss
 
         mu_mean = encoder_output.mu[
             ~encoder_output.padding_mask
@@ -200,16 +253,26 @@ class VAE(torch.nn.Module):
         num_steps: int = 4,
         temperature: float = 1.0,
         guidance_scale: float = 1.0,
-        z: Optional[torch.Tensor] = None,
-        mu: Optional[torch.Tensor] = None,
+        z_semantic: Optional[torch.Tensor] = None,
+        z_acoustic: Optional[torch.Tensor] = None,
         generator: Optional[torch.Generator] = None,
         padding_mask: Optional[torch.BoolTensor] = None,
         speaker_embedding: Optional[torch.FloatTensor] = None,
         guide_only_speaker: bool = False,
         **kwargs,
     ):
-        assert z is not None or mu is not None, "Either z or mu must be provided"
-        context_vector = z if z is not None else mu
+        assert z_semantic is not None or z_acoustic is not None, "Either z_semantic or z_acoustic must be provided"
+        
+        z_semantic = self.semantic_upsample(z_semantic)
+        if z_semantic is not None and z_acoustic is not None:
+            min_len = min(z_semantic.shape[1], z_acoustic.shape[1])
+            z_semantic = z_semantic[:, :min_len, :]
+            z_acoustic = z_acoustic[:, :min_len, :]
+            z = torch.cat([z_semantic, z_acoustic], dim=-1)
+        else:
+            z = z_acoustic if z_semantic is None else z_semantic
+
+        context_vector = z
         decoder_output = self.decoder.generate(
             num_steps=num_steps,
             generator=generator,

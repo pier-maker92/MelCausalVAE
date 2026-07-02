@@ -150,6 +150,7 @@ class EncoderConfig(SigmaVAEEncoderConfig):
     drop_p: float = 0.1
     n_residual_blocks: int = 3
     freeze_encoder_before_latent_heads: bool = False
+    semantic_downsample_factor: int = 1
     # Optional Modules
     vq_config: Optional[VQConfig] = None
     bsq_config: Optional[BSQConfig] = None

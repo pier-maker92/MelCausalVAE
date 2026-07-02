@@ -22,7 +22,8 @@ class VQVAEOutput(ModelOutput):
 
 @dataclass
 class EncoderOutput(ModelOutput):
-    z: Optional[torch.FloatTensor] = None
+    z_semantic: Optional[torch.FloatTensor] = None
+    z_acoustic: Optional[torch.FloatTensor] = None
     kl_loss: Optional[torch.FloatTensor] = None
     padding_mask: Optional[torch.BoolTensor] = None
     mu: Optional[torch.FloatTensor] = None
