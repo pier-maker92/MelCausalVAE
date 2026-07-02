@@ -92,10 +92,6 @@ class Encoder(SigmaVAEEncoder):
             self._qd = qd
             tail_dim = config.latent_dim - qd
 
-            if tail_dim > 0:
-                self.ortho_proj_head = nn.Linear(qd, qd)
-                self.ortho_proj_tail = nn.Linear(tail_dim, qd)
-
         elif config.bsq_config:
             if config.bsq_config.dim_to_quantize > config.latent_dim:
                 raise ValueError(
@@ -111,25 +107,10 @@ class Encoder(SigmaVAEEncoder):
             self._qd = qd
             tail_dim = config.latent_dim - qd
 
-            # Projection from full latent_dim → bsq dim_to_quantize before quantization
-            self.bsq_pre_proj = nn.Linear(config.latent_dim, qd)
-
-            if tail_dim > 0:
-                self.ortho_proj_head = nn.Linear(qd, qd)
-                self.ortho_proj_tail = nn.Linear(tail_dim, qd)
-
-        # if hasattr(self, "vq"):
-        #     self.vq_pre_proj = nn.Linear(self._qd, self._qd)
-
         if config.dropout_regularizer_config:
             self.dropout_regularizer = DropoutRegularizer(
                 config=config.dropout_regularizer_config
             )
-            self.use_pre_quant_dropout = (
-                config.dropout_regularizer_config.pre_quantization
-            )
-        else:
-            self.use_pre_quant_dropout = False
 
         if config.kl_chunk_regularizer_config:
             self.kl_chunk_regularizer = KLChunkRegularizer(
@@ -151,12 +132,6 @@ class Encoder(SigmaVAEEncoder):
 
         self.config = config
 
-    def slt(self, x: torch.FloatTensor):
-        """The sign-log transform
-        f(x) = sign(x) ln(|x| + 1)
-        """
-        return x.sign() * (x.abs() + 1).log()
-
     def _freeze_encoder_before_latent_heads(self):
         for param in self.parameters():
             param.requires_grad = False
@@ -168,9 +143,142 @@ class Encoder(SigmaVAEEncoder):
         if hasattr(self, "vq"):
             for param in self.vq.parameters():
                 param.requires_grad = True
-        if hasattr(self, "bsq_pre_proj"):
-            for param in self.bsq_pre_proj.parameters():
-                param.requires_grad = True
+
+    def _apply_instance_norm(self, mu, padding_mask):
+        valid_mask = ~padding_mask
+
+        valid_lens = valid_mask.sum(dim=1, keepdim=True).float()
+        valid_lens = valid_lens.clamp(min=1.0)
+        valid_lens = valid_lens.unsqueeze(-1)
+        valid_mask_expanded = valid_mask.unsqueeze(-1).to(mu.dtype)
+
+        spk_mu = (mu * valid_mask_expanded).sum(dim=1, keepdim=True) / valid_lens
+        spk_variance = (((mu - spk_mu) ** 2) * valid_mask_expanded).sum(
+            dim=1, keepdim=True
+        ) / valid_lens
+        spk_sigma = torch.sqrt(spk_variance + 1e-6)
+
+        mu = (mu - spk_mu) / (spk_sigma + 1e-6)
+        mu = mu * valid_mask_expanded
+
+        speaker_embedding = torch.cat([spk_mu.squeeze(1), spk_sigma.squeeze(1)], dim=-1)
+        return mu, speaker_embedding
+
+    def _calculate_ortho_loss(self, mu_head, mu_tail, padding_mask):
+        if mu_tail.shape[-1] == 0:
+            return None
+
+        ortho_weight = 0.0
+        if getattr(self.config, "semantic_distillation_config", None) is not None:
+            ortho_weight = self.config.semantic_distillation_config.ortho_loss_weight
+
+        if ortho_weight <= 0.0:
+            return None
+
+        mask = ~padding_mask
+        h1 = mu_head[mask]
+        h2 = mu_tail[mask]
+
+        beta = (
+            getattr(self.config.semantic_distillation_config, "ortho_beta", 0.01)
+            if getattr(self.config, "semantic_distillation_config", None) is not None
+            else 0.01
+        )
+
+        cos_sim = F.cosine_similarity(h1, h2, dim=-1)
+        abs_cos_sim = torch.abs(cos_sim)
+        mean_abs_cos_sim = abs_cos_sim.mean()
+
+        return (mean_abs_cos_sim - beta) ** 2
+
+    def _quantize_and_sample(self, mu, logvar, padding_mask, step=None):
+        if not hasattr(self, "vq"):
+            if (
+                self.training
+                and getattr(self.config, "use_reparameterization_trick", True)
+                and not hasattr(self, "noise_regularizer")
+            ):
+                z_stoch = self.reparameterize(mu, logvar)
+            else:
+                z_stoch = mu
+            return {
+                "z_quantized": torch.zeros_like(mu),
+                "z_stoch": z_stoch,
+                "mu_stoch": mu,
+                "logvar_stoch": logvar,
+                "ortho_loss": None,
+                "vq_dict": {}
+            }
+        
+        qd = self._qd
+        mu_head = mu[..., :qd]
+        mu_tail = mu[..., qd:]
+
+        ortho_loss = self._calculate_ortho_loss(mu_head, mu_tail, padding_mask)
+
+        vq_out = self.vq(
+            mu_head,
+            padding_mask,
+            global_step=step,
+        )
+        # get z_quantized (straight-through estimator)
+        vq_quantized_ste = mu_head + (vq_out.quantized - mu_head).detach()
+        z_quantized = torch.cat(
+            [vq_quantized_ste, torch.zeros_like(mu_tail)], dim=-1
+        )
+
+        logvar_head = logvar[..., :qd] if logvar is not None else None
+        logvar_tail = logvar[..., qd:] if logvar is not None else None
+
+        # 1. Define stochastic parts and their distributions
+        if self.add_vq_residual_to_stoch:
+            mu_stoch = torch.cat([vq_out.residual, mu_tail], dim=-1)
+            logvar_stoch = logvar  # [B, T, D]
+        else:
+            mu_stoch = mu_tail
+            logvar_stoch = logvar_tail  # [B, T, D-qd]
+
+        # 2. Sample z_stoch (active parts only)
+        if (
+            self.training
+            and getattr(self.config, "use_reparameterization_trick", True)
+            and not hasattr(self, "noise_regularizer")
+        ):
+            z_stoch = self.reparameterize(mu_tail, logvar_tail, std=1.0)
+        else:
+            z_stoch = mu_tail
+
+        if self.add_vq_residual_to_stoch:
+            if (
+                self.training
+                and getattr(self.config, "use_reparameterization_trick", True)
+                and not hasattr(self, "noise_regularizer")
+            ):
+                z_stoch_head = self.reparameterize(
+                    vq_out.residual, logvar_head, std=0.1
+                )
+            else:
+                z_stoch_head = vq_out.residual
+            z_stoch = torch.cat([z_stoch_head, z_stoch], dim=-1)
+
+        vq_dict = {
+            "vq_stats": vq_out.stats,
+            "vq_loss": vq_out.loss,
+            "quantized": vq_quantized_ste,
+            "residual": vq_out.residual,
+            "tail": mu_tail,
+            "indices": vq_out.indices,
+            "mu_head": mu_head,
+        }
+
+        return {
+            "z_quantized": z_quantized,
+            "z_stoch": z_stoch,
+            "mu_stoch": mu_stoch,
+            "logvar_stoch": logvar_stoch,
+            "ortho_loss": ortho_loss,
+            "vq_dict": vq_dict
+        }
 
     def forward(
         self,
@@ -197,173 +305,37 @@ class Encoder(SigmaVAEEncoder):
         h = self.transformer(hiddens)  # [B, T/C, 512]
 
         mu_original = self.mu(h)
-        if getattr(self.config, "use_slt", False):
-            mu_original = self.slt(mu_original)
-
         speaker_embedding = None
         if getattr(self.config, "use_instance_norm", False):
-            # Compute valid mask: True for valid tokens, False for padding
-            if padding_mask is not None:
-                valid_mask = ~padding_mask
-            else:
-                valid_mask = torch.ones(
-                    (mu_original.shape[0], mu_original.shape[1]),
-                    device=mu_original.device,
-                    dtype=torch.bool,
-                )
-
-            valid_lens = valid_mask.sum(dim=1, keepdim=True).float()
-            valid_lens = valid_lens.clamp(min=1.0)
-            valid_lens = valid_lens.unsqueeze(-1)
-            valid_mask_expanded = valid_mask.unsqueeze(-1).to(mu_original.dtype)
-
-            spk_mu = (mu_original * valid_mask_expanded).sum(
-                dim=1, keepdim=True
-            ) / valid_lens
-            spk_variance = (((mu_original - spk_mu) ** 2) * valid_mask_expanded).sum(
-                dim=1, keepdim=True
-            ) / valid_lens
-            spk_sigma = torch.sqrt(spk_variance + 1e-6)
-
-            mu_original = (mu_original - spk_mu) / (spk_sigma + 1e-6)
-            mu_original = mu_original * valid_mask_expanded
-
-            speaker_embedding = torch.cat(
-                [spk_mu.squeeze(1), spk_sigma.squeeze(1)], dim=-1
+            mu_original, speaker_embedding = self._apply_instance_norm(
+                mu_original, padding_mask
             )
 
-        if self.use_pre_quant_dropout:
-            mu = self.dropout_regularizer(mu_original)
-        else:
-            mu = mu_original
+        mu = mu_original
+        if hasattr(self, "dropout_regularizer"):
+            mu = self.dropout_regularizer(mu)
+        if hasattr(self, "noise_regularizer"):
+            mu = self.noise_regularizer(mu)
 
         logvar = None
         if hasattr(self, "logvar"):
             logvar = self.logvar(h)
 
-        z_quantized = torch.zeros_like(mu)
-        ortho_loss = None
-        # vq
-        if hasattr(self, "vq"):
-            qd = self._qd
-            if hasattr(self, "bsq_pre_proj"):
-                mu_head = self.bsq_pre_proj(mu)
-            else:
-                mu_head = mu[..., :qd]
-            mu_tail = mu[..., qd:]
+        q_out = self._quantize_and_sample(mu, logvar, padding_mask, step=kwargs.get("step", None))
+        z_quantized = q_out["z_quantized"]
+        z_stoch = q_out["z_stoch"]
+        mu_stoch = q_out["mu_stoch"]
+        logvar_stoch = q_out["logvar_stoch"]
+        ortho_loss = q_out["ortho_loss"]
+        vq_dict = q_out["vq_dict"]
 
-            ortho_weight = 1.0
-            if getattr(self.config, "semantic_distillation_config", None) is not None:
-                ortho_weight = (
-                    self.config.semantic_distillation_config.ortho_loss_weight
-                )
-
-            if mu_tail.shape[-1] > 0 and ortho_weight > 0.0:
-                mask = ~padding_mask
-                # h1 shape: [N, qd], h2 shape: [N, tail_dim]
-                h1 = mu_head[mask]
-                h2 = mu_tail[mask]
-
-                # 1. Proietta alla stessa dimensione se necessario
-                if hasattr(self, "ortho_proj_head") and hasattr(
-                    self, "ortho_proj_tail"
-                ):
-                    h1_proj = self.ortho_proj_head(h1)
-                    h2_proj = self.ortho_proj_tail(h2)
-                else:
-                    h1_proj = h1
-                    h2_proj = h2
-
-                # 2. Definisci il parametro beta
-                beta = (
-                    getattr(
-                        self.config.semantic_distillation_config, "ortho_beta", 0.01
-                    )
-                    if getattr(self.config, "semantic_distillation_config", None)
-                    is not None
-                    else 0.01
-                )
-
-                # 3. Calcola la Cosine Similarity
-                cos_sim = F.cosine_similarity(h1_proj, h2_proj, dim=-1)
-                abs_cos_sim = torch.abs(cos_sim)
-                mean_abs_cos_sim = abs_cos_sim.mean()
-
-                # 4. Sottrai beta e eleva al quadrato
-                ortho_loss = (mean_abs_cos_sim - beta) ** 2
-
-            if hasattr(self, "vq_pre_proj"):
-                mu_head = self.vq_pre_proj(mu_head)
-
-            vq_out = self.vq(
-                mu_head,
-                padding_mask,
-                global_step=kwargs.get("step", None),
-            )
-            # get z_quantized (straight-through estimator)
-            vq_quantized_ste = mu_head + (vq_out.quantized - mu_head).detach()
-            z_quantized = torch.cat(
-                [vq_quantized_ste, torch.zeros_like(mu_tail)], dim=-1
-            )
-
-            logvar_head = logvar[..., :qd] if logvar is not None else None
-            logvar_tail = logvar[..., qd:] if logvar is not None else None
-
-            # 1. Define stochastic parts and their distributions
-            if self.add_vq_residual_to_stoch:
-                mu_stoch = torch.cat([vq_out.residual, mu_tail], dim=-1)
-                logvar_stoch = logvar  # [B, T, D]
-            else:
-                mu_stoch = mu_tail
-                logvar_stoch = logvar_tail  # [B, T, D-qd]
-
-            # 2. Sample z_stoch (active parts only)
-            if (
-                self.training
-                and getattr(self.config, "use_reparameterization_trick", True)
-                and not hasattr(self, "noise_regularizer")
-            ):
-                z_stoch = self.reparameterize(mu_tail, logvar_tail, std=1.0)
-            else:
-                z_stoch = mu_tail
-
-            if self.add_vq_residual_to_stoch:
-                if (
-                    self.training
-                    and getattr(self.config, "use_reparameterization_trick", True)
-                    and not hasattr(self, "noise_regularizer")
-                ):
-                    z_stoch_head = self.reparameterize(
-                        vq_out.residual, logvar_head, std=0.1
-                    )
-                else:
-                    z_stoch_head = vq_out.residual
-                z_stoch = torch.cat([z_stoch_head, z_stoch], dim=-1)
-        else:
-            mu_stoch = mu
-            logvar_stoch = logvar
-            if (
-                self.training
-                and getattr(self.config, "use_reparameterization_trick", True)
-                and not hasattr(self, "noise_regularizer")
-            ):
-                z_stoch = self.reparameterize(mu, logvar)
-            else:
-                z_stoch = mu
-
-        # 3. Dropout Regularizer (on active parts only)
-        if hasattr(self, "dropout_regularizer") and not self.use_pre_quant_dropout:
-            z_stoch_dropped = self.dropout_regularizer(z_stoch)
-        else:
-            z_stoch_dropped = z_stoch
-
-        if hasattr(self, "noise_regularizer"):
-            z_stoch_dropped = self.noise_regularizer(z_stoch_dropped)
+        # 3. Regularizers are applied before quantization
+        z_stoch_dropped = z_stoch
 
         # 4. Pad with zeros if residual was skipped
         if hasattr(self, "vq") and not self.add_vq_residual_to_stoch:
             z_stoch_dropped = torch.cat(
-                [torch.zeros_like(mu_head), z_stoch_dropped], dim=-1
+                [torch.zeros_like(vq_dict["mu_head"]), z_stoch_dropped], dim=-1
             )
 
         # 5. Dropout per sample (on full dimension)
@@ -386,12 +358,8 @@ class Encoder(SigmaVAEEncoder):
             else:
                 _qd = self._qd if hasattr(self, "vq") else 0
                 kl_term = self.kl_divergence(
-                    (
-                        mu_stoch
-                        if not self.use_pre_quant_dropout
-                        else mu_original[..., _qd:]  # only tail
-                    ),
-                    logvar_stoch,
+                    mu_original[..., _qd:],  # only tail
+                    logvar if logvar is None else logvar[..., _qd:],
                     padding_mask,
                     dtype=z.dtype,
                 )
@@ -408,12 +376,12 @@ class Encoder(SigmaVAEEncoder):
         }
 
         if hasattr(self, "vq"):
-            out["vq_stats"] = vq_out.stats
-            out["vq_loss"] = vq_out.loss
-            out["quantized"] = vq_quantized_ste
-            out["residual"] = vq_out.residual
-            out["tail"] = mu_tail
-            out["indices"] = vq_out.indices
+            out["vq_stats"] = vq_dict["vq_stats"]
+            out["vq_loss"] = vq_dict["vq_loss"]
+            out["quantized"] = vq_dict["quantized"]
+            out["residual"] = vq_dict["residual"]
+            out["tail"] = vq_dict["tail"]
+            out["indices"] = vq_dict["indices"]
 
         return EncoderOutput(**out)
 
