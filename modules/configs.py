@@ -3,6 +3,7 @@ from dataclasses import dataclass, field, asdict
 import json
 import warnings
 
+
 class DeprecatedConfigMixin:
     @property
     def deprecated_attributes(self):
@@ -14,7 +15,11 @@ class DeprecatedConfigMixin:
             if hasattr(self, attr):
                 val = getattr(self, attr)
                 if val != default_val:
-                    warnings.warn(f"Deprecated feature '{attr}' used: {msg}", DeprecationWarning, stacklevel=2)
+                    warnings.warn(
+                        f"Deprecated feature '{attr}' used: {msg}",
+                        DeprecationWarning,
+                        stacklevel=2,
+                    )
 
 
 #########################
@@ -63,7 +68,10 @@ class DropoutConfig(RegularizationConfig, DeprecatedConfigMixin):
     @property
     def deprecated_attributes(self):
         return {
-            "pre_quantization": (False, "pre_quantization is deprecated. Dropout is now always applied before quantization.")
+            "pre_quantization": (
+                False,
+                "pre_quantization is deprecated. Dropout is now always applied before quantization.",
+            )
         }
 
     def __post_init__(self):
@@ -86,7 +94,9 @@ class NoiseConfig(RegularizationConfig, DeprecatedConfigMixin):
     strategy: str = "linear"  # linear | sigmoid
     k: float = 1.0
     x0: float = 0.0
-    noise_type: str = "additive"  # additive (mu + sigma*eps) | interpolate (mu*(1-t) + eps*t)
+    noise_type: str = (
+        "additive"  # additive (mu + sigma*eps) | interpolate (mu*(1-t) + eps*t)
+    )
     sigma_type: str = "fixed"  # fixed | stochastic
     use_softplus: bool = False
     pre_quantization: bool = False
@@ -94,7 +104,10 @@ class NoiseConfig(RegularizationConfig, DeprecatedConfigMixin):
     @property
     def deprecated_attributes(self):
         return {
-            "pre_quantization": (False, "pre_quantization is deprecated. Noise is now always applied before quantization.")
+            "pre_quantization": (
+                False,
+                "pre_quantization is deprecated. Noise is now always applied before quantization.",
+            )
         }
 
     def __post_init__(self):
@@ -121,15 +134,19 @@ class VQConfig:
 class BSQConfig:
     """Binary Spherical Quantization config. codebook_size must be a power of 2;
     dim_to_quantize is derived as log2(codebook_size)."""
+
     codebook_size: int = 4096
     residual_and_tail_dropout_p: float = 0.0
     add_vq_residual_to_stoch: bool = False
 
     def __post_init__(self):
         import math
+
         dim = int(math.log2(self.codebook_size))
-        if 2 ** dim != self.codebook_size:
-            raise ValueError(f"BSQConfig.codebook_size must be a power of 2, got {self.codebook_size}")
+        if 2**dim != self.codebook_size:
+            raise ValueError(
+                f"BSQConfig.codebook_size must be a power of 2, got {self.codebook_size}"
+            )
         self.dim_to_quantize = dim
 
 
@@ -185,6 +202,7 @@ class DiTConfig:
     sigma: float = 1e-5
     use_group_bidirectional: bool = False
     speaker_cond_dim: Optional[int] = None
+    normalize_context_vector: bool = False
 
 
 #########################
@@ -206,7 +224,7 @@ class StandardDecoderConfig:
 
 @dataclass
 class DiscriminatorConfig:
-    recon_loss_weight: float = 45.0   # L1 reconstruction loss scale (HiFi-GAN style)
+    recon_loss_weight: float = 45.0  # L1 reconstruction loss scale (HiFi-GAN style)
     adv_loss_weight: float = 1.0
     fm_loss_weight: float = 2.0
     discrim_lr: float = 2e-4
@@ -228,13 +246,13 @@ class MelSpectrogramConfig:
     normalize: bool = True
     use_bigvgan_mel: bool = False
 
+
 @dataclass
 class WavLMConfig:
     pretrained_model_name: str = "microsoft/wavlm-large"
     layer: int = 6
     sampling_rate: int = 16000
     normalize: bool = True
-
 
 
 #########################
@@ -297,15 +315,20 @@ class VAEConfig:
 @dataclass(kw_only=True)
 class VAEStandardConfig:
     """Config for VAEWithStandardDecoder (CNN decoder + GAN discriminator)."""
+
     mel_dim: int
     latent_dim: int
     sample_rate: int
     compress_factor: int
     encoder_config: EncoderConfig = field(default_factory=EncoderConfig)
-    decoder_config: StandardDecoderConfig = field(default_factory=lambda: StandardDecoderConfig(
-        audio_latent_dim=64, mel_dim=100, compress_factor=8
-    ))
-    discriminator_config: DiscriminatorConfig = field(default_factory=DiscriminatorConfig)
+    decoder_config: StandardDecoderConfig = field(
+        default_factory=lambda: StandardDecoderConfig(
+            audio_latent_dim=64, mel_dim=100, compress_factor=8
+        )
+    )
+    discriminator_config: DiscriminatorConfig = field(
+        default_factory=DiscriminatorConfig
+    )
     mel_spectrogram_config: MelSpectrogramConfig = field(
         default_factory=MelSpectrogramConfig
     )

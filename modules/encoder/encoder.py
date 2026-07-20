@@ -127,22 +127,38 @@ class Encoder(SigmaVAEEncoder):
                 config=config.noise_regularizer_config,
             )
 
-        self.semantic_downsample_factor = getattr(config, "semantic_downsample_factor", 1)
+        self.semantic_downsample_factor = getattr(
+            config, "semantic_downsample_factor", 1
+        )
         if self.semantic_downsample_factor > 1:
             if not hasattr(self, "vq"):
-                raise ValueError("semantic_downsample_factor > 1 is only supported when VQ is enabled")
+                raise ValueError(
+                    "semantic_downsample_factor > 1 is only supported when VQ is enabled"
+                )
             self.semantic_downsampler = TimeCausalConv1d(
-                self._qd, self._qd, k=self.semantic_downsample_factor * 2, d=1, s=self.semantic_downsample_factor
+                self._qd,
+                self._qd,
+                k=self.semantic_downsample_factor * 2,
+                d=1,
+                s=self.semantic_downsample_factor,
             )
             if self.add_vq_residual_to_stoch and hasattr(self, "logvar"):
                 self.logvar_downsampler = TimeCausalConv1d(
-                    self._qd, self._qd, k=self.semantic_downsample_factor * 2, d=1, s=self.semantic_downsample_factor
+                    self._qd,
+                    self._qd,
+                    k=self.semantic_downsample_factor * 2,
+                    d=1,
+                    s=self.semantic_downsample_factor,
                 )
 
         if config.freeze_encoder_before_latent_heads:
             self._freeze_encoder_before_latent_heads()
 
         self.config = config
+        self.residual_and_tail_dropout_p = 0.2
+        self.use_reparameterization_trick = getattr(
+            config, "use_reparameterization_trick"
+        )
 
     def _freeze_encoder_before_latent_heads(self):
         for param in self.parameters():
@@ -219,9 +235,9 @@ class Encoder(SigmaVAEEncoder):
                 "mu_stoch": mu,
                 "logvar_stoch": logvar,
                 "ortho_loss": None,
-                "vq_dict": {}
+                "vq_dict": {},
             }
-        
+
         qd = self._qd
         mu_head = mu[..., :qd]
         mu_tail = mu[..., qd:]
@@ -266,7 +282,7 @@ class Encoder(SigmaVAEEncoder):
             # But the user currently expects mu_stoch in EncoderOutput!
             # Let's just return them as lists or None and handle KL differently, or if factor=1, keep as is.
             if factor > 1:
-                mu_stoch = mu_tail # We can't concatenate. The KL loss will have to be computed on tail and head separately!
+                mu_stoch = mu_tail  # We can't concatenate. The KL loss will have to be computed on tail and head separately!
                 logvar_stoch = logvar_tail
             else:
                 mu_stoch = torch.cat([vq_out.residual, mu_tail], dim=-1)
@@ -317,7 +333,7 @@ class Encoder(SigmaVAEEncoder):
             "mu_stoch": mu_stoch,
             "logvar_stoch": logvar_stoch,
             "ortho_loss": ortho_loss,
-            "vq_dict": vq_dict
+            "vq_dict": vq_dict,
         }
 
     def forward(
@@ -344,14 +360,10 @@ class Encoder(SigmaVAEEncoder):
         hiddens = x.transpose(1, 2)  # [B, T/C, 512]
         h = self.transformer(hiddens)  # [B, T/C, 512]
 
-        mu_original = self.mu(h)
+        mu = self.mu(h)
         speaker_embedding = None
         if getattr(self.config, "use_instance_norm", False):
-            mu_original, speaker_embedding = self._apply_instance_norm(
-                mu_original, padding_mask
-            )
-
-        mu = mu_original
+            mu, speaker_embedding = self._apply_instance_norm(mu, padding_mask)
         if hasattr(self, "dropout_regularizer"):
             mu = self.dropout_regularizer(mu)
         if hasattr(self, "noise_regularizer"):
@@ -361,92 +373,38 @@ class Encoder(SigmaVAEEncoder):
         if hasattr(self, "logvar"):
             logvar = self.logvar(h)
 
-        q_out = self._quantize_and_sample(mu, logvar, padding_mask, step=kwargs.get("step", None))
-        z_semantic = q_out["z_semantic"]
-        z_acoustic = q_out["z_acoustic"]
-        mu_stoch = q_out["mu_stoch"]
-        logvar_stoch = q_out["logvar_stoch"]
-        ortho_loss = q_out["ortho_loss"]
-        vq_dict = q_out["vq_dict"]
+        vq_output = None
+        if self.config.vq_config:
+            raise NotImplementedError("Closed for vacation.")
+            # vq_output = self._quantize_and_sample(
+            #     mu, logvar, padding_mask, step=kwargs.get("step", None)
+            # )
 
-        # 3. Regularizers are applied before quantization
-        # Only apply dropout to the tail part if requested? 
-        # Actually dropout_regularizer was moved before quantization to mu_original!
-        # So we just pad the semantic part if we need to reconstruct a full tensor? 
-        # No, z_semantic and z_acoustic are returned separately!
-
-
-
-        if hasattr(self, "vq") and not self.add_vq_residual_to_stoch:
-            # We don't apply residual dropout since it's deactivated
-            pass
-        elif self.training and self.residual_and_tail_dropout_p > 0.0:
-            if z_semantic is not None and self.add_vq_residual_to_stoch:
-                pass # dropout on semantic part? 
-            # Note: Previously it dropped the concatenated tensor. 
-            # We just apply dropout directly to z_acoustic (the tail). 
-            B = z_acoustic.shape[0]
-            mask_acoustic = (
-                torch.rand(B, 1, 1, device=z_acoustic.device, dtype=z_acoustic.dtype)
-                > self.residual_and_tail_dropout_p
-            )
-            z_acoustic = z_acoustic * mask_acoustic
-            # For the residual part of z_semantic, we could drop it, but z_semantic already contains quantized + residual. 
-            # Actually, standard behavior was dropping the concatenated (residual + tail).
-            # To drop the residual part inside z_semantic, we can't easily do it if it's already added.
-            # I will skip the residual dropout here for simplicity, or we should drop it before addition.
-
-        kl_loss = torch.tensor(0.0, device=z_acoustic.device)
-        kl_weight = self.get_kl_cosine_schedule(kwargs["step"]) if kwargs.get("step", None) is not None else 0.0
+        kl_weight = (
+            self.get_kl_cosine_schedule(kwargs["step"])
+            if kwargs.get("step", None) is not None
+            else 0.0
+        )
+        if self.use_reparameterization_trick:
+            z = self.reparameterize(mu, logvar, std=1.0)
+        else:
+            z = mu
         # KL loss computation
+        kl_loss = None
         if self.training:
-            if hasattr(self, "vq") and self.add_vq_residual_to_stoch and getattr(self, "semantic_downsample_factor", 1) > 1:
-                # We must compute KL for head and tail separately because they have different lengths!
-                _qd = self._qd
-                kl_term_tail = self.kl_divergence(
-                    mu_original[..., _qd:],
-                    logvar[..., _qd:] if logvar is not None else None,
-                    padding_mask,
-                    dtype=z_acoustic.dtype,
-                )
-                
-                # For the head, we use the downsampled mu_stoch_head and logvar_head
-                factor = self.semantic_downsample_factor
-                padding_mask_vq = padding_mask[:, ::factor] if padding_mask is not None else None
-                kl_term_head = self.kl_divergence(
-                    vq_dict["mu_stoch_head"],
-                    vq_dict["logvar_head"],
-                    padding_mask_vq,
-                    dtype=z_semantic.dtype if z_semantic is not None else z_acoustic.dtype,
-                )
-                kl_term = kl_term_tail + kl_term_head
-            else:
-                # Normal KL computation
-                if self.add_vq_residual_to_stoch:
-                    _qd = 0 # full dimension
-                    kl_mu = mu_original
-                    kl_logvar = logvar
-                else:
-                    _qd = self._qd if hasattr(self, "vq") else 0
-                    kl_mu = mu_original[..., _qd:]
-                    kl_logvar = logvar[..., _qd:] if logvar is not None else None
-                    
-                kl_term = self.kl_divergence(
-                    kl_mu,
-                    kl_logvar,
-                    padding_mask,
-                    dtype=z_acoustic.dtype,
-                )
+            kl_term = self.kl_divergence(
+                mu,
+                logvar,
+                padding_mask,
+                dtype=mu.dtype,
+            )
             kl_loss = kl_term * kl_weight
 
         out = {
-            "z_semantic": z_semantic,
-            "z_acoustic": z_acoustic,
+            "z": z,
             "kl_loss": kl_loss,
+            "mu": mu,
             "padding_mask": padding_mask,
-            "mu": mu_stoch,
-            "mu_pre_vq": mu,
-            "ortho_loss": ortho_loss,
             "speaker_embedding": speaker_embedding,
         }
 

@@ -5,7 +5,9 @@ import torch
 
 # --- WORKAROUND FOR FAIRSEQ/HYDRA ON PYTHON 3.11 ---
 import dataclasses
+
 _orig_get_field = dataclasses._get_field
+
 
 def _patched_get_field(cls, a_name, a_type, *args, **kwargs):
     try:
@@ -13,15 +15,17 @@ def _patched_get_field(cls, a_name, a_type, *args, **kwargs):
     except ValueError as e:
         if "mutable default" in str(e):
             default = getattr(cls, a_name, dataclasses.MISSING)
-            actual_default = default.default if isinstance(default, dataclasses.Field) else default
+            actual_default = (
+                default.default if isinstance(default, dataclasses.Field) else default
+            )
             if actual_default is not dataclasses.MISSING:
                 default_cls = actual_default.__class__
-                orig_hash = getattr(default_cls, '__hash__', None)
+                orig_hash = getattr(default_cls, "__hash__", None)
                 try:
                     default_cls.__hash__ = lambda self: id(self)
                 except TypeError:
                     pass
-                
+
                 try:
                     return _orig_get_field(cls, a_name, a_type, *args, **kwargs)
                 finally:
@@ -34,14 +38,19 @@ def _patched_get_field(cls, a_name, a_type, *args, **kwargs):
                         pass
         raise
 
+
 dataclasses._get_field = _patched_get_field
 # ---------------------------------------------------
 
 # --- WORKAROUND FOR PYTORCH 2.6 WEIGHTS_ONLY ---
 _orig_torch_load = torch.load
+
+
 def _patched_torch_load(*args, **kwargs):
     kwargs["weights_only"] = False
     return _orig_torch_load(*args, **kwargs)
+
+
 torch.load = _patched_torch_load
 # -----------------------------------------------
 
@@ -49,17 +58,20 @@ import hydra
 
 # --- WORKAROUND FOR FAIRSEQ HYDRA EXPERIMENTAL IMPORT ---
 import hydra.experimental
+
 hydra.experimental.initialize = hydra.initialize
 hydra.experimental.initialize_config_module = hydra.initialize_config_module
 hydra.experimental.initialize_config_dir = hydra.initialize_config_dir
 hydra.experimental.compose = hydra.compose
 
 import hydra.experimental.initialize as _hydra_exp_init
+
 _hydra_exp_init.initialize = hydra.initialize
 _hydra_exp_init.initialize_config_module = hydra.initialize_config_module
 _hydra_exp_init.initialize_config_dir = hydra.initialize_config_dir
 
 import hydra.experimental.compose as _hydra_exp_compose
+
 _hydra_exp_compose.compose = hydra.compose
 # --------------------------------------------------------
 
@@ -173,8 +185,10 @@ class VAEtrainer(Trainer):
             "mu_mean",
             "mu_var",
         ]
-        if (getattr(self.model.encoder.config, "vq_config", None) is not None
-                or getattr(self.model.encoder.config, "bsq_config", None) is not None):
+        if (
+            getattr(self.model.encoder.config, "vq_config", None) is not None
+            or getattr(self.model.encoder.config, "bsq_config", None) is not None
+        ):
             granular_losses.extend(
                 [
                     "vq_loss",
@@ -183,7 +197,10 @@ class VAEtrainer(Trainer):
                     "vq_codes_used_frac",
                 ]
             )
-        if getattr(self.model.encoder.config, "semantic_distillation_config", None) is not None:
+        if (
+            getattr(self.model.encoder.config, "semantic_distillation_config", None)
+            is not None
+        ):
             granular_losses.extend(
                 [
                     "distill_cosine_loss",
@@ -362,11 +379,13 @@ class VAEtrainer(Trainer):
             vq_loss = getattr(output, "vq_loss", None)
             vq_stats = getattr(output, "vq_stats", None)
             loss = audio_loss + kl_loss + (vq_loss if vq_loss is not None else 0.0)
-            
+
             distill_cosine_loss = getattr(output, "distill_cosine_loss", None)
             distill_ortho_loss = getattr(output, "distill_ortho_loss", None)
             actual_model = model.module if hasattr(model, "module") else model
-            sem_cfg = getattr(actual_model.encoder.config, "semantic_distillation_config", None)
+            sem_cfg = getattr(
+                actual_model.encoder.config, "semantic_distillation_config", None
+            )
             if distill_cosine_loss is not None and sem_cfg is not None:
                 loss += distill_cosine_loss * sem_cfg.cosine_loss_weight
             if distill_ortho_loss is not None and sem_cfg is not None:
@@ -689,7 +708,7 @@ class VAEtrainer(Trainer):
                         caption=f"Sample {idx} - Step {self.state.global_step} - Device {device_id}",
                     )
                 )
-            
+
             if tb_writer is not None:
                 tb_writer.add_figure(
                     f"reconstructions/sample_{idx}_device_{device_id}",
@@ -723,7 +742,7 @@ class VAEtrainer(Trainer):
             # normalize waveform to -1 to 1
             waveform = waveform / (waveform.abs().max() + 1e-8)
             sr = audios_srs[idx][1]
-            
+
             if wandb.run is not None:
                 # Log as wandb audio as well
                 audios.append(
@@ -733,7 +752,7 @@ class VAEtrainer(Trainer):
                         caption=f"Sample {idx} - Step {self.state.global_step} - Device {device_id}",
                     )
                 )
-            
+
             if tb_writer is not None:
                 tb_writer.add_audio(
                     f"reconstructions_audio/sample_{idx}_device_{device_id}",
@@ -756,11 +775,9 @@ class VAEtrainer(Trainer):
             logger.info(
                 f"Successfully logged {len(images)} reconstruction samples to wandb"
             )
-        
+
         if tb_writer is not None:
-            logger.info(
-                f"Successfully logged reconstruction samples to TensorBoard"
-            )
+            logger.info(f"Successfully logged reconstruction samples to TensorBoard")
 
     def _create_mel_comparison_plot(
         self,

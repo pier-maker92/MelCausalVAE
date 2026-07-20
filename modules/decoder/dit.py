@@ -18,7 +18,7 @@ class Transformer(Module):
         ff_mult: int = 4,
         attn_dropout: float = 0.0,
         ff_dropout: float = 0.0,
-        num_register_tokens: int = 0,
+        num_register_tokens: int = 16,
         attn_flash: bool = True,
         adaptive_rmsnorm: bool = True,
         time_hidden_dim: Optional[int] = None,
@@ -29,7 +29,7 @@ class Transformer(Module):
         is_causal: bool = True,
         window_size: Optional[int] = None,
         conv_pos_embed_kernel_size: int = 31,
-        conv_is_causal: bool = True,
+        conv_is_causal: bool = False,
         speaker_cond_dim: Optional[int] = None,
     ):
         super().__init__()
@@ -64,8 +64,7 @@ class Transformer(Module):
 
         if speaker_cond_dim is not None:
             self.speaker_proj = nn.Sequential(
-                nn.SiLU(),
-                nn.Linear(speaker_cond_dim, time_hidden_dim)
+                nn.SiLU(), nn.Linear(speaker_cond_dim, time_hidden_dim)
             )
         else:
             self.speaker_proj = None

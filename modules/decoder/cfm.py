@@ -31,13 +31,13 @@ class DiT(torch.nn.Module):
         self.use_window_attention = config.use_window_attention
         self.use_group_bidirectional = config.use_group_bidirectional
         self.causal_convolution = config.causal_convolution
+        self.normalize_context_vector = config.normalize_context_vector
         mel_fps = 93.75  # 24000 / 256 #FIXME hardcoded to 24kHz dataset
         self.window_size = (
             int(config.window_attention_seconds * mel_fps)
             if config.use_window_attention
             else None
         )
-        print(f"VAE is_causal: {self.is_causal}")
         if self.window_size is not None:
             print(
                 f"VAE window_attention: {config.window_attention_seconds}s = {self.window_size} mel frames"
@@ -57,7 +57,10 @@ class DiT(torch.nn.Module):
                 stride=self.expansion_factor,
             )
         elif self.upsample == "repeat":
-            self.context_vector_proj = nn.Linear(self.audio_latent_dim, self.dit_dim)
+            layers = [nn.Linear(self.audio_latent_dim, self.dit_dim)]
+            if self.normalize_context_vector:
+                layers.append(nn.LayerNorm(self.dit_dim))
+            self.context_vector_proj = nn.Sequential(*layers)
         else:
             raise ValueError(f"Unknown upsample method: {self.upsample}")
         # noise projection
@@ -123,7 +126,6 @@ class DiT(torch.nn.Module):
             )
             * temperature
         )
-
         return context_vector, x0, padding_mask
 
     def prepare_flow(
@@ -208,7 +210,11 @@ class DiT(torch.nn.Module):
 
         # ---- get the flow ----
         loss = self.let_it_flow(
-            times=times, state=state, target=v_target, flow_mask=target_padding_mask, speaker_embedding=speaker_embedding
+            times=times,
+            state=state,
+            target=v_target,
+            flow_mask=target_padding_mask,
+            speaker_embedding=speaker_embedding,
         )
 
         return DecoderOutput(
@@ -298,7 +304,7 @@ class DiT(torch.nn.Module):
             uncond_speaker_embedding = torch.zeros_like(speaker_embedding)
         else:
             uncond_speaker_embedding = None
-            
+
         uncond_out = self.transformer(
             x=uncond_state,
             times=times,

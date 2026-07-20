@@ -22,8 +22,7 @@ class VQVAEOutput(ModelOutput):
 
 @dataclass
 class EncoderOutput(ModelOutput):
-    z_semantic: Optional[torch.FloatTensor] = None
-    z_acoustic: Optional[torch.FloatTensor] = None
+    z: Optional[torch.FloatTensor] = None
     kl_loss: Optional[torch.FloatTensor] = None
     padding_mask: Optional[torch.BoolTensor] = None
     mu: Optional[torch.FloatTensor] = None
@@ -69,6 +68,7 @@ class FeatureExtractorOutput(ModelOutput):
 @dataclass
 class VAEStandardOutput(ModelOutput):
     """Output of VAEWithStandardDecoder.forward() — carries both losses and raw tensors."""
+
     audio_loss: Optional[torch.FloatTensor] = None
     kl_loss: Optional[torch.FloatTensor] = None
     mu_mean: Optional[torch.FloatTensor] = None
