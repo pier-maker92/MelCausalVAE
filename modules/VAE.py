@@ -142,12 +142,6 @@ class VAE(torch.nn.Module):
         target_padding_mask: Optional[torch.BoolTensor],
         speaker_embedding: Optional[torch.FloatTensor] = None,
     ):
-
-        if target_features is not None and target_padding_mask is not None:
-            # truncate target to match z
-            target_features = target_features[:, : z.shape[1], :]
-            target_padding_mask = target_padding_mask[:, : z.shape[1]]
-
         decoder_output = self.decoder(
             target=target_features,
             target_padding_mask=target_padding_mask,
@@ -302,11 +296,24 @@ class VAE(torch.nn.Module):
         if kwargs.get("zero_speaker", False) and speaker_embedding is not None:
             speaker_embedding = torch.zeros_like(speaker_embedding)
 
+        z = encoder_output.z
+
+        chunk_size = kwargs.get("chunk_size", None)
+        chunk = kwargs.get("chunk", None)
+        exclude_start_chunk = kwargs.get("exclude_start_chunk", None)
+
+        if chunk_size and chunk:
+            keep_len = chunk * chunk_size
+            z[..., keep_len:] = 0
+        if chunk_size and exclude_start_chunk:
+            zero_len = exclude_start_chunk * chunk_size
+            z[..., :zero_len] = 0
+
         reconstructed_mel, reconstructed_padding_mask = self.sample(
             num_steps=num_steps,
             temperature=temperature,
             guidance_scale=guidance_scale,
-            z=encoder_output.z,
+            z=z,
             generator=generator,
             padding_mask=encoder_output.padding_mask,
             speaker_embedding=speaker_embedding,

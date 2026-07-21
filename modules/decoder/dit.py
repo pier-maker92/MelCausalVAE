@@ -18,7 +18,7 @@ class Transformer(Module):
         ff_mult: int = 4,
         attn_dropout: float = 0.0,
         ff_dropout: float = 0.0,
-        num_register_tokens: int = 16,
+        num_register_tokens: int = 0,
         attn_flash: bool = True,
         adaptive_rmsnorm: bool = True,
         time_hidden_dim: Optional[int] = None,
