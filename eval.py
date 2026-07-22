@@ -1,1168 +1,191 @@
 import os
-import sys
 
 if "SCRATCH" in os.environ:
     os.environ["HF_HOME"] = os.path.join(os.environ["SCRATCH"], ".cache/huggingface")
     os.environ["TORCH_HOME"] = os.path.join(os.environ["SCRATCH"], ".cache/torch")
 
-# --- WORKAROUND FOR FAIRSEQ/HYDRA ON PYTHON 3.11 ---
-import dataclasses
-
-_orig_get_field = dataclasses._get_field
-
-
-def _patched_get_field(cls, a_name, a_type, *args, **kwargs):
-    try:
-        return _orig_get_field(cls, a_name, a_type, *args, **kwargs)
-    except ValueError as e:
-        if "mutable default" in str(e):
-            default = getattr(cls, a_name, dataclasses.MISSING)
-            actual_default = (
-                default.default if isinstance(default, dataclasses.Field) else default
-            )
-            if actual_default is not dataclasses.MISSING:
-                default_cls = actual_default.__class__
-                orig_hash = getattr(default_cls, "__hash__", None)
-                try:
-                    default_cls.__hash__ = lambda self: id(self)
-                except TypeError:
-                    pass
-
-                try:
-                    return _orig_get_field(cls, a_name, a_type, *args, **kwargs)
-                finally:
-                    try:
-                        if orig_hash is None:
-                            default_cls.__hash__ = None
-                        else:
-                            default_cls.__hash__ = orig_hash
-                    except TypeError:
-                        pass
-        raise
-
-
-dataclasses._get_field = _patched_get_field
-# ---------------------------------------------------
-
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import wandb
 import json
-import yaml
-import math
-import time
-import shutil
-import random
+import torch
 import logging
 import argparse
-import tempfile
-import torch
 import torchaudio
-
-# --- WORKAROUND FOR PYTORCH 2.6 WEIGHTS_ONLY ---
-_orig_torch_load = torch.load
-def _patched_torch_load(*args, **kwargs):
-    kwargs["weights_only"] = False
-    return _orig_torch_load(*args, **kwargs)
-torch.load = _patched_torch_load
-# -----------------------------------------------
-
 from tqdm import tqdm
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
-
-from torch.utils.data import DataLoader
 from vocos import Vocos
-import matplotlib
+from transformer import set_seed
+import torchaudio.transforms as T
+from modules.builder import build_model
 
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
+from data.audio_dataset import EvalDataCollator
+from data.audio_dataset import TestDatasetWrapper
+from data.librispeech_align import LibriSpeechAlignDataset
 
-from MelCausalVAE.modules.builder import build_model
-from MelCausalVAE.modules.VAE import VAE
-from MelCausalVAE.modules.configs import VAEConfig
-from MelCausalVAE.data.libri_tts import LibriTTS
-from MelCausalVAE.data.mls import MLSDataset
-from MelCausalVAE.data.librispeech_align_test import LibriSpeechAlignTestDataset
-from MelCausalVAE.data.audio_dataset import DataCollator, TestDatasetWrapper
-
-# from MelCausalVAE.baseline_models import BaselineAudioCodec
-
-# Whisper ASR for WER/CER
-from transformers import WhisperProcessor, WhisperForConditionalGeneration
-from jiwer import wer as compute_wer, cer as compute_cer
-
-from datasets import load_dataset, concatenate_datasets
-import utmos
+from evaluation.metrics.dwer import DWER
+from evaluation.metrics.utmos import UTMOS
+from evaluation.metrics.speaker_similarity import SpkSimWavLM
 
 
-# Standalone UTMOS predictor using utmos
-class UTMOSPredictor:
-    def __init__(self, device):
-        logger.info("Initializing UTMOS model")
-        current_dtype = torch.get_default_dtype()
-        torch.set_default_dtype(torch.float32)
-        current_dtype = torch.get_default_dtype()
-        torch.set_default_dtype(torch.float32)
-        self.model = utmos.Score()
-        self.device = device
-        self.has_utmos = True
-        logger.info("UTMOS model loaded successfully.")
-        torch.set_default_dtype(current_dtype)
-
-    @torch.no_grad()
-    def predict(self, wav_path):
-        if not self.has_utmos:
-            return None
-        # Force float32 context and disable any potential autocast to bfloat16
-        with torch.autocast(device_type=self.device.type, enabled=False):
-            mos = self.model.calculate_wav_file(str(wav_path))
-            return float(mos)
-
-
-
-
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
-logger = logging.getLogger(__name__)
-
-
-class WhisperASR:
-    """Whisper based ASR for WER/CER computation."""
-
-    def __init__(
-        self, device: torch.device, model_name: str = "openai/whisper-large-v3"
-    ):
-        logger.info(f"Loading Whisper ASR model: {model_name}")
-        self.processor = WhisperProcessor.from_pretrained(model_name)
-        self.model = WhisperForConditionalGeneration.from_pretrained(model_name).to(
-            device
-        )
-        self.model.eval()
-        self.device = device
-
-    @torch.no_grad()
-    def transcribe(self, audio_path: str) -> str:
-        """Transcribe an audio file and return lowercase text."""
-        audio, sr = torchaudio.load(audio_path)
-        # Whisper expects 16kHz mono
-        if audio.shape[0] > 1:
-            audio = audio.mean(dim=0, keepdim=True)
-        if sr != 16000:
-            audio = torchaudio.functional.resample(audio, sr, 16000)
-
-        input_features = (
-            self.processor(
-                audio.squeeze().cpu().numpy(), sampling_rate=16000, return_tensors="pt"
-            )
-            .input_features.to(self.device)
-            .to(self.model.dtype)
-        )
-
-        # Generate transcription
-        predicted_ids = self.model.generate(input_features)
-        transcription = self.processor.batch_decode(
-            predicted_ids, skip_special_tokens=True
-        )[0]
-
-        return transcription.lower().strip()
-
-
-def set_seed(seed: int):
-    random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-
-
-def load_config(config_path: str) -> Dict[str, Any]:
+def load_model(checkpoint_dir, device):
+    print(f"Loading model from {checkpoint_dir}...")
+    config_path = os.path.join(checkpoint_dir, "config.json")
     with open(config_path, "r") as f:
-        if config_path.endswith(".json"):
-            return json.load(f)
-        return yaml.safe_load(f)
+        cfg_dict = json.load(f)
 
+    model = build_model(cfg_dict)
 
-def build_model_from_config(
-    config_dict: Dict[str, Any], checkpoint_path: Optional[str], device: torch.device
-) -> Tuple[VAE, torch.nn.Module, str, VAEConfig]:
-    """Build VAE model from a config dict using modules.builder.build_model.
-
-    Follows the same pattern as inference.py for consistency.
-    """
-    model = build_model(config_dict)
+    checkpoint_path = os.path.join(checkpoint_dir, "model.safetensors")
     model.from_pretrained(checkpoint_path)
     model.eval()
     model.to(device)
-
-    mel_cfg = model.config.mel_spectrogram_config
-    if getattr(mel_cfg, "use_bigvgan_mel", False):
-        base_dir = Path(__file__).parent.absolute()
-        bigvgan_path = str(base_dir / "bigvgan" / "bigvgan_v2_24khz_100band_256x")
-        if bigvgan_path not in sys.path:
-            sys.path.append(bigvgan_path)
-        import bigvgan
-
-        vocoder = bigvgan.BigVGAN.from_pretrained(
-            bigvgan_path, use_cuda_kernel=False
-        )
-        vocoder_type = "bigvgan"
-    else:
-        vocoder = Vocos.from_pretrained("charactr/vocos-mel-24khz")
-        vocoder_type = "vocos"
-
-    vocoder.to(device)
-    return model, vocoder, vocoder_type, model.config
-
-
-def mel_to_audio(
-    vocoder: torch.nn.Module,
-    mel: torch.Tensor,
-    device: torch.device,
-    vocoder_type: str = "vocos",
-) -> torch.Tensor:
-    # Keep vocoder input dtype aligned with vocoder parameters to avoid
-    # conv dtype mismatches (e.g., bf16 input vs fp32 bias).
-    if vocoder_type == "bigvgan":
-        target_dtype = next(vocoder.parameters()).dtype
-    else:
-        target_dtype = next(vocoder.backbone.parameters()).dtype
-    features = mel.permute(0, 2, 1).to(device=device, dtype=target_dtype)
-    if vocoder_type == "bigvgan":
-        waveform = vocoder(features)
-    else:
-        waveform = vocoder.decode(features)  # [1, samples]
-
-    waveform = waveform.float().squeeze().detach().cpu()
-    # normalize to prevent clipping
-    waveform = waveform / (waveform.abs().max() + 1e-8)
-    return waveform.view(-1)
-
-
-def save_wav(path: Path, audio: torch.Tensor, sr: int = 24000):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    torchaudio.save(
-        str(path), audio.unsqueeze(0).cpu().to(torch.float32), sample_rate=sr
+    assert not model.training, "Model must be in eval mode"
+    assert not model.encoder.training, (
+        "Encoder must be in eval mode: reparameterization trick and "
+        "dropout regularizer are only disabled when training=False"
     )
-
-
-def generate_hyperparam_combinations(
-    hyperparam_config: Dict[str, List[Any]],
-) -> List[Dict[str, Any]]:
-    if not hyperparam_config:
-        return [{}]
-    keys = list(hyperparam_config.keys())
-    values = list(hyperparam_config.values())
-    combos: List[Dict[str, Any]] = []
-
-    # cartesian product
-    def _prod(arrs: List[List[Any]], idx: int, cur: Dict[str, Any]):
-        if idx == len(arrs):
-            combos.append(dict(cur))
-            return
-        k = keys[idx]
-        for v in arrs[idx]:
-            cur[k] = v
-            _prod(arrs, idx + 1, cur)
-            cur.pop(k, None)
-
-    _prod(values, 0, {})
-    return combos
-
-
-def evaluate_dataset(
-    setting: str,
-    languages: Optional[List[str]],
-    num_samples: int,
-    batch_size: int,
-    model: Optional[VAE],
-    vocoder: Optional[torch.nn.Module],
-    vocoder_type: str,
-    baseline_model: Optional[Any],
-    n_steps: int,
-    temperature: float,
-    guidance_scale: float,
-    device: torch.device,
-    work_dir: Path,
-    evaluator: Optional[UTMOSPredictor],
-    whisper_asr: WhisperASR,
-    log_images: bool,
-    max_images: int,
-    keep_wavs: bool,
-    filter_librispeech: bool,
-    original_audio_only: bool,
-    skip_ref_metrics: bool,
-    run,
-    quantized: bool = False,
-    residual: bool = False,
-    tail: bool = False,
-    chunk: Optional[int] = None,
-    chunk_size: Optional[int] = None,
-    save_10_audios: bool = False,
-) -> Dict[str, Any]:
-    results: Dict[str, Any] = {"samples": [], "aggregates": {}}
-
-    # Map setting to specific GT metrics file
-    gt_filename = "metrics.json"
-    if setting == "LibriSpeech":
-        gt_filename = "librispeech.json"
-    elif setting == "LibriTTS":
-        gt_filename = "libritts.json"
-
-    gt_filepath = Path("evaluation/GT") / gt_filename
-    gt_metrics_map = {}
-    if skip_ref_metrics:
-        with open(gt_filepath, "r") as f:
-            gt_data = json.load(f)
-            for sample in gt_data.get("samples", []):
-                map_id = sample.get("id")
-                if map_id is not None:
-                    gt_metrics_map[str(map_id)] = {
-                        "ref": sample.get("ref", {}),
-                        "ref_transcription": sample.get("ref_transcription", ""),
-                    }
-
-    if setting == "LibriSpeech":
-        ds = TestDatasetWrapper(
-            LibriSpeechAlignTestDataset(do_filter=filter_librispeech), "test"
-        )
-    elif setting == "LibriTTS":
-        ds = TestDatasetWrapper(LibriTTS(), "test")
-    else:
-        raise NotImplementedError(f"{setting} not implemented")
-
-    test_dataloader = DataLoader(
-        ds, batch_size=batch_size, shuffle=False, collate_fn=DataCollator()
-    )
-
-    # Aggregation structures
-    per_language = {}
-
-    tmp_audio_dir = work_dir / "tmp_wavs"
-    tmp_audio_dir.mkdir(parents=True, exist_ok=True)
-    img_dir = work_dir / "images"
-    if log_images:
-        img_dir.mkdir(parents=True, exist_ok=True)
-
-    processed = 0
-    image_count = 0
-    if num_samples > 0:
-        total_samples = min(num_samples, len(ds))
-    else:
-        total_samples = len(ds)
-    pbar = tqdm(total=total_samples, desc="Evaluating dataset")
-    dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
-    images = []
-    reconstructed_audios = []
-    original_audios = []
-    for batch in test_dataloader:
-        audios_srs = batch["output_audios_srs"]
-        sr = audios_srs[0][1]
-        lang = batch["language"]
-        gt_text = batch["transcription"]
-        batch_ids = batch.get("ids")  # NO FALLBACK
-        audios_srs = [(audio.to(device, dtype=dtype), sr) for audio, sr in audios_srs]
-
-        if original_audio_only:
-            original_mel = None
-        elif baseline_model is None:
-            # --- MelCausalVAE PATH ---
-            with torch.no_grad():
-                params = {
-                    "audios_srs": audios_srs,
-                    "num_steps": n_steps,
-                    "temperature": temperature,
-                    "guidance_scale": guidance_scale,
-                    "generator": None,
-                }
-                has_vq = (
-                    getattr(model.config.encoder_config, "vq_config", None) is not None
-                )
-                if tail:
-                    if not has_vq:
-                        raise ValueError(
-                            "The -t flag was passed, but the model's config does not have a vq_config."
-                        )
-                    params["quantized"] = False
-                    params["residual"] = False
-                    params["tail"] = True
-                else:
-                    if has_vq:
-                        params["quantized"] = True
-                        params["residual"] = False
-                        params["tail"] = True
-                    else:
-                        params["quantized"] = False
-                        params["residual"] = False
-                        params["tail"] = False
-                if chunk is not None:
-                    params["chunk"] = chunk
-                if chunk_size is not None:
-                    params["chunk_size"] = chunk_size
-
-                out = model.encode_decode(**params)
-            original_mel = out["feature_extractor_output"].audio_features.detach().cpu()
-            reconstructed_mel = out["decoder_output"].audio_features.detach().cpu()
-            padding_mask = out["decoder_output"].padding_mask.detach().cpu()
-
-        # save wavs, prompts, compute metrics
-        for idx in range(len(audios_srs)):
-            global_idx = processed + idx
-            sample_id = batch_ids[idx]
-
-            orig_wav = tmp_audio_dir / f"sample_{sample_id}_orig.wav"
-            recon_wav = tmp_audio_dir / f"sample_{sample_id}_recon.wav"
-            prompt_txt = tmp_audio_dir / f"sample_{sample_id}_prompt.txt"
-
-            if original_audio_only:
-                audio, original_sr = audios_srs[idx]
-                original_audio = audio.squeeze().cpu().float()
-                original_audio = original_audio / (original_audio.abs().max() + 1e-8)
-                save_wav(orig_wav, original_audio, original_sr)
-                prompt_txt.write_text(gt_text[idx])
-                reconstructed_audio = original_audio
-                cur_original_mel = None
-                cur_reconstructed_mel = None
-            elif baseline_model is not None:
-                # --- BASELINE MODEL PATH ---
-                audio, original_sr = audios_srs[idx]
-                reconstructed, out_sr = baseline_model.reconstruct(audio, original_sr)
-
-                original_audio = audio.squeeze().cpu().float()
-                reconstructed_audio = reconstructed.cpu().float()
-
-                # normalize to prevent clipping
-                original_audio = original_audio / (original_audio.abs().max() + 1e-8)
-                reconstructed_audio = reconstructed_audio / (
-                    reconstructed_audio.abs().max() + 1e-8
-                )
-
-                if not skip_ref_metrics:
-                    save_wav(orig_wav, original_audio, original_sr)
-                save_wav(recon_wav, reconstructed_audio, out_sr)
-                prompt_txt.write_text(gt_text[idx])
-                cur_original_mel = None
-                cur_reconstructed_mel = None
-            else:
-                min_length = min(
-                    original_mel[idx].size(0), reconstructed_mel[idx].size(0)
-                )
-                cur_original_mel = original_mel[idx][:min_length]
-                cur_reconstructed_mel = reconstructed_mel[idx][:min_length]
-                cur_padding_mask = padding_mask[idx][:min_length]
-                cur_original_mel = cur_original_mel[~cur_padding_mask]
-                cur_reconstructed_mel = cur_reconstructed_mel[~cur_padding_mask]
-
-                original_audio = mel_to_audio(
-                    vocoder, cur_original_mel.unsqueeze(0), device, vocoder_type
-                )
-                reconstructed_audio = mel_to_audio(
-                    vocoder, cur_reconstructed_mel.unsqueeze(0), device, vocoder_type
-                )
-
-                if not skip_ref_metrics:
-                    save_wav(orig_wav, original_audio, sr)
-                save_wav(recon_wav, reconstructed_audio, sr)
-                prompt_txt.write_text(gt_text[idx])
-
-            # --- Compute WER and CER using Whisper ASR ---
-            ref_text_normalized = gt_text[idx].lower().strip()
-            if original_audio_only:
-                ref_hyp = whisper_asr.transcribe(str(orig_wav))
-                recon_hyp = ref_hyp
-            else:
-                if not skip_ref_metrics:
-                    ref_hyp = whisper_asr.transcribe(str(orig_wav))
-                else:
-                    ref_info = gt_metrics_map.get(str(sample_id))
-                    ref_hyp = ref_info.get("ref_transcription", "") if ref_info else ""
-                recon_hyp = whisper_asr.transcribe(str(recon_wav))
-
-            # WER / CER for original (reference audio)
-            if ref_text_normalized and (original_audio_only or not skip_ref_metrics):
-                ref_wer_val = float(compute_wer(ref_text_normalized, ref_hyp))
-                ref_cer_val = float(compute_cer(ref_text_normalized, ref_hyp))
-            else:
-                ref_wer_val = ref_cer_val = float("nan")
-
-            if ref_text_normalized and not original_audio_only:
-                recon_wer_val = float(compute_wer(ref_text_normalized, recon_hyp))
-                recon_cer_val = float(compute_cer(ref_text_normalized, recon_hyp))
-            else:
-                recon_wer_val = recon_cer_val = float("nan")
-
-            # Consistency Metrics (Speech Consistency between ref and recon)
-            if not original_audio_only and not skip_ref_metrics:
-                consistent_wer_val = float(compute_wer(ref_hyp, recon_hyp))
-                consistent_cer_val = float(compute_cer(ref_hyp, recon_hyp))
-            else:
-                consistent_wer_val = consistent_cer_val = float("nan")
-
-            def to_pct(v):
-                if v is None or math.isnan(v):
-                    return None
-                return round(float(v) * 100.0, 2)
-
-            if skip_ref_metrics:
-                ref_scores = gt_metrics_map.get(str(sample_id), {}).get("ref", {})
-            else:
-                ref_scores = {"WER": to_pct(ref_wer_val), "CER": to_pct(ref_cer_val)}
-            recon_scores = {"WER": to_pct(recon_wer_val), "CER": to_pct(recon_cer_val)}
-
-            if evaluator is not None and evaluator.has_utmos:
-                if original_audio_only:
-                    orig_mos = evaluator.predict(str(orig_wav))
-                    if orig_mos is not None:
-                        ref_scores["UTMOS"] = round(orig_mos, 2)
-                else:
-                    if not skip_ref_metrics:
-                        orig_mos = evaluator.predict(str(orig_wav))
-                        if orig_mos is not None:
-                            ref_scores["UTMOS"] = round(orig_mos, 2)
-                    recon_mos = evaluator.predict(str(recon_wav))
-                    if recon_mos is not None:
-                        recon_scores["UTMOS"] = round(recon_mos, 2)
-            consistency_scores = {
-                "WER": to_pct(consistent_wer_val),
-                "CER": to_pct(consistent_cer_val),
-            }
-
-            results["samples"].append(
-                {
-                    "index": global_idx,
-                    "id": str(sample_id),
-                    "language": lang[idx],
-                    "gt_text": ref_text_normalized,
-                    "ref_transcription": ref_hyp,
-                    "recon_transcription": recon_hyp,
-                    "ref": ref_scores,
-                    "reconstructed": recon_scores,
-                    "consistency": consistency_scores,
-                }
-            )
-
-            # optionally save spectrogram images
-            if log_images and image_count < max_images and cur_original_mel is not None:
-
-                def _to_numpy(m: torch.Tensor):
-                    m = m.squeeze(0)
-                    return m.detach().cpu().float().numpy().T
-
-                fig, axes = plt.subplots(2, 1, figsize=(12, 4))
-                im0 = axes[0].imshow(
-                    _to_numpy(cur_original_mel), aspect="auto", origin="lower"
-                )
-                axes[0].set_title(f"Original Mel #{idx}")
-                im1 = axes[1].imshow(
-                    _to_numpy(cur_reconstructed_mel), aspect="auto", origin="lower"
-                )
-                axes[1].set_title(f"Reconstructed Mel #{idx}")
-                for ax in axes:
-                    ax.set_xlabel("Frames")
-                    ax.set_ylabel("Bins")
-                out_img_path = img_dir / f"sample_{global_idx}.png"
-                fig.tight_layout()
-                fig.savefig(out_img_path)
-                image_count += 1
-                images.append(wandb.Image(str(out_img_path)))
-                plt.close(fig)
-
-            if log_images and image_count < max_images:
-                # also log audio to wandb as audio files
-                original_audios.append(
-                    wandb.Audio(original_audio.numpy(), sample_rate=sr)
-                )
-                if not original_audio_only:
-                    reconstructed_audios.append(
-                        wandb.Audio(reconstructed_audio.numpy(), sample_rate=sr)
-                    )
-
-            # aggregate per language (partial)
-            if setting == "OOD":
-                key = lang[idx]
-            else:
-                key = "all"
-            if key not in per_language:
-                per_language[key] = {}
-            for m in ["WER", "CER", "UTMOS"]:
-                if m in ref_scores and ref_scores[m] is not None:
-                    per_language[key].setdefault(f"ref_{m}", [])
-                    per_language[key][f"ref_{m}"].append(float(ref_scores[m]))
-                if m in recon_scores and recon_scores[m] is not None:
-                    per_language[key].setdefault(f"recon_{m}", [])
-                    per_language[key][f"recon_{m}"].append(float(recon_scores[m]))
-
-            for m in ["WER", "CER"]:
-                if consistency_scores[m] is not None:
-                    per_language[key].setdefault(f"consistent_{m}", [])
-                    per_language[key][f"consistent_{m}"].append(
-                        float(consistency_scores[m])
-                    )
-
-        processed += len(audios_srs)
-        pbar.update(len(audios_srs))
-        if num_samples > 0 and processed >= num_samples:
-            break
-    pbar.close()
-
-    # Calculate final delta for all samples
-    for sample in results["samples"]:
-        delta = {}
-        for m in ["WER", "CER", "UTMOS"]:
-            rv = sample["ref"].get(m)
-            rcv = sample["reconstructed"].get(m)
-            if rv is None or rcv is None:
-                delta[m] = None
-            else:
-                d_val = float(rcv - rv)
-                delta[m] = round(d_val, 2)
-        sample["delta"] = delta
-
-    # Save 10 audios if requested
-    if save_10_audios:
-        saved_dir = work_dir / "saved_audios"
-        saved_dir.mkdir(parents=True, exist_ok=True)
-        import shutil
-
-        for sample in results["samples"][:10]:
-            sample_id = sample.get("id")
-            if not sample_id:
-                continue
-            orig_wav = tmp_audio_dir / f"sample_{sample_id}_orig.wav"
-            recon_wav = tmp_audio_dir / f"sample_{sample_id}_recon.wav"
-            prompt_txt = tmp_audio_dir / f"sample_{sample_id}_prompt.txt"
-
-            if orig_wav.exists():
-                shutil.copy(orig_wav, saved_dir / orig_wav.name)
-            if recon_wav.exists():
-                shutil.copy(recon_wav, saved_dir / recon_wav.name)
-            if prompt_txt.exists():
-                shutil.copy(prompt_txt, saved_dir / prompt_txt.name)
-        logger.info(f"Saved at most 10 audios (and prompts) to {saved_dir}")
-
-    # Cleanup temporary WAVs if requested
-    if not keep_wavs:
-        logger.info(f"Cleaning up temporary WAV files in {tmp_audio_dir}")
-        import shutil
-
-        shutil.rmtree(tmp_audio_dir)
-
-    log_payload = {}
-    if images:
-        log_payload["images"] = images
-    if original_audios:
-        log_payload["original_audios"] = original_audios
-    if reconstructed_audios:
-        log_payload["reconstructed_audios"] = reconstructed_audios
-
-    if run is not None and log_payload:
-        run.log(log_payload)
-
-    # finalize aggregates
-    for key, agg in per_language.items():
-
-        def _mean(arr: List[float]) -> Optional[float]:
-            arr = [x for x in arr if not math.isnan(x)]
-            return float(sum(arr) / len(arr)) if arr else None
-
-        ref_wer = _mean(agg.get("ref_WER", []))
-        recon_wer = _mean(agg.get("recon_WER", []))
-        ref_cer = _mean(agg.get("ref_CER", []))
-        recon_cer = _mean(agg.get("recon_CER", []))
-        ref_utmos = _mean(agg.get("ref_UTMOS", []))
-        recon_utmos = _mean(agg.get("recon_UTMOS", []))
-        consist_wer = _mean(agg.get("consistent_WER", []))
-        consist_cer = _mean(agg.get("consistent_CER", []))
-
-        def to_report(v, is_mos=False):
-            if v is None or math.isnan(v):
-                return None
-            return round(float(v), 2)
-
-        agg_ref = {
-            "WER": to_report(ref_wer),
-            "CER": to_report(ref_cer),
-            "UTMOS": to_report(ref_utmos, True),
-        }
-        agg_recon = {
-            "WER": to_report(recon_wer),
-            "CER": to_report(recon_cer),
-            "UTMOS": to_report(recon_utmos, True),
-        }
-        agg_consist = {"WER": to_report(consist_wer), "CER": to_report(consist_cer)}
-
-        agg.clear()
-        agg.update(
-            {"ref": agg_ref, "reconstructed": agg_recon, "consistency": agg_consist}
-        )
-
-        discrepancy = {}
-        for m in ["WER", "CER", "UTMOS"]:
-            rv = agg_ref.get(m)
-            rcv = agg_recon.get(m)
-            if rv is None or rcv is None:
-                discrepancy[m] = None
-            else:
-                discrepancy[m] = round(float(rcv - rv), 2)
-
-        results["aggregates"][key] = {
-            "ref": agg_ref,
-            "reconstructed": agg_recon,
-            "delta": discrepancy,
-        }
-
-    return results
-
-
-def save_json(output: Dict[str, Any], out_path: Path):
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(output, indent=2))
-    logger.info(f"Saved metrics to {out_path}")
-
-
-def run_single_eval(
-    checkpoint: str,
-    gpu_index: int,
-    base_args: Dict[str, Any],
-    hyperparams: Dict[str, Any],
-    timeout: int,
-    run,
-) -> Dict[str, Any]:
-    if torch.cuda.is_available():
-        torch.cuda.set_device(gpu_index)
-        device = torch.device(f"cuda:{gpu_index}")
-    elif torch.backends.mps.is_available():
-        device = torch.device("mps")
-    else:
-        raise RuntimeError(
-            "No CUDA or MPS device is available. CPU evaluation is not supported."
-        )
-    set_seed(base_args.get("seed", 42))
-
-    baseline_model_name = base_args.get("baseline_model")
-    original_audio_only = base_args.get("original_audio_only", False)
-    model = None
-    vocoder = None
-    vocoder_type = "vocos"
-    baseline_model = None
-
-    if original_audio_only:
-        pass  # Skip loading everything
-    elif baseline_model_name:
-        raise NotImplementedError("Baseline audio codec is disabled for now.")
-    else:
-        config_dict = base_args.get("config_dict")
-        if config_dict is None:
-            ckpt_path = Path(checkpoint)
-            ckpt_dir = (
-                ckpt_path.parent
-                if ckpt_path.is_file() and ckpt_path.name == "model.safetensors"
-                else ckpt_path
-            )
-            if ckpt_dir.is_dir():
-                config_files = list(ckpt_dir.glob("*.yaml")) + list(
-                    ckpt_dir.glob("*.json")
-                )
-                config_path = None
-                for cf in config_files:
-                    if "config" in cf.name or "encoder" in cf.name:
-                        config_path = str(cf)
-                        break
-                if not config_path and len(config_files) > 0:
-                    config_path = str(config_files[0])
-
-                if config_path:
-                    logger.info(f"Loading config from {config_path}")
-                    config_dict = load_config(config_path)
-                else:
-                    raise ValueError(f"No config file found in {ckpt_dir}")
-            else:
-                raise ValueError(
-                    f"Internal model evaluation requires --config-path or a config file in the checkpoint directory: {ckpt_dir}"
-                )
-
-        # build model
-        model, vocoder, vocoder_type, vae_cfg = build_model_from_config(
-            config_dict, checkpoint, device
-        )
-        assert not model.training, "Model must be in eval mode during evaluation"
-        assert not model.encoder.training, (
-            "Encoder must be in eval mode: reparameterization trick and "
-            "dropout regularizer are only disabled when training=False"
-        )
-
-    # Whisper ASR for WER/CER
-    whisper_asr = WhisperASR(device)
-
-    # Standalone UTMOS Predictor
-    evaluator = None
-    if base_args.get("UTMOS"):
-        evaluator = UTMOSPredictor(device)
-
-    # resolve args
-    setting = base_args["setting"]
-    languages = base_args.get("languages")
-    num_samples = base_args["num_samples"]
-    batch_size = base_args["batch_size"]
-    n_steps = int(hyperparams.get("n_steps", base_args["n_steps"]))
-    temperature = float(hyperparams.get("temperature", base_args["temperature"]))
-    guidance_scale = float(
-        hyperparams.get("guidance_scale", base_args["guidance_scale"])
-    )
-    chunk_val = hyperparams.get("chunk", base_args.get("chunk"))
-    chunk = int(chunk_val) if chunk_val is not None else None
-    chunk_size = base_args.get("chunk_size")
-    log_images = bool(base_args.get("wandb_log_images", False))
-    wandb_max_images = int(base_args.get("wandb_max_images", 10))
-
-    if original_audio_only:
-        work_dir = (
-            Path(base_args["output_dir"]) / base_args["exp_name"] / "original_audio"
-        )
-    elif baseline_model_name:
-        # Reorganized baseline structure: evaluation/baseline_run/<exp_name>/[param_disambiguation]
-        work_dir = (
-            Path(base_args["output_dir"]) / "baseline_run" / base_args["exp_name"]
-        )
-        if baseline_model_name == "dualcodec" and base_args.get("baseline_hz"):
-            work_dir = work_dir / f"hz{base_args['baseline_hz']}"
-        elif (
-            baseline_model_name == "flexicodec"
-            and base_args.get("baseline_tau") is not None
-        ):
-            work_dir = work_dir / f"tau{base_args['baseline_tau']}"
-    else:
-        ckpt_path = Path(checkpoint)
-        ckpt_dir_name = (
-            ckpt_path.parent.name
-            if ckpt_path.name == "model.safetensors"
-            else ckpt_path.name
-        )
-        if chunk is not None or chunk_size is not None:
-            work_dir = (
-                Path(base_args["output_dir"])
-                / base_args["exp_name"]
-                / ckpt_dir_name
-                / f"chunk_size_{chunk_size}_n_chunks_{chunk}"
-            )
-        else:
-            work_dir = (
-                Path(base_args["output_dir"])
-                / base_args["exp_name"]
-                / ckpt_dir_name
-                / f"gpu{gpu_index}_n{n_steps}_t{temperature}_g{guidance_scale}"
-            )
-    work_dir.mkdir(parents=True, exist_ok=True)
-
-    start = time.time()
-    eval_output = evaluate_dataset(
-        setting=setting,
-        languages=languages,
-        num_samples=num_samples,
+    print("Initializing Vocoder...")
+    vocoder = Vocos.from_pretrained("charactr/vocos-mel-24khz").to(device)
+    return model, vocoder
+
+
+def load_test_dataset(num_workers: int, batch_size: int):
+    dataset = LibriSpeechAlignDataset()
+    test_dataset = TestDatasetWrapper(dataset, "test")
+    dataloader = torch.utils.data.DataLoader(
+        test_dataset,
         batch_size=batch_size,
-        model=model,
-        vocoder=vocoder,
-        vocoder_type=vocoder_type,
-        baseline_model=baseline_model,
-        n_steps=n_steps,
-        temperature=temperature,
-        guidance_scale=guidance_scale,
-        device=device,
-        work_dir=work_dir,
-        evaluator=evaluator,
-        whisper_asr=whisper_asr,
-        log_images=log_images,
-        max_images=wandb_max_images,
-        keep_wavs=base_args.get("keep_wavs", False),
-        filter_librispeech=base_args.get("filter_librispeech", False),
-        original_audio_only=original_audio_only,
-        skip_ref_metrics=base_args.get("skip_ref_metrics", False)
-        and (not original_audio_only),
-        run=run,
-        quantized=base_args.get("quantized", False),
-        residual=base_args.get("residual", False),
-        tail=base_args.get("tail", False),
-        chunk=chunk,
-        chunk_size=chunk_size,
-        save_10_audios=base_args.get("save_10_audios", False),
+        shuffle=False,
+        num_workers=num_workers,
+        collate_fn=EvalDataCollator,
     )
-    status = "success"
-    error = None
-    duration = time.time() - start
-
-    # save json for this run
-    out_path = work_dir / "metrics.json"
-    if eval_output:
-        save_json(eval_output, out_path)
-
-    return {
-        "checkpoint": checkpoint,
-        "gpu_index": gpu_index,
-        "hyperparams": {
-            "n_steps": n_steps,
-            "temperature": temperature,
-            "guidance_scale": guidance_scale,
-        },
-        "status": status,
-        "duration": duration,
-        "metrics_path": str(out_path) if eval_output else None,
-        "work_dir": str(work_dir),
-        "error": error,
-    }
+    return dataloader
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Evaluate VAE reconstructions with CER and UTMOS"
-    )
-    parser.add_argument("--config-path", type=str, default=None)
-    parser.add_argument(
-        "--report-to", type=str, default="none", choices=["none", "wandb"]
-    )
-    parser.add_argument("--num-samples", type=int, default=0)
-    parser.add_argument("--batch-size", type=int, default=4)
-    parser.add_argument("--n-steps", type=int, default=8)
-    parser.add_argument("--temperature", type=float, default=0.2)
-    parser.add_argument("--guidance-scale", type=float, default=1.3)
-    parser.add_argument(
-        "--setting",
-        type=str,
-        default="LibriSpeech",
-        choices=["LibriTTS", "OOD", "LibriSpeech"],
-    )
-    parser.add_argument(
-        "--languages",
-        nargs="+",
-        help="Languages for OOD setting (e.g., english german spanish)",
-    )
-    parser.add_argument(
-        "--wandb-log-images",
-        action="store_true",
-        help="If set, also log spectrogram images to W&B",
-    )
-    parser.add_argument(
-        "--wandb-max-images",
-        type=int,
-        default=10,
-        help="Maximum number of images to log (>1)",
-    )
-
-    # Baseline arguments
-    parser.add_argument(
-        "--baseline-model",
-        type=str,
-        default=None,
-        choices=["encodec", "mimi", "dualcodec", "xytokenizer", "flexicodec"],
-        help="If specified, bypasses the internal VAE and tests one of the baseline audio codecs.",
-    )
-    parser.add_argument(
-        "--baseline-hz",
-        type=int,
-        default=None,
-        help="Frame rate for dualcodec (12 or 25)",
-    )
-    parser.add_argument(
-        "--baseline-tau",
-        type=float,
-        default=None,
-        help="Tau merging_threshold for flexicodec (e.g. 1.0, 0.91, 0.867)",
-    )
-
-    # checkpoint inputs
-    parser.add_argument(
-        "--checkpoints", nargs="+", help="List of checkpoints to evaluate"
-    )
-    parser.add_argument(
-        "--checkpoints-file", type=str, help="File with one checkpoint path per line"
-    )
-
-    parser.add_argument(
-        "--original-audio-only",
-        action="store_true",
-        help="Bypass model entirely and only evaluate original audio metrics.",
-    )
-    parser.add_argument(
-        "--skip-ref-metrics",
-        action="store_true",
-        help="Skip evaluating reference metrics to save time during model evaluation.",
-    )
-    parser.add_argument(
-        "--hyperparam-sweep",
-        type=str,
-        help="JSON path for hyperparam sweep with keys: n_steps, temperature, guidance_scale",
-    )
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--exp-name", type=str, default="default_exp")
-    parser.add_argument("--output-dir", type=str, default="./evaluation")
-    parser.add_argument(
-        "--no_utmos", action="store_true", help="Disable UTMOS computation"
-    )
-    parser.add_argument(
-        "--keep-wavs",
-        action="store_true",
-        help="Keep temporary WAV files after evaluation",
-    )
-    parser.add_argument(
-        "--save_10_audios",
-        action="store_true",
-        help="Save at most 10 audios (original, recon, prompt) to the work_dir",
-    )
-    parser.add_argument(
-        "--filter-librispeech",
-        action="store_true",
-        help="If set, filters the LibriSpeech test set using the E2TTS JSON keys",
-    )
-    parser.add_argument("-q", "--quantized", action="store_true")
-    parser.add_argument("-r", "--residual", action="store_true")
-    parser.add_argument("-t", "--tail", action="store_true")
-    parser.add_argument(
-        "--chunk", type=int, default=None, help="Number of chunks of tail to use"
-    )
-    parser.add_argument("--chunk-size", type=int, default=None, help="Fixed chunk size")
-    parser.add_argument(
-        "--chunks-sweep",
-        type=int,
-        nargs="+",
-        default=None,
-        help="List of chunk numbers to sweep over",
-    )
-
-    args = parser.parse_args()
-
-    # set default dtype and validate that a supported accelerator is present
-    if torch.cuda.is_available():
-        torch.set_default_dtype(torch.bfloat16)
-    elif torch.backends.mps.is_available():
-        torch.set_default_dtype(torch.float32)
-    else:
-        raise RuntimeError(
-            "No CUDA or MPS device is available. CPU evaluation is not supported."
-        )
-
-    # resolve checkpoints (not required for baselines)
-    checkpoints: List[str] = []
-    if args.checkpoints_file:
-        with open(args.checkpoints_file, "r") as f:
-            checkpoints = [l.strip() for l in f if l.strip() and not l.startswith("#")]
-    if args.checkpoints:
-        checkpoints.extend(args.checkpoints)
-
-    resolved_checkpoints = []
-    for ckpt in checkpoints:
-        ckpt_path = Path(ckpt)
-        if ckpt_path.is_dir():
-            safetensors_path = ckpt_path / "model.safetensors"
-            if safetensors_path.exists():
-                resolved_checkpoints.append(str(safetensors_path))
-            else:
-                resolved_checkpoints.append(ckpt)
-        else:
-            resolved_checkpoints.append(ckpt)
-    checkpoints = resolved_checkpoints
-
-    if args.baseline_model is None and not checkpoints and not args.original_audio_only:
-        raise ValueError(
-            "No checkpoints provided. Use --checkpoints or --checkpoints-file"
-        )
-
-    if (
-        args.baseline_model is not None or args.original_audio_only
-    ) and not checkpoints:
-        checkpoints = ["baseline_run" if args.baseline_model else "original_audio"]
-
-    # load config dict if provided globally
-    config_dict = None
-    if args.config_path:
-        config_dict = load_config(args.config_path)
-
-    # hyperparam combinations
-    if args.hyperparam_sweep:
-        with open(args.hyperparam_sweep, "r") as f:
-            sweep_cfg = json.load(f)
-        hyperparam_combinations = generate_hyperparam_combinations(sweep_cfg)
-    else:
-        sweep_dict = {
-            "n_steps": [args.n_steps],
-            "temperature": [args.temperature],
-            "guidance_scale": [args.guidance_scale],
-        }
-        if args.chunks_sweep:
-            sweep_dict["chunk"] = args.chunks_sweep
-        elif args.chunk is not None:
-            sweep_dict["chunk"] = [args.chunk]
-        else:
-            sweep_dict["chunk"] = [None]
-
-        hyperparam_combinations = generate_hyperparam_combinations(sweep_dict)
-        # collapse if singular defaults
-        if len(hyperparam_combinations) == 1:
-            hyperparam_combinations = None
-
-    # validate wandb-max-images
-    if args.wandb_max_images is not None and args.wandb_max_images <= 1:
-        raise ValueError("--wandb-max-images must be greater than 1")
-
-    base_args: Dict[str, Any] = {
-        "config_dict": config_dict,
-        "report_to": args.report_to,
-        "num_samples": args.num_samples,
-        "batch_size": args.batch_size,
-        "n_steps": args.n_steps,
+def get_hypothesis(model, vocoder, audios_srs, args):
+    params = {
+        "audios_srs": audios_srs,
+        "num_steps": args.num_steps,
         "temperature": args.temperature,
         "guidance_scale": args.guidance_scale,
-        "setting": args.setting,
-        "languages": args.languages,
-        "seed": args.seed,
-        "exp_name": args.exp_name,
-        "output_dir": args.output_dir,
-        "wandb_log_images": args.wandb_log_images,
-        "wandb_max_images": args.wandb_max_images,
-        "baseline_model": args.baseline_model,
-        "baseline_hz": args.baseline_hz,
-        "baseline_tau": args.baseline_tau,
-        "UTMOS": not args.no_utmos,
-        "keep_wavs": args.keep_wavs,
-        "filter_librispeech": args.filter_librispeech,
-        "original_audio_only": args.original_audio_only,
-        "skip_ref_metrics": args.skip_ref_metrics,
-        "quantized": args.quantized,
-        "residual": args.residual,
-        "tail": args.tail,
-        "chunk": args.chunk,
-        "chunk_size": args.chunk_size,
-        "save_10_audios": args.save_10_audios,
     }
+    if args.quantized or args.residual or args.tail:
+        params["quantized"] = False
+        params["residual"] = False
+        params["tail"] = False
 
-    # Build task list: checkpoint × hyperparam combinations
-    if hyperparam_combinations is None:
-        hyperparam_combinations = [{}]
-    tasks: List[Tuple[str, Dict[str, Any]]] = []
-    for ckpt in checkpoints:
-        for combo in hyperparam_combinations:
-            tasks.append((ckpt, combo))
+    if args.quantized:
+        params["quantized"] = True
+    if args.residual:
+        params["residual"] = True
+    if args.tail:
+        params["tail"] = True
 
-    # Optional wandb init
-    run = None
-    if args.report_to == "wandb":
-        run = wandb.init(
-            project="MelCausalVAE-eval",
-            name=args.exp_name,
-            config={"setting": args.setting, "languages": args.languages},
+    if getattr(args, "chunk_size", None) is not None:
+        params["chunk_size"] = args.chunk_size
+    if getattr(args, "chunk", None) is not None:
+        params["chunk"] = args.chunk
+    if getattr(args, "exclude_chunk", None) is not None:
+        params["exclude_chunk"] = args.exclude_chunk
+    if getattr(args, "exclude_start_chunk", None) is not None:
+        params["exclude_start_chunk"] = args.exclude_start_chunk
+    if getattr(args, "exclude_end_chunk", None) is not None:
+        params["exclude_end_chunk"] = args.exclude_end_chunk
+
+    out = model.encode_decode(**params)
+
+    reconstructed_mel = out["decoder_output"].audio_features
+    padding_mask = out["decoder_output"].padding_mask
+    audio = vocoder.decode(reconstructed_mel.permute(0, 2, 1))
+    return audio
+
+
+def main(args):
+    set_seed(args.seed)
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    else:
+        raise RuntimeError(
+            "No CUDA device is available. CPU inference is strongly discouraged."
         )
 
-    # Run tasks sequentially
-    logger.info(f"Running {len(tasks)} evaluation task(s) sequentially")
-    results: List[Dict[str, Any]] = []
-    for i, (ckpt, combo) in enumerate(tasks):
-        logger.info(f"Running task {i+1}/{len(tasks)}: ckpt={ckpt}, combo={combo}")
-        res = run_single_eval(ckpt, 0, base_args, combo, 3600, run)
-        logger.info(
-            f"Task completed: {res.get('checkpoint')} status={res.get('status')}"
-        )
-        results.append(res)
+    if args.batch_size > 1:
+        raise NotImplementedError("Batch size > 1 is not supported for evaluation")
 
-    if run is not None:
-        run.finish()
+    model, vocoder = load_model(args.checkpoint_dir, device)
+
+    # get models
+    UTMOS_reference = UTMOS(sample_rate=16000)
+    UTMOS_hypothesis = UTMOS(sample_rate=24000)
+    SpkSim_computer = SpkSimWavLM(device=device)
+    DWER_computer = DWER(device=device)
+
+    # load Librispeech test dataset
+    dataloader = load_test_dataset(args.num_workers, args.batch_size)
+
+    with torch.inference_mode():
+        for batch in tqdm(dataloader, desc="Processing batches", unit="batch"):
+            # get references
+            references = batch["16k_audios"]
+            # get hypotheses
+            hypotheses = get_hypothesis(
+                model, vocoder, batch["output_audios_srs"], args
+            )
+
+            UTMOS_reference.append(batch["ids"], references)
+            UTMOS_hypothesis.append(batch["ids"], hypotheses)
+            DWER_computer.append(
+                hyp_sr=24000,
+                ref_sr=16000,
+                ids=batch["ids"],
+                hyp_sig=hypotheses,
+                ref_sig=references,
+            )
+            SpkSim_computer.append(
+                hyp_sr=24000,
+                ref_sr=16000,
+                ids=batch["ids"],
+                hyp_sig=hypotheses,
+                ref_sig=references,
+            )
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--seed", type=int, default=42)
+
+    parser.add_argument("--num_workers", type=int, default=0)
+    parser.add_argument("-b", "--batch_size", type=int, default=1)
+
+    parser.add_argument(
+        "-c",
+        "--checkpoint_dir",
+        type=str,
+        help="Path to the model checkpoint directory",
+    )
+
+    parser.add_argument("--num_steps", type=int, default=8)
+    parser.add_argument("--temperature", type=float, default=0.3)
+    parser.add_argument("--guidance_scale", type=float, default=1.3)
+
+    parser.add_argument("-q", "--quantized", action="store_true")
+    parser.add_argument("-r", "--residual", action="store_true")
+    parser.add_argument("-t", "--tail", action="store_true")
+
+    parser.add_argument(
+        "--chunk_size",
+        type=int,
+        default=None,
+        help="Chunk size for the bottleneck tail",
+    )
+    parser.add_argument(
+        "--chunk",
+        type=int,
+        default=None,
+        help="Number of chunks to use, starting from the bottom of the bottleneck",
+    )
+    parser.add_argument(
+        "--exclude_chunk",
+        type=int,
+        default=None,
+        help="Number of chunks to exclude, starting from the bottom of the bottleneck",
+    )
+    args = parser.parse_args()
+    main(args)

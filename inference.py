@@ -2,7 +2,9 @@ import os
 
 # --- WORKAROUND FOR FAIRSEQ/HYDRA ON PYTHON 3.11 ---
 import dataclasses
+
 _orig_get_field = dataclasses._get_field
+
 
 def _patched_get_field(cls, a_name, a_type, *args, **kwargs):
     try:
@@ -10,15 +12,17 @@ def _patched_get_field(cls, a_name, a_type, *args, **kwargs):
     except ValueError as e:
         if "mutable default" in str(e):
             default = getattr(cls, a_name, dataclasses.MISSING)
-            actual_default = default.default if isinstance(default, dataclasses.Field) else default
+            actual_default = (
+                default.default if isinstance(default, dataclasses.Field) else default
+            )
             if actual_default is not dataclasses.MISSING:
                 default_cls = actual_default.__class__
-                orig_hash = getattr(default_cls, '__hash__', None)
+                orig_hash = getattr(default_cls, "__hash__", None)
                 try:
                     default_cls.__hash__ = lambda self: id(self)
                 except TypeError:
                     pass
-                
+
                 try:
                     return _orig_get_field(cls, a_name, a_type, *args, **kwargs)
                 finally:
@@ -30,6 +34,7 @@ def _patched_get_field(cls, a_name, a_type, *args, **kwargs):
                     except TypeError:
                         pass
         raise
+
 
 dataclasses._get_field = _patched_get_field
 # ---------------------------------------------------
@@ -112,10 +117,10 @@ def main(args):
             params["residual"] = True
         if args.tail:
             params["tail"] = True
-            
+
         if getattr(args, "zero_speaker", False):
             params["zero_speaker"] = True
-            
+
         if getattr(args, "guide_only_speaker", False):
             params["guide_only_speaker"] = True
 
@@ -156,17 +161,42 @@ if __name__ == "__main__":
     parser.add_argument("-i", "--audio_path", type=str, default="ablations/male.wav")
     parser.add_argument("-o", "--output_path", type=str, default=None)
     parser.add_argument("--num_steps", type=int, default=16)
-    parser.add_argument("--temperature", type=float, default=0.2)
+    parser.add_argument("--temperature", type=float, default=0.3)
     parser.add_argument("--guidance_scale", type=float, default=1.3)
     parser.add_argument("-q", "--quantized", action="store_true")
-    parser.add_argument("-qq", "--zero_speaker", action="store_true", help="Zero out speaker embedding")
+    parser.add_argument(
+        "-qq", "--zero_speaker", action="store_true", help="Zero out speaker embedding"
+    )
     parser.add_argument("-r", "--residual", action="store_true")
     parser.add_argument("-t", "--tail", action="store_true")
-    parser.add_argument("--guide_only_speaker", action="store_true", help="Apply guidance scale only to speaker embedding")
-    parser.add_argument("--chunk_size", type=int, default=None, help="Chunk size for the bottleneck tail")
-    parser.add_argument("--chunk", type=int, default=None, help="Number of chunks to use, starting from the bottom of the bottleneck")
-    parser.add_argument("--exclude_chunk", type=int, default=None, help="Number of chunks to exclude, starting from the bottom of the bottleneck")
-    parser.add_argument("--exclude_start_chunk", type=int, default=None, help="Start chunk to exclude")
-    parser.add_argument("--exclude_end_chunk", type=int, default=None, help="End chunk to exclude")
+    parser.add_argument(
+        "--guide_only_speaker",
+        action="store_true",
+        help="Apply guidance scale only to speaker embedding",
+    )
+    parser.add_argument(
+        "--chunk_size",
+        type=int,
+        default=None,
+        help="Chunk size for the bottleneck tail",
+    )
+    parser.add_argument(
+        "--chunk",
+        type=int,
+        default=None,
+        help="Number of chunks to use, starting from the bottom of the bottleneck",
+    )
+    parser.add_argument(
+        "--exclude_chunk",
+        type=int,
+        default=None,
+        help="Number of chunks to exclude, starting from the bottom of the bottleneck",
+    )
+    parser.add_argument(
+        "--exclude_start_chunk", type=int, default=None, help="Start chunk to exclude"
+    )
+    parser.add_argument(
+        "--exclude_end_chunk", type=int, default=None, help="End chunk to exclude"
+    )
     args = parser.parse_args()
     main(args)
