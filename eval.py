@@ -24,15 +24,17 @@ from evaluation.scripts.utmos import UTMOS
 from evaluation.scripts.speaker_similarity import SpkSimWavLM
 
 
-def load_model(checkpoint_dir, device):
-    print(f"Loading model from {checkpoint_dir}...")
-    config_path = os.path.join(checkpoint_dir, "config.json")
+def load_model(checkpoint, device):
+    print(f"Loading model from {checkpoint}...")
+    config_path = os.path.join(checkpoint, "config.json")
     with open(config_path, "r") as f:
         cfg_dict = json.load(f)
 
+    model_name = cfg_dict.get("model_name")
+
     model = build_model(cfg_dict)
 
-    checkpoint_path = os.path.join(checkpoint_dir, "model.safetensors")
+    checkpoint_path = os.path.join(checkpoint, "model.safetensors")
     model.from_pretrained(checkpoint_path)
     model.eval()
     model.to(device)
@@ -43,12 +45,16 @@ def load_model(checkpoint_dir, device):
     )
     print("Initializing Vocoder...")
     vocoder = Vocos.from_pretrained("charactr/vocos-mel-24khz").to(device)
-    return model, vocoder
+    return model, vocoder, model_name
 
 
-def load_test_dataset(num_workers: int, batch_size: int):
+def load_test_dataset(
+    num_workers: int, batch_size: int, num_samples=None, max_audio_len=None
+):
     dataset = LibriSpeechAlignDataset()
-    test_dataset = TestDatasetWrapper(dataset, "test")
+    test_dataset = TestDatasetWrapper(dataset, "test", max_audio_len=max_audio_len)
+    if num_samples is not None:
+        test_dataset = torch.utils.data.Subset(test_dataset, range(num_samples))
     dataloader = torch.utils.data.DataLoader(
         test_dataset,
         batch_size=batch_size,
@@ -59,7 +65,7 @@ def load_test_dataset(num_workers: int, batch_size: int):
     return dataloader
 
 
-def get_hypothesis(model, vocoder, audios_srs, args):
+def get_hypothesis(model, vocoder, audios_srs, args, device):
     params = {
         "audios_srs": audios_srs,
         "num_steps": args.num_steps,
@@ -89,12 +95,35 @@ def get_hypothesis(model, vocoder, audios_srs, args):
     if getattr(args, "exclude_end_chunk", None) is not None:
         params["exclude_end_chunk"] = args.exclude_end_chunk
 
-    out = model.encode_decode(**params)
+    generator = torch.Generator(device=device).manual_seed(args.seed)
+    params["generator"] = generator
 
+    out = model.encode_decode(**params)
     reconstructed_mel = out["decoder_output"].audio_features
     padding_mask = out["decoder_output"].padding_mask
-    audio = vocoder.decode(reconstructed_mel.permute(0, 2, 1))
-    return audio
+    audios = [
+        vocoder.decode(mel[~mask].unsqueeze(0).permute(0, 2, 1)).squeeze(0)
+        for mel, mask in zip(reconstructed_mel, padding_mask)
+        if not mask.all()
+    ]
+    return audios
+
+
+def get_eval_id(args):
+    eval_id = f"eval_{args.num_samples}"
+    if args.num_steps is not None:
+        eval_id += f"_nsteps{args.num_steps}"
+    if args.temperature is not None:
+        eval_id += f"_temp{args.temperature}"
+    if args.guidance_scale is not None:
+        eval_id += f"_guidance{args.guidance_scale}"
+    if args.quantized:
+        eval_id += "_quantized"
+    if args.residual:
+        eval_id += "_residual"
+    if args.tail:
+        eval_id += "_tail"
+    return eval_id
 
 
 def main(args):
@@ -105,30 +134,37 @@ def main(args):
         raise RuntimeError(
             "No CUDA device is available. CPU inference is strongly discouraged."
         )
-
-    if args.batch_size > 1:
-        raise NotImplementedError("Batch size > 1 is not supported for evaluation")
-
-    model, vocoder = load_model(args.checkpoint_dir, device)
+    model, vocoder, model_name = load_model(args.checkpoint, device)
 
     # get models
-    UTMOS_reference = UTMOS(sample_rate=16000)
-    UTMOS_hypothesis = UTMOS(sample_rate=24000)
     DWER_computer = DWER("small", device=device)  # FIXME
+    UTMOS_reference = UTMOS(sample_rate=16000, device=device)
+    UTMOS_hypothesis = UTMOS(sample_rate=24000, device=device)
     SpkSim_computer = SpkSimWavLM("microsoft/wavlm-base-sv", device=device)
 
     # load Librispeech test dataset
-    dataloader = load_test_dataset(args.num_workers, args.batch_size)
+    dataloader = load_test_dataset(
+        args.num_workers,
+        args.batch_size,
+        num_samples=args.num_samples,
+        max_audio_len=args.max_audio_len,
+    )
 
     with torch.inference_mode():
         for batch in tqdm(dataloader, desc="Processing batches", unit="batch"):
             # get references
-            references = batch["16k_audios"]
+            references = [ref.to(device) for ref in batch["16k_audios"]]
             # get hypotheses
             audios_srs = [
                 (audio.to(device), sr) for audio, sr in batch["output_audios_srs"]
             ]
-            hypotheses = get_hypothesis(model, vocoder, audios_srs, args)
+            hypotheses = get_hypothesis(
+                model=model,
+                vocoder=vocoder,
+                audios_srs=audios_srs,
+                args=args,
+                device=device,
+            )
 
             UTMOS_reference.append(batch["ids"], references)
             UTMOS_hypothesis.append(batch["ids"], hypotheses)
@@ -147,6 +183,45 @@ def main(args):
                 ref_sig=references,
             )
 
+        utmos_ref = UTMOS_reference.summarize("average")
+        utmos_hyp = UTMOS_hypothesis.summarize("average")
+        dwer = DWER_computer.summarize("error_rate")
+        spksim = SpkSim_computer.summarize("average")
+
+        output_dir = os.path.join(args.output_dir, model_name)
+        os.makedirs(output_dir, exist_ok=True)
+
+        eval_id = get_eval_id(args)
+
+        with open(os.path.join(output_dir, f"{eval_id}.json"), "w") as f:
+            json.dump(
+                {
+                    "utmos_ref": utmos_ref,
+                    "utmos_hyp": utmos_hyp,
+                    "dwer": dwer,
+                    "spksim": spksim,
+                    "checkpoint": args.checkpoint,
+                    "hparams": {
+                        "num_samples": args.num_samples,
+                        "num_steps": args.num_steps,
+                        "temperature": args.temperature,
+                        "guidance_scale": args.guidance_scale,
+                        "quantized": args.quantized,
+                        "residual": args.residual,
+                        "tail": args.tail,
+                        "chunk_size": args.chunk_size,
+                        "chunk": args.chunk,
+                        "exclude_chunk": args.exclude_chunk,
+                    },
+                },
+                f,
+            )
+
+        print(f"UTMOS (reference): {utmos_ref:.3f}")
+        print(f"UTMOS (hypothesis): {utmos_hyp:.3f}")
+        print(f"DWER: {dwer:.3f}%")
+        print(f"Speaker Similarity: {spksim:.3f}")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -157,9 +232,30 @@ if __name__ == "__main__":
 
     parser.add_argument(
         "-c",
-        "--checkpoint_dir",
+        "--checkpoint",
         type=str,
         help="Path to the model checkpoint directory",
+    )
+
+    parser.add_argument(
+        "--num_samples",
+        type=int,
+        default=None,
+        help="Number of samples to evaluate",
+    )
+
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default="evaluation",
+        help="Directory to save the evaluation results",
+    )
+
+    parser.add_argument(
+        "--max_audio_len",
+        type=float,
+        default=20.0,
+        help="Maximum audio length in seconds to filter the dataset",
     )
 
     parser.add_argument("--num_steps", type=int, default=8)

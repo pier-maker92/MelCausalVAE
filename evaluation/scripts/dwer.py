@@ -68,22 +68,22 @@ class DWER(MetricStats):
         hyp_sig: List[torch.FloatTensor],
         ref_sig: List[torch.FloatTensor],
     ):
-        languages = ["en"] * len(ids)  # FIXME only english is supported for now
-
         # handling sr
         if hyp_sr != SAMPLE_RATE:
             hyp_sig = [
-                torchaudio.functional.resample(x, hyp_sr, SAMPLE_RATE).cpu().numpy()
-                for x in hyp_sig
+                torchaudio.functional.resample(x, hyp_sr, SAMPLE_RATE) for x in hyp_sig
             ]
         if ref_sr != SAMPLE_RATE:
             ref_sig = [
-                torchaudio.functional.resample(x, ref_sr, SAMPLE_RATE).cpu().numpy()
-                for x in ref_sig
+                torchaudio.functional.resample(x, ref_sr, SAMPLE_RATE) for x in ref_sig
             ]
+
+        hyp_sig = [x.squeeze().cpu().numpy() for x in hyp_sig]
+        ref_sig = [x.squeeze().cpu().numpy() for x in ref_sig]
 
         # Concatenate
         sig = hyp_sig + ref_sig
+        languages = ["en"] * len(sig)  # FIXME only english is supported for now
 
         # Move to device
         self.model.device = self.device

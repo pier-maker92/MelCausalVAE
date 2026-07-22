@@ -385,7 +385,7 @@ class Encoder(SigmaVAEEncoder):
             if kwargs.get("step", None) is not None
             else 0.0
         )
-        if self.use_reparameterization_trick:
+        if self.use_reparameterization_trick and self.training:
             z = self.reparameterize(mu, logvar, std=1.0)
         else:
             z = mu

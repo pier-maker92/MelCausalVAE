@@ -27,7 +27,7 @@ SAMPLE_RATE = 16000
 
 
 class UTMOS(MetricStats):
-    def __init__(self, sample_rate: int, model: str = None):
+    def __init__(self, sample_rate: int, model: str = None, device=None):
         self.sample_rate = sample_rate
         self.model = model
         if model is None:
@@ -35,15 +35,19 @@ class UTMOS(MetricStats):
                 "tarepan/SpeechMOS:v1.2.0", "utmos22_strong", trust_repo=True
             )
         self.clear()
+        self.device = device
 
     @torch.no_grad()
     def append(self, ids: list, sig: torch.FloatTensor):
 
         # Resample
         if self.sample_rate != SAMPLE_RATE:
-            sig = torchaudio.functional.resample(sig, self.sample_rate, SAMPLE_RATE)
+            sig = [
+                torchaudio.functional.resample(s, self.sample_rate, SAMPLE_RATE)
+                for s in sig
+            ]
 
-        self.model.to(sig[0].device)
+        self.model.to(self.device)
         self.model.eval()
 
         # Forward

@@ -167,10 +167,17 @@ class EvalDataCollator(object):
 
 
 class TrainDatasetWrapper(SimpleAudioDataset):
-    def __init__(self, dataset: SimpleAudioDataset, split: str):
+    def __init__(self, dataset: SimpleAudioDataset, split: str, max_audio_len: Optional[float] = None):
         super().__init__()
         assert split in ["train", "test"], "split must be either train or test"
         self.dataset = getattr(dataset, f"{split}_dataset")
+        if max_audio_len is not None:
+            self.dataset = self.dataset.filter(
+                lambda x: (
+                    x.get("duration", x.get("duration_sec", len(x["audio"]["array"]) / x["audio"]["sampling_rate"]))
+                ) <= max_audio_len,
+                num_proc=os.cpu_count() or 1
+            )
 
     def __len__(self):
         return len(self.dataset)
@@ -185,10 +192,17 @@ class TrainDatasetWrapper(SimpleAudioDataset):
 
 
 class TestDatasetWrapper(SimpleAudioDataset):
-    def __init__(self, dataset: SimpleAudioDataset, split: str):
+    def __init__(self, dataset: SimpleAudioDataset, split: str, max_audio_len: Optional[float] = None):
         super().__init__()
         assert split in ["test", "train"], "split must be test or train"
         self.dataset = getattr(dataset, f"{split}_dataset")
+        if max_audio_len is not None:
+            self.dataset = self.dataset.filter(
+                lambda x: (
+                    x.get("duration", x.get("duration_sec", len(x["audio"]["array"]) / x["audio"]["sampling_rate"]))
+                ) <= max_audio_len,
+                num_proc=os.cpu_count() or 1
+            )
 
     def __len__(self):
         return len(self.dataset)
