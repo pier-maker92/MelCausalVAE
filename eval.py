@@ -11,7 +11,7 @@ import argparse
 import torchaudio
 from tqdm import tqdm
 from vocos import Vocos
-from transformer import set_seed
+from transformers import set_seed
 import torchaudio.transforms as T
 from modules.builder import build_model
 
@@ -19,9 +19,9 @@ from data.audio_dataset import EvalDataCollator
 from data.audio_dataset import TestDatasetWrapper
 from data.librispeech_align import LibriSpeechAlignDataset
 
-from evaluation.metrics.dwer import DWER
-from evaluation.metrics.utmos import UTMOS
-from evaluation.metrics.speaker_similarity import SpkSimWavLM
+from evaluation.scripts.dwer import DWER
+from evaluation.scripts.utmos import UTMOS
+from evaluation.scripts.speaker_similarity import SpkSimWavLM
 
 
 def load_model(checkpoint_dir, device):
@@ -54,7 +54,7 @@ def load_test_dataset(num_workers: int, batch_size: int):
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
-        collate_fn=EvalDataCollator,
+        collate_fn=EvalDataCollator(),
     )
     return dataloader
 
@@ -114,8 +114,8 @@ def main(args):
     # get models
     UTMOS_reference = UTMOS(sample_rate=16000)
     UTMOS_hypothesis = UTMOS(sample_rate=24000)
-    SpkSim_computer = SpkSimWavLM(device=device)
-    DWER_computer = DWER(device=device)
+    DWER_computer = DWER("small", device=device)  # FIXME
+    SpkSim_computer = SpkSimWavLM("microsoft/wavlm-base-sv", device=device)
 
     # load Librispeech test dataset
     dataloader = load_test_dataset(args.num_workers, args.batch_size)
@@ -125,9 +125,10 @@ def main(args):
             # get references
             references = batch["16k_audios"]
             # get hypotheses
-            hypotheses = get_hypothesis(
-                model, vocoder, batch["output_audios_srs"], args
-            )
+            audios_srs = [
+                (audio.to(device), sr) for audio, sr in batch["output_audios_srs"]
+            ]
+            hypotheses = get_hypothesis(model, vocoder, audios_srs, args)
 
             UTMOS_reference.append(batch["ids"], references)
             UTMOS_hypothesis.append(batch["ids"], hypotheses)
@@ -151,7 +152,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed", type=int, default=42)
 
-    parser.add_argument("--num_workers", type=int, default=0)
+    parser.add_argument("--num_workers", type=int, default=8)
     parser.add_argument("-b", "--batch_size", type=int, default=1)
 
     parser.add_argument(

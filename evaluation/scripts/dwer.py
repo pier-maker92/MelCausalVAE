@@ -1,0 +1,138 @@
+# ==============================================================================
+# Copyright 2025 Luca Della Libera.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+#
+# Modifications Copyright 2026 Pierfrancesco Melucci.
+# Modified portions include: support for variable sample rates.
+
+"""Differential WER (dWER) (see https://arxiv.org/abs/1911.07953)."""
+
+import os
+import sys
+import torch
+import torchaudio
+from typing import List, Optional
+from faster_whisper import WhisperModel
+from transformers import WhisperTokenizer
+from huggingface_hub.constants import HUGGINGFACE_HUB_CACHE
+from speechbrain.utils.metric_stats import ErrorRateStats, MetricStats
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+__all__ = ["DWER"]
+
+
+SAMPLE_RATE = 16000
+
+
+class DWER(MetricStats):
+    def __init__(
+        self,
+        model_hub,
+        save_path=HUGGINGFACE_HUB_CACHE,
+        model=None,
+        device=None,
+        **kwargs,
+    ):
+        self.model = model
+        if model is None:
+            self.model = WhisperModel(model_hub, download_root=save_path, **kwargs)
+        self.tokenizer = WhisperTokenizer.from_pretrained(
+            f"openai/whisper-{model_hub}", cache_dir=save_path
+        )
+        self.wer_computer = ErrorRateStats()
+        self.cer_computer = ErrorRateStats(split_tokens=True)
+        self.device = device
+
+    def clear(self):
+        self.wer_computer.clear()
+        self.cer_computer.clear()
+
+    @torch.no_grad()
+    def append(
+        self,
+        hyp_sr: int,
+        ref_sr: int,
+        ids: List[str],
+        hyp_sig: List[torch.FloatTensor],
+        ref_sig: List[torch.FloatTensor],
+    ):
+        languages = ["en"] * len(ids)  # FIXME only english is supported for now
+
+        # handling sr
+        if hyp_sr != SAMPLE_RATE:
+            hyp_sig = [
+                torchaudio.functional.resample(x, hyp_sr, SAMPLE_RATE).cpu().numpy()
+                for x in hyp_sig
+            ]
+        if ref_sr != SAMPLE_RATE:
+            ref_sig = [
+                torchaudio.functional.resample(x, ref_sr, SAMPLE_RATE).cpu().numpy()
+                for x in ref_sig
+            ]
+
+        # Concatenate
+        sig = hyp_sig + ref_sig
+
+        # Move to device
+        self.model.device = self.device
+
+        texts = []
+        for x, lang in zip(sig, languages):
+            # Forward
+            segs, _ = self.model.transcribe(
+                x,
+                beam_size=1,
+                language=lang,
+                without_timestamps=True,  # temperature=0.0,
+            )
+            text = ""
+            for seg in segs:
+                text += seg.text
+            texts.append(text)
+
+        texts = [self.tokenizer.normalize(x) for x in texts]
+        texts = [x.split(" ") for x in texts]
+        hyp_text = texts[: len(hyp_sig)]
+        ref_text = texts[len(hyp_sig) :]
+
+        # Compute WER
+        self.wer_computer.append(ids, hyp_text, ref_text)
+        self.cer_computer.append(ids, hyp_text, ref_text)
+
+    def summarize(self, field=None):
+        wer_summary = self.wer_computer.summarize()
+        cer_summary = self.cer_computer.summarize()
+        wer_summary["CER"] = wer_summary["error_rate_char"] = cer_summary["error_rate"]
+        if field is None:
+            return wer_summary
+        return wer_summary[field]
+
+    def write_stats(self, filestream, verbose=False):
+        self.wer_computer.write_stats(filestream)
+
+
+if __name__ == "__main__":
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    sample_rate = 24000
+    dwer = DWER("small", sample_rate)
+    ids = ["A", "B"]
+    hyp_sig = torch.randn(2, 2 * sample_rate, device=device)
+    ref_sig = torch.randn(2, 2 * sample_rate, device=device)
+    dwer.append(ids, hyp_sig, ref_sig)
+    print(dwer.summarize("error_rate"))
+    print(dwer.summarize("WER"))
+    print(dwer.summarize("error_rate_char"))
+    print(dwer.summarize("CER"))
+    breakpoint()

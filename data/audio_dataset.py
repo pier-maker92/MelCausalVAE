@@ -156,7 +156,7 @@ class EvalDataCollator(object):
         if not all_none(batch_output_audios_srs):
             batch["output_audios_srs"] = batch_output_audios_srs
         if not all_none(batch_16k_audios):
-            batch["16k_audios_srs"] = batch_16k_audios
+            batch["16k_audios"] = batch_16k_audios
         if not all_none(batch_transcription):
             batch["transcription"] = batch_transcription
         if not all_none(batch_language):

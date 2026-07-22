@@ -104,6 +104,7 @@ ablations/
 
 # Evaluation
 evaluation/*
+!evaluation/scripts/
 !evaluation/GT/
 evaluation/GT/*
 !evaluation/GT/original_audio/
