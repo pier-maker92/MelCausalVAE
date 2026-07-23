@@ -33,6 +33,10 @@ training = [
     "jiwer",
     "torchaudio_filters",
 ]
+eval = [
+    "faster_whisper"
+    "speechbrain"
+]
 
 [tool.setuptools.packages.find]
 where = ["."]
