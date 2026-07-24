@@ -73,12 +73,18 @@ class VAE(torch.nn.Module):
         # return z_semantic
 
     def from_pretrained(self, checkpoint_path: str):
+        import os
+        if os.path.isdir(checkpoint_path):
+            checkpoint_file = os.path.join(checkpoint_path, "model.safetensors")
+        else:
+            checkpoint_file = checkpoint_path
+            
         state_dict = safetensors.torch.load_file(
-            checkpoint_path, device=str(self.device)
+            checkpoint_file, device=str(self.device)
         )
         print(f"Safetensors file loaded to {self.device}. Applying state dict...")
         self.load_state_dict(state_dict, strict=False)
-        print(f"Loaded checkpoint from {checkpoint_path}")
+        print(f"Loaded checkpoint from {checkpoint_file}")
 
     @torch.no_grad()
     def extract_features(self, audios_srs, **kwargs):

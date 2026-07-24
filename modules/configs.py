@@ -113,42 +113,12 @@ class NoiseConfig(RegularizationConfig, DeprecatedConfigMixin):
     def __post_init__(self):
         self.check_deprecated()
 
-
 @dataclass
 class VQConfig:
-    num_embeddings: int = 128
-    commitment_weight: float = 0.25
-    reset_dead_codes: bool = True
-    reset_max_per_step: Optional[int] = None
-    reset_every_forward: int = 1
-    use_ema_codebook: bool = False
-    ema_decay: float = 0.99
-    ema_epsilon: float = 1e-5
-    dim_to_quantize: Optional[int] = None
-    residual_and_tail_dropout_p: float = 0.1
-    add_vq_residual_to_stoch: bool = False
-    fsq_levels: Optional[List[int]] = None
-
-
-@dataclass
-class BSQConfig:
-    """Binary Spherical Quantization config. codebook_size must be a power of 2;
-    dim_to_quantize is derived as log2(codebook_size)."""
-
-    codebook_size: int = 4096
-    residual_and_tail_dropout_p: float = 0.0
-    add_vq_residual_to_stoch: bool = False
-
-    def __post_init__(self):
-        import math
-
-        dim = int(math.log2(self.codebook_size))
-        if 2**dim != self.codebook_size:
-            raise ValueError(
-                f"BSQConfig.codebook_size must be a power of 2, got {self.codebook_size}"
-            )
-        self.dim_to_quantize = dim
-
+    num_embeddings: int
+    dim_to_quantize:int
+    add_residual:bool
+    drop_acoustic_p:float
 
 @dataclass
 class SemanticDistillationConfig:
@@ -170,7 +140,6 @@ class EncoderConfig(SigmaVAEEncoderConfig):
     semantic_downsample_factor: int = 1
     # Optional Modules
     vq_config: Optional[VQConfig] = None
-    bsq_config: Optional[BSQConfig] = None
     dropout_regularizer_config: Optional[DropoutConfig] = None
     kl_chunk_regularizer_config: Optional[KLChunkRegularizer] = None
     noise_regularizer_config: Optional[NoiseConfig] = None

@@ -4,7 +4,7 @@ import random
 import torch.nn as nn
 from typing import Optional
 import torch.nn.functional as F
-from .vq import HardVectorQuantizer, FiniteScalarQuantizer, BinarySphericalQuantizer
+from .vq import VectorQuantizer
 from ..configs import EncoderConfig, VQConfig
 from ..output_dataclasses import EncoderOutput
 from .sigmavae import SigmaVAEEncoder
@@ -79,33 +79,7 @@ class Encoder(SigmaVAEEncoder):
                 raise ValueError(
                     f"dim_to_quantize ({config.vq_config.dim_to_quantize}) must be <= latent_dim ({config.latent_dim})."
                 )
-            if getattr(config.vq_config, "fsq_levels", None) is not None:
-                self.vq = FiniteScalarQuantizer(config.vq_config)
-            else:
-                self.vq = HardVectorQuantizer(config.vq_config)
-            self.residual_and_tail_dropout_p = (
-                config.vq_config.residual_and_tail_dropout_p
-            )
-            self.add_vq_residual_to_stoch = config.vq_config.add_vq_residual_to_stoch
-
-            qd = config.vq_config.dim_to_quantize
-            self._qd = qd
-            tail_dim = config.latent_dim - qd
-
-        elif config.bsq_config:
-            if config.bsq_config.dim_to_quantize > config.latent_dim:
-                raise ValueError(
-                    f"BSQ dim_to_quantize ({config.bsq_config.dim_to_quantize}) must be <= latent_dim ({config.latent_dim})."
-                )
-            self.vq = BinarySphericalQuantizer(config.bsq_config)
-            self.residual_and_tail_dropout_p = (
-                config.bsq_config.residual_and_tail_dropout_p
-            )
-            self.add_vq_residual_to_stoch = config.bsq_config.add_vq_residual_to_stoch
-
-            qd = config.bsq_config.dim_to_quantize
-            self._qd = qd
-            tail_dim = config.latent_dim - qd
+            self.vq = VectorQuantizer(config.vq_config)
 
         if config.dropout_regularizer_config:
             self.dropout_regularizer = DropoutRegularizer(
@@ -155,7 +129,6 @@ class Encoder(SigmaVAEEncoder):
             self._freeze_encoder_before_latent_heads()
 
         self.config = config
-        self.residual_and_tail_dropout_p = 0.2
         self.use_reparameterization_trick = getattr(
             config, "use_reparameterization_trick"
         )
@@ -220,121 +193,7 @@ class Encoder(SigmaVAEEncoder):
         return (mean_abs_cos_sim - beta) ** 2
 
     def _quantize_and_sample(self, mu, logvar, padding_mask, step=None):
-        if not hasattr(self, "vq"):
-            if (
-                self.training
-                and getattr(self.config, "use_reparameterization_trick", True)
-                and not hasattr(self, "noise_regularizer")
-            ):
-                z_stoch = self.reparameterize(mu, logvar)
-            else:
-                z_stoch = mu
-            return {
-                "z_semantic": None,
-                "z_acoustic": z_stoch,
-                "mu_stoch": mu,
-                "logvar_stoch": logvar,
-                "ortho_loss": None,
-                "vq_dict": {},
-            }
-
-        qd = self._qd
-        mu_head = mu[..., :qd]
-        mu_tail = mu[..., qd:]
-
-        ortho_loss = self._calculate_ortho_loss(mu_head, mu_tail, padding_mask)
-
-        factor = getattr(self, "semantic_downsample_factor", 1)
-        mu_head_orig = mu_head
-        if factor > 1:
-            mu_head = mu_head.transpose(1, 2)
-            mu_head = self.semantic_downsampler(mu_head)
-            mu_head = mu_head.transpose(1, 2)
-            if padding_mask is not None:
-                padding_mask_vq = padding_mask[:, ::factor]
-            else:
-                padding_mask_vq = None
-        else:
-            padding_mask_vq = padding_mask
-
-        vq_out = self.vq(
-            mu_head,
-            padding_mask_vq,
-            global_step=step,
-        )
-        # get z_quantized (straight-through estimator)
-        vq_quantized_ste = mu_head + (vq_out.quantized - mu_head).detach()
-        z_semantic = vq_quantized_ste
-
-        logvar_head = logvar[..., :qd] if logvar is not None else None
-        logvar_tail = logvar[..., qd:] if logvar is not None else None
-
-        if factor > 1 and logvar_head is not None and self.add_vq_residual_to_stoch:
-            logvar_head = logvar_head.transpose(1, 2)
-            logvar_head = self.logvar_downsampler(logvar_head)
-            logvar_head = logvar_head.transpose(1, 2)
-
-        # 1. Define stochastic parts and their distributions (for loss)
-        if self.add_vq_residual_to_stoch:
-            # Note: mu_stoch needs to be [B, T, D] for kl loss, but residual is downsampled!
-            # Since KL divergence is handled outside, maybe mu_stoch should not be concatenated if downsampled?
-            # We will handle KL loss separately for semantic and acoustic if they have different lengths.
-            # But the user currently expects mu_stoch in EncoderOutput!
-            # Let's just return them as lists or None and handle KL differently, or if factor=1, keep as is.
-            if factor > 1:
-                mu_stoch = mu_tail  # We can't concatenate. The KL loss will have to be computed on tail and head separately!
-                logvar_stoch = logvar_tail
-            else:
-                mu_stoch = torch.cat([vq_out.residual, mu_tail], dim=-1)
-                logvar_stoch = logvar  # [B, T, D]
-        else:
-            mu_stoch = mu_tail
-            logvar_stoch = logvar_tail  # [B, T, D-qd]
-
-        # 2. Sample acoustic part
-        if (
-            self.training
-            and getattr(self.config, "use_reparameterization_trick", True)
-            and not hasattr(self, "noise_regularizer")
-        ):
-            z_acoustic = self.reparameterize(mu_tail, logvar_tail, std=1.0)
-        else:
-            z_acoustic = mu_tail
-
-        # 3. Sample semantic residual (if requested)
-        if self.add_vq_residual_to_stoch:
-            if (
-                self.training
-                and getattr(self.config, "use_reparameterization_trick", True)
-                and not hasattr(self, "noise_regularizer")
-            ):
-                z_stoch_head = self.reparameterize(
-                    vq_out.residual, logvar_head, std=0.1
-                )
-            else:
-                z_stoch_head = vq_out.residual
-            z_semantic = z_semantic + z_stoch_head
-
-        vq_dict = {
-            "vq_stats": vq_out.stats,
-            "vq_loss": vq_out.loss,
-            "quantized": vq_quantized_ste,
-            "residual": vq_out.residual,
-            "tail": mu_tail,
-            "indices": vq_out.indices,
-            "mu_head": mu_head_orig,
-            "mu_stoch_head": vq_out.residual if self.add_vq_residual_to_stoch else None,
-            "logvar_head": logvar_head,
-        }
-
-        return {
-            "z_semantic": z_semantic,
-            "z_acoustic": z_acoustic,
-            "mu_stoch": mu_stoch,
-            "logvar_stoch": logvar_stoch,
-            "ortho_loss": ortho_loss,
-            "vq_dict": vq_dict,
-        }
+       pass
 
     def forward(
         self,
@@ -364,6 +223,7 @@ class Encoder(SigmaVAEEncoder):
         speaker_embedding = None
         if getattr(self.config, "use_instance_norm", False):
             mu, speaker_embedding = self._apply_instance_norm(mu, padding_mask)
+        
         if hasattr(self, "dropout_regularizer"):
             mu = self.dropout_regularizer(mu)
         if hasattr(self, "noise_regularizer"):
@@ -374,11 +234,12 @@ class Encoder(SigmaVAEEncoder):
             logvar = self.logvar(h)
 
         vq_output = None
-        if self.config.vq_config:
-            raise NotImplementedError("Closed for vacation.")
-            # vq_output = self._quantize_and_sample(
-            #     mu, logvar, padding_mask, step=kwargs.get("step", None)
-            # )
+        if hasattr(self, "vq"):
+            drop_acoustic = random.random() < self.config.vq_config.drop_acoustic_p
+            vq_output = self.vq(mu, padding_mask, drop_acoustic=drop_acoustic)
+            mu = vq_output.quantized
+            if self.config.vq_config.add_residual and not drop_acoustic: # NOTE : Should be added the residual when drop_acoustic is True?
+                mu = mu + vq_output.residual
 
         kl_weight = (
             self.get_kl_cosine_schedule(kwargs["step"])
@@ -409,12 +270,11 @@ class Encoder(SigmaVAEEncoder):
         }
 
         if hasattr(self, "vq"):
-            out["vq_stats"] = vq_dict["vq_stats"]
-            out["vq_loss"] = vq_dict["vq_loss"]
-            out["quantized"] = vq_dict["quantized"]
-            out["residual"] = vq_dict["residual"]
-            out["tail"] = vq_dict["tail"]
-            out["indices"] = vq_dict["indices"]
+            out["vq_stats"] = vq_output.stats
+            out["vq_loss"] = vq_output.loss
+            out["quantized"] = vq_output.quantized
+            out["residual"] = vq_output.residual
+            out["indices"] = vq_output.indices
 
         return EncoderOutput(**out)
 

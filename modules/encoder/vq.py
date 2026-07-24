@@ -1,10 +1,9 @@
 import torch
 import torch.nn as nn
+from typing import Optional
+from ..configs import VQConfig
 import torch.nn.functional as F
-from dataclasses import dataclass
-from typing import Optional, Tuple
-import math
-from ..configs import VQConfig, BSQConfig
+from .bsq import BinarySphericalQuantizer
 from ..output_dataclasses import VQVAEOutput, VQStats
 
 
@@ -36,18 +35,7 @@ def _batch_vq_stats(
         codes_used_frac=codes_used_frac.detach(),
     )
 
-
-def _deterministic_sample_indices(
-    n: int, m: int, step: int, device: torch.device
-) -> torch.Tensor:
-    """``m`` indices in ``[0, n)`` identical across ranks given the same ``step`` (DDP-safe)."""
-    if n <= 0 or m <= 0:
-        return torch.zeros(0, dtype=torch.long, device=device)
-    t = torch.arange(m, device=device, dtype=torch.int64)
-    return (t * 2654435761 + int(step) * 1597334677) % int(n)
-
-
-class HardVectorQuantizer(nn.Module):
+class VectorQuantizer(nn.Module):
     def __init__(
         self,
         config: VQConfig,
@@ -56,319 +44,76 @@ class HardVectorQuantizer(nn.Module):
         self.config = config
         self.dim = config.dim_to_quantize
         self.num_embeddings = config.num_embeddings
-        self.commit_weight = float(config.commitment_weight)
-        self.reset_dead_codes = bool(config.reset_dead_codes)
-        self.reset_max_per_step = config.reset_max_per_step
-        self.reset_every_forward = max(1, int(config.reset_every_forward))
-        self.use_ema_codebook = bool(config.use_ema_codebook)
-        self.ema_decay = float(config.ema_decay)
-        self.ema_epsilon = float(config.ema_epsilon)
-        self.register_buffer("_vq_forward_index", torch.tensor(0, dtype=torch.long))
-        self.codebook = nn.Embedding(self.num_embeddings, self.dim)
-        nn.init.normal_(self.codebook.weight, mean=0.0, std=self.dim**-0.5)
-
-        if self.use_ema_codebook:
-            self.codebook.weight.requires_grad_(False)
-            self.register_buffer(
-                "_ema_cluster_size",
-                torch.ones(self.num_embeddings, dtype=torch.float32),
-            )
-            self.register_buffer(
-                "_ema_embedding_sum",
-                self.codebook.weight.data.detach().float().clone(),
-            )
+        
+        self.quantizer = BinarySphericalQuantizer(codebook_size=self.num_embeddings)
+        
+        self.proj_in = nn.Sequential(
+            nn.Linear(self.dim, self.dim*4),
+            nn.GELU(),
+            nn.Linear(self.dim*4, self.dim*4),
+            nn.GELU(),
+            nn.Linear(self.dim*4, self.quantizer.dim),
+            nn.LayerNorm(self.quantizer.dim)
+        )
+        self.proj_out = nn.Sequential(
+            nn.Linear(self.quantizer.dim, self.dim*4),
+            nn.GELU(),
+            nn.Linear(self.dim*4, self.dim*4),
+            nn.GELU(),
+            nn.Linear(self.dim*4, self.dim)
+        )
 
     def forward(
         self,
         z: torch.Tensor,
         padding_mask: Optional[torch.BoolTensor] = None,
-        global_step: Optional[int] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, VQStats]:
+        drop_acoustic: bool = False,
+    ) -> VQVAEOutput:
         """
         Args:
             z: ``[B, T, dim]`` continuous features.
             padding_mask: ``[B, T]`` with ``True`` = padded (ignored in VQ loss).
-            global_step: training step for deterministic dead-code reset (DDP-safe).
 
         Returns:
-            z_residual: ``[B, T, dim]`` = ``z - z_q`` (``z_q`` detached for subtraction).
-            vq_loss: scalar commitment + optional codebook loss.
-            z_q: ``[B, T, dim]`` quantised vectors (grad flows to codebook if not EMA).
-            stats: perplexity and code usage on non-padded positions (detached).
-            indices_bt: ``[B, T]`` int64 codebook indices (same shape as ``z`` time dim).
+            VQVAEOutput
         """
         B, T, D = z.shape
-        if D != self.dim:
-            raise ValueError(f"Expected last dim {self.dim}, got {D}")
+        
+        # Split z if D > self.dim
+        z_qtz = z[..., :self.dim]
+        z_pass = z[..., self.dim:] if not drop_acoustic else torch.zeros_like(z[..., self.dim:])
 
-        flat = z.reshape(B * T, D)
-        emb = self.codebook.weight
-        dist = (
-            flat.pow(2).sum(dim=1, keepdim=True)
-            - 2.0 * flat @ emb.t()
-            + emb.pow(2).sum(dim=1, keepdim=True).t()
-        )
-        indices = dist.argmin(dim=1)
-        z_q = self.codebook(indices).view(B, T, D)
+        # Project down to BSQ dim
+        z_proj = self.proj_in(z_qtz)
+        
+        # Quantize using BSQ
+        indices_bt, z_q_proj = self.quantizer(z_proj)
+        
+        # Straight-Through Estimator (STE)
+        z_q_proj_st = z_proj + (z_q_proj - z_proj).detach()
+        
+        # Project back to original quantized dim
+        z_q_rec = self.proj_out(z_q_proj_st)
+        
+        # Recombine if there were extra dimensions
+        z_q = torch.cat([z_q_rec, z_pass], dim=-1)
 
         z_residual = z - z_q.detach()
-
+        
         if padding_mask is None:
             valid = torch.ones(B, T, dtype=torch.bool, device=z.device)
         else:
             valid = ~padding_mask
 
-        indices_bt = indices.view(B, T)
+        # Compute stats using all valid positions
         stats = _batch_vq_stats(indices_bt, valid, self.num_embeddings, z)
-
-        if valid.any():
-            z_e = z[valid]
-            z_qv = z_q[valid]
-            loss_commit = F.mse_loss(z_e, z_qv.detach())
-            if self.use_ema_codebook:
-                vq_loss = self.commit_weight * loss_commit
-            else:
-                loss_codebook = F.mse_loss(z_qv, z_e.detach())
-                vq_loss = loss_codebook + self.commit_weight * loss_commit
-        else:
-            vq_loss = z.new_zeros(())
-
-        if self.training and self.use_ema_codebook and valid.any():
-            self._ema_update_codebook(indices_bt, valid, z)
-
-        self._maybe_reset_dead_codes(
-            indices_bt=indices_bt,
-            valid=valid,
-            z=z,
-            global_step=global_step,
-        )
+        
+        recon_loss = F.mse_loss(z_q_rec[valid], z_qtz[valid])
 
         return VQVAEOutput(
             indices=indices_bt,
             quantized=z_q,
             residual=z_residual,
             stats=stats,
-            loss=vq_loss,
-        )
-
-    @torch.no_grad()
-    def _ema_update_codebook(
-        self,
-        indices_bt: torch.Tensor,
-        valid: torch.BoolTensor,
-        z: torch.Tensor,
-    ) -> None:
-        idx = indices_bt[valid].long()
-        z_v = z[valid].float()
-        K = self.num_embeddings
-        one_hot = F.one_hot(idx, num_classes=K).float()
-        cluster_count = one_hot.sum(dim=0)
-        cluster_sum = one_hot.t() @ z_v
-
-        if torch.distributed.is_available() and torch.distributed.is_initialized():
-            if torch.distributed.get_world_size() > 1:
-                torch.distributed.all_reduce(cluster_count)
-                torch.distributed.all_reduce(cluster_sum)
-
-        active = cluster_count > 0
-        if not active.any():
-            return
-
-        decay = self.ema_decay
-        dt_s = self._ema_embedding_sum.dtype
-        dt_c = self._ema_cluster_size.dtype
-        new_sum = (
-            decay * self._ema_embedding_sum[active].float()
-            + (1.0 - decay) * cluster_sum[active].float()
-        ).to(dt_s)
-        new_cnt = (
-            decay * self._ema_cluster_size[active].float()
-            + (1.0 - decay) * cluster_count[active].float()
-        ).to(dt_c)
-        self._ema_embedding_sum[active] = new_sum
-        self._ema_cluster_size[active] = new_cnt
-        denom = self._ema_cluster_size.unsqueeze(1).float().clamp(min=self.ema_epsilon)
-        self.codebook.weight.data.copy_(
-            (self._ema_embedding_sum.float() / denom).to(self.codebook.weight.dtype)
-        )
-
-    @torch.no_grad()
-    def _maybe_reset_dead_codes(
-        self,
-        indices_bt: torch.Tensor,
-        valid: torch.BoolTensor,
-        z: torch.Tensor,
-        global_step: Optional[int],
-    ) -> None:
-        if not self.training or not self.reset_dead_codes:
-            return
-        fwd_i = int(self._vq_forward_index.item())
-        self._vq_forward_index.add_(1)
-        if self.reset_every_forward > 1 and (fwd_i % self.reset_every_forward) != 0:
-            return
-        if not valid.any():
-            return
-        idx = indices_bt[valid].long()
-        counts = torch.bincount(idx, minlength=self.num_embeddings)
-        dead = (counts == 0).nonzero(as_tuple=False).reshape(-1)
-        if dead.numel() == 0:
-            return
-        if self.reset_max_per_step is not None:
-            cap = int(self.reset_max_per_step)
-            if dead.numel() > cap:
-                dead = dead[:cap]
-        z_e = z[valid]
-        n = int(z_e.shape[0])
-        m = int(dead.numel())
-        step = int(global_step) if global_step is not None else 0
-        r = _deterministic_sample_indices(n, m, step, z.device)
-        dead_f = dead.to(dtype=torch.float32).reshape(-1, 1)
-        d_ix = torch.arange(self.dim, device=z.device, dtype=torch.float32).reshape(
-            1, -1
-        )
-        jitter = (1e-3 * torch.sin(dead_f * 0.01745 + d_ix * 0.03142 + float(step))).to(
-            self.codebook.weight.dtype
-        )
-        new_rows = z_e[r].to(self.codebook.weight.dtype) + jitter
-        self.codebook.weight.data[dead] = new_rows
-        if self.use_ema_codebook:
-            self._ema_embedding_sum[dead] = new_rows.to(self._ema_embedding_sum.dtype)
-            self._ema_cluster_size[dead] = torch.ones(
-                dead.numel(),
-                dtype=self._ema_cluster_size.dtype,
-                device=z.device,
-            )
-
-
-class FiniteScalarQuantizer(nn.Module):
-    def __init__(self, config: VQConfig):
-        super().__init__()
-        self.config = config
-        self.dim = config.dim_to_quantize
-        levels = config.fsq_levels
-        if len(levels) != self.dim:
-            raise ValueError(f"Length of fsq_levels ({len(levels)}) must match dim_to_quantize ({self.dim})")
-            
-        _levels = torch.tensor(levels, dtype=torch.float32)
-        self.register_buffer("_levels", _levels)
-        
-        _basis = torch.cumprod(torch.tensor([1] + levels[:-1], dtype=torch.int32), dim=0)
-        self.register_buffer("_basis", _basis)
-        
-        self.num_embeddings = int(_levels.prod().item())
-        self.commit_weight = float(config.commitment_weight)
-        
-    def bound(self, z: torch.Tensor) -> torch.Tensor:
-        """Bound z in [-1, 1]"""
-        return torch.tanh(z)
-
-    def quantize(self, z: torch.Tensor) -> torch.Tensor:
-        half_l = (self._levels - 1) * 0.5
-        offset = torch.where(self._levels % 2 == 0, 0.5, 0.0)
-        z = z * half_l - offset
-        z = torch.round(z)
-        z = z + offset
-        z = z / half_l
-        return z
-
-    def codes_to_indices(self, z_hat: torch.Tensor) -> torch.Tensor:
-        half_l = (self._levels - 1) * 0.5
-        offset = torch.where(self._levels % 2 == 0, 0.5, 0.0)
-        # Recover rounded integers
-        z_hat = torch.round(z_hat * half_l - offset)
-        # Shift to start at 0
-        z_hat = z_hat + half_l + offset
-        return (z_hat * self._basis).sum(dim=-1).to(torch.int64)
-
-    def forward(
-        self,
-        z: torch.Tensor,
-        padding_mask: Optional[torch.BoolTensor] = None,
-        global_step: Optional[int] = None,
-    ) -> VQVAEOutput:
-        B, T, D = z.shape
-        if D != self.dim:
-            raise ValueError(f"Expected last dim {self.dim}, got {D}")
-
-        z_bounded = self.bound(z)
-        z_q = self.quantize(z_bounded)
-        
-        z_residual = z - z_q.detach()
-        indices_bt = self.codes_to_indices(z_q)
-        
-        if padding_mask is None:
-            valid = torch.ones(B, T, dtype=torch.bool, device=z.device)
-        else:
-            valid = ~padding_mask
-
-        stats = _batch_vq_stats(indices_bt, valid, self.num_embeddings, z)
-
-        if valid.any():
-            z_e = z[valid]
-            z_qv = z_q[valid]
-            loss_commit = F.mse_loss(z_e, z_qv.detach())
-            vq_loss = self.commit_weight * loss_commit
-        else:
-            vq_loss = z.new_zeros(())
-
-        return VQVAEOutput(
-            indices=indices_bt,
-            quantized=z_q,
-            residual=z_residual,
-            stats=stats,
-            loss=vq_loss,
-        )
-
-
-class BinarySphericalQuantizer(nn.Module):
-    """Binary spherical quantizer (BSQ) — lookup-free, no learnable codebook.
-
-    Maps each latent dim to ±1/sqrt(dim) via sign(). Straight-through estimator
-    is used during training. Loss is always 0 (no commitment term).
-
-    Reference: https://arxiv.org/abs/2406.07548
-    """
-
-    def __init__(self, config: BSQConfig) -> None:
-        super().__init__()
-        self.codebook_size = config.codebook_size
-        self.dim = int(math.log2(config.codebook_size))
-        self.register_buffer(
-            "codebook_value",
-            torch.tensor(1.0 / math.sqrt(self.dim)),
-            persistent=False,
-        )
-        self.register_buffer(
-            "mask",
-            2 ** torch.arange(self.dim - 1, -1, -1),
-            persistent=False,
-        )
-
-    def forward(
-        self,
-        z: torch.Tensor,
-        padding_mask: Optional[torch.BoolTensor] = None,
-        global_step: Optional[int] = None,
-    ) -> VQVAEOutput:
-        B, T, D = z.shape
-        if D != self.dim:
-            raise ValueError(f"BinarySphericalQuantizer: expected last dim {self.dim}, got {D}")
-
-        codes = torch.where(z > 0, self.codebook_value, -self.codebook_value)
-        indices_bt = ((codes > 0) * self.mask).sum(dim=-1).long()
-        z_residual = z - codes.detach()
-
-        if padding_mask is None:
-            valid = torch.ones(B, T, dtype=torch.bool, device=z.device)
-        else:
-            valid = ~padding_mask
-
-        stats = _batch_vq_stats(indices_bt, valid, self.codebook_size, z)
-
-        return VQVAEOutput(
-            indices=indices_bt,
-            quantized=codes,
-            residual=z_residual,
-            stats=stats,
-            loss=z.new_zeros(()),
+            loss=recon_loss,
         )
