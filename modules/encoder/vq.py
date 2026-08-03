@@ -60,21 +60,25 @@ class VectorQuantizer(nn.Module):
         else:
             raise ValueError(f"Unknown vq_type: {self.vq_type}")
         
-        self.proj_in = nn.Sequential(
-            nn.Linear(self.dim, self.dim*4),
-            nn.GELU(),
-            nn.Linear(self.dim*4, self.dim*4),
-            nn.GELU(),
-            nn.Linear(self.dim*4, self.quantizer.dim),
-            nn.LayerNorm(self.quantizer.dim)
-        )
-        self.proj_out = nn.Sequential(
-            nn.Linear(self.quantizer.dim, self.dim*4),
-            nn.GELU(),
-            nn.Linear(self.dim*4, self.dim*4),
-            nn.GELU(),
-            nn.Linear(self.dim*4, self.dim)
-        )
+        #if self.vq_type in ["fsq", "bsq"]:
+            # self.proj_in = nn.Sequential(
+            #     nn.Linear(self.dim, self.dim*4),
+            #     nn.GELU(),
+            #     nn.Linear(self.dim*4, self.dim*4),
+            #     nn.GELU(),
+            #     nn.Linear(self.dim*4, self.quantizer.dim),
+            #     nn.LayerNorm(self.quantizer.dim)
+            # )
+            # self.proj_out = nn.Sequential(
+            #     nn.Linear(self.quantizer.dim, self.dim*4),
+            #     nn.GELU(),
+            #     nn.Linear(self.dim*4, self.dim*4),
+            #     nn.GELU(),
+            #     nn.Linear(self.dim*4, self.dim)
+            # )
+
+        self.proj_in = nn.Linear(self.dim, self.quantizer.dim)
+        self.proj_out = nn.Linear(self.quantizer.dim, self.dim)
 
     def forward(
         self,
@@ -139,3 +143,11 @@ class VectorQuantizer(nn.Module):
             stats=stats,
             loss=total_loss,
         )
+
+    @property
+    def dtype(self):
+        return next(self.parameters()).dtype
+
+    @property
+    def device(self):
+        return next(self.parameters()).device

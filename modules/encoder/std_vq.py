@@ -46,8 +46,9 @@ class StandardVectorQuantizer(nn.Module):
                 
                 if len(unused_indices) > 0:
                     random_indices = torch.randint(0, flatten.size(0), (len(unused_indices),), device=lats.device)
-                    # Replace dead codes with random elements from the batch
-                    self.embedding.weight.data[unused_indices] = flatten[random_indices].detach()
+                    # Match the codebook dtype so dead-code reset also works under autocast.
+                    replacement = flatten[random_indices].detach().to(self.embedding.weight.dtype)
+                    self.embedding.weight.data[unused_indices] = replacement
                     
                     # Recompute distances and indices for correctness
                     distances = (
