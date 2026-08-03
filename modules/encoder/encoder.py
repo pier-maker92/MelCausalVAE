@@ -165,36 +165,6 @@ class Encoder(SigmaVAEEncoder):
         speaker_embedding = torch.cat([spk_mu.squeeze(1), spk_sigma.squeeze(1)], dim=-1)
         return mu, speaker_embedding
 
-    def _calculate_ortho_loss(self, mu_head, mu_tail, padding_mask):
-        if mu_tail.shape[-1] == 0:
-            return None
-
-        ortho_weight = 0.0
-        if getattr(self.config, "semantic_distillation_config", None) is not None:
-            ortho_weight = self.config.semantic_distillation_config.ortho_loss_weight
-
-        if ortho_weight <= 0.0:
-            return None
-
-        mask = ~padding_mask
-        h1 = mu_head[mask]
-        h2 = mu_tail[mask]
-
-        beta = (
-            getattr(self.config.semantic_distillation_config, "ortho_beta", 0.01)
-            if getattr(self.config, "semantic_distillation_config", None) is not None
-            else 0.01
-        )
-
-        cos_sim = F.cosine_similarity(h1, h2, dim=-1)
-        abs_cos_sim = torch.abs(cos_sim)
-        mean_abs_cos_sim = abs_cos_sim.mean()
-
-        return (mean_abs_cos_sim - beta) ** 2
-
-    def _quantize_and_sample(self, mu, logvar, padding_mask, step=None):
-       pass
-
     def forward(
         self,
         x: torch.FloatTensor,
@@ -250,6 +220,7 @@ class Encoder(SigmaVAEEncoder):
             z = self.reparameterize(mu, logvar, std=1.0)
         else:
             z = mu
+
         # KL loss computation
         kl_loss = None
         if self.training:

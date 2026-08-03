@@ -19,6 +19,36 @@ from .configs import (
 )
 
 
+def _load_vq_config(encoder_cfg: Dict[str, Any]):
+    """Load VQ/BSQ config from encoder config without broad normalization hacks."""
+    vq_dict = encoder_cfg.pop("vq_config", None)
+    bsq_dict = encoder_cfg.pop("bsq_config", None)
+
+    if vq_dict is not None:
+        vq_dict = dict(vq_dict)
+        if "residual_and_tail_dropout_p" in vq_dict and "drop_acoustic_p" not in vq_dict:
+            vq_dict["drop_acoustic_p"] = vq_dict.pop("residual_and_tail_dropout_p")
+        vq_dict.setdefault("vq_type", "vq")
+        return VQConfig(**vq_dict)
+
+    if bsq_dict is not None:
+        bsq_dict = dict(bsq_dict)
+        drop_acoustic_p = bsq_dict.pop("residual_and_tail_dropout_p", 0.0)
+        num_embeddings = bsq_dict["codebook_size"]
+        dim_to_quantize = bsq_dict.pop("dim_to_quantize", None)
+        if dim_to_quantize is None:
+            dim_to_quantize = int(round(num_embeddings).bit_length() - 1)
+        return VQConfig(
+            num_embeddings=num_embeddings,
+            dim_to_quantize=dim_to_quantize,
+            add_residual=False,
+            drop_acoustic_p=drop_acoustic_p,
+            vq_type="bsq",
+        )
+
+    return None
+
+
 def build_model(cfg_dict: Dict[str, Any]) -> VAE:
     """Builds a VAE model from a configuration dictionary."""
     # Handle both hydra config (encoder) and checkpoint config (encoder_config)
@@ -33,8 +63,7 @@ def build_model(cfg_dict: Dict[str, Any]) -> VAE:
 
     decoder_config = DiTConfig(**decoder_cfg)
 
-    vq_dict = encoder_cfg.pop("vq_config", None)
-    vq_config = VQConfig(**vq_dict) if vq_dict else None
+    vq_config = _load_vq_config(encoder_cfg)
 
     dropout_dict = encoder_cfg.pop("dropout_regularizer_config", None)
     dropout_config = DropoutConfig(**dropout_dict) if dropout_dict else None
@@ -80,7 +109,8 @@ def build_model(cfg_dict: Dict[str, Any]) -> VAE:
         wavlm_config=wavlm_config,
     )
 
-    return VAE(config=vae_config, train_only_vq=cfg_dict["training"].get("train_only_vq"))
+    training_cfg = cfg_dict.get("training", {}) or {}
+    return VAE(config=vae_config, train_only_vq=training_cfg.get("train_only_vq", False))
 
 
 def build_standard_model(cfg_dict: Dict[str, Any]):
@@ -133,11 +163,7 @@ def build_standard_model(cfg_dict: Dict[str, Any]):
         **decoder_cfg,
     )
 
-    vq_dict = encoder_cfg.pop("vq_config", None)
-    vq_config = VQConfig(**vq_dict) if vq_dict else None
-
-    bsq_dict = encoder_cfg.pop("bsq_config", None)
-    bsq_config = BSQConfig(**bsq_dict) if bsq_dict else None
+    vq_config = _load_vq_config(encoder_cfg)
 
     dropout_dict = encoder_cfg.pop("dropout_regularizer_config", None)
     dropout_config = DropoutConfig(**dropout_dict) if dropout_dict else None
@@ -155,7 +181,6 @@ def build_standard_model(cfg_dict: Dict[str, Any]):
 
     encoder_config = EncoderConfig(
         vq_config=vq_config,
-        bsq_config=bsq_config,
         dropout_regularizer_config=dropout_config,
         kl_chunk_regularizer_config=kl_config,
         noise_regularizer_config=noise_config,

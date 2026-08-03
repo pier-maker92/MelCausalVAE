@@ -7,10 +7,10 @@ sample_rate: 24000
 
 # Training configuration
 training:
-  num_train_epochs: 1
+  num_train_epochs: 3
   dataset_name: libritts-r
   output_dir: checkpoints/exps/vq_post_15_libritts-r
-  per_device_train_batch_size: 4
+  per_device_train_batch_size: 8
   per_device_eval_batch_size: 2
 
   # lr
@@ -24,7 +24,7 @@ training:
   decoder_min_lr: 5.0e-5
   
   # report
-  report_to: none
+  report_to: wandb
   wandb_project: speech-vae-paper
   wandb_run_name: vq_post_15
 
@@ -35,16 +35,16 @@ training:
   logging_steps: 10
 
   # eval 
-  eval_strategy: "steps"
+  eval_strategy: "no"
   eval_steps: 1000
   save_total_limit: 3
-  load_best_model_at_end: true
-  metric_for_best_model: "avg_WER"
-  greater_is_better: false
-  early_stopping_patience: 5
-  # vq patience
-  vq_collapse_threshold: 0.01
-  vq_collapse_patience: 10
+  # load_best_model_at_end: true
+  # metric_for_best_model: "avg_WER"
+  # greater_is_better: false
+  # early_stopping_patience: 5
+  # # vq patience
+  # vq_collapse_threshold: 0.01
+  # vq_collapse_patience: 10
 
   gradient_accumulation_steps: 1
   dataloader_num_workers: 8
@@ -71,7 +71,7 @@ encoder:
   logvar_layer: false
   target_std: 1.0
   kl_loss_warmup_ratio: 0.1
-  kl_loss_weight: 1e-3
+  kl_loss_weight: 0.0
   use_reparameterization_trick: False
   semantic_downsample_factor: 1  # Imposta qui il factor di downsampling (es. 2, 4, 8)
   freeze_encoder_before_latent_heads: true
@@ -79,10 +79,10 @@ encoder:
   # --- VQ Config ---
   vq_config:  
     num_embeddings: 1024
-    dim_to_quantize: 6
+    dim_to_quantize: 16
     add_residual: false
     drop_acoustic_p: 1.0
-    vq_type: "vq"  # "bsq" or "fsq"
+    vq_type: "fsq"  # "bsq" or "fsq"
 
   # --- Dropout Config ---
   dropout_regularizer_config: null # NOTE: are we sure?
