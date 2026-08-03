@@ -80,7 +80,7 @@ def build_model(cfg_dict: Dict[str, Any]) -> VAE:
         wavlm_config=wavlm_config,
     )
 
-    return VAE(config=vae_config)
+    return VAE(config=vae_config, train_only_vq=cfg_dict["training"].get("train_only_vq"))
 
 
 def build_standard_model(cfg_dict: Dict[str, Any]):

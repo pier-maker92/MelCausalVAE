@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 class VAE(torch.nn.Module):
     _keys_to_ignore_on_save = None
 
-    def __init__(self, config: VAEConfig):
+    def __init__(self, config: VAEConfig, **kwargs):
         super().__init__()
         self.config = config
         self.feature_extractor = FeatureExtractor(config.mel_spectrogram_config)
@@ -55,6 +55,14 @@ class VAE(torch.nn.Module):
             # self.semantic_upsampler_conv = TimeCausalConv1d(
             #     qd, qd, k=self.semantic_downsample_factor * 2, d=1, s=1
             # )
+        if kwargs.get("train_only_vq"):
+            for name, param in self.named_parameters():
+                if "vq" not in name:
+                    param.requires_grad = False
+            self.train_only_vq = True
+        else:
+            self.train_only_vq = False
+
 
         count_parameters_by_module(self.encoder, "Encoder")
         count_parameters_by_module(self.decoder, "Decoder")
@@ -167,6 +175,18 @@ class VAE(torch.nn.Module):
         ) = self.extract_features(audios_srs, **kwargs)
         # encode to latent space
         encoder_output = self.encode(enc_features, enc_padding_mask, **kwargs)
+        if self.train_only_vq:
+            # If training only VQ, we don't compute the decoder loss, but we still return the encoder output for VQ loss.
+            out = {
+                "audio_loss": torch.tensor(0.0, device=encoder_output.z.device),
+                "kl_loss": encoder_output.kl_loss,
+                "mu_mean": encoder_output.mu[~encoder_output.padding_mask].mean(),
+                "mu_var": encoder_output.mu[~encoder_output.padding_mask].var(),
+            }
+            vq_stats = getattr(encoder_output, "vq_stats", None)
+            if vq_stats is not None:
+                out.update({"vq_loss": encoder_output.vq_loss, "vq_stats": vq_stats})
+            return VAEOutput(**out)
 
         # decode from latent space
         decoder_output = self.decode(

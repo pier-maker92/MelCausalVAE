@@ -119,6 +119,9 @@ class VQConfig:
     dim_to_quantize:int
     add_residual:bool
     drop_acoustic_p:float
+    vq_type: str # "bsq" or "fsq" or "vq"
+    vq_dim: Optional[int] = None
+    commitment_weight: float = 0.25
 
 @dataclass
 class SemanticDistillationConfig:

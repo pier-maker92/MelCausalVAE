@@ -19,8 +19,11 @@ class FiniteScalarQuantizer(nn.Module):
     Finite Scalar Quantizer (FSQ)
     Reference: "Finite Scalar Quantization: VQ-VAE Made Simple" (https://arxiv.org/abs/2309.15505)
     """
-    def __init__(self, levels: List[int]):
+    def __init__(self, codebook_size: int = 256):
         super().__init__()
+        levels = FSQ_LEVELS.get(codebook_size, None)
+        if levels is None:
+            raise ValueError(f"Unsupported number of embeddings: {codebook_size}. Supported values: {list(FSQ_LEVELS.keys())}")
         self.levels_list = levels
         self.dim = len(levels)
         

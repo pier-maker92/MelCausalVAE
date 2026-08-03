@@ -1,8 +1,10 @@
+import math
 import torch
 import torch.nn as nn
 from typing import Optional
 from ..configs import VQConfig
 import torch.nn.functional as F
+from .fsq import FiniteScalarQuantizer
 from .bsq import BinarySphericalQuantizer
 from ..output_dataclasses import VQVAEOutput, VQStats
 
@@ -44,8 +46,19 @@ class VectorQuantizer(nn.Module):
         self.config = config
         self.dim = config.dim_to_quantize
         self.num_embeddings = config.num_embeddings
-        
-        self.quantizer = BinarySphericalQuantizer(codebook_size=self.num_embeddings)
+        self.vq_type = config.vq_type
+        if self.vq_type == "fsq":
+            self.quantizer = FiniteScalarQuantizer(codebook_size=self.num_embeddings)
+        elif self.vq_type == "bsq":
+            self.quantizer = BinarySphericalQuantizer(codebook_size=self.num_embeddings)
+        elif self.vq_type == "vq":
+            from .std_vq import StandardVectorQuantizer
+            vq_dim = getattr(config, "vq_dim", None)
+            if vq_dim is None:
+                vq_dim = max(1, int(math.log2(self.num_embeddings)))
+            self.quantizer = StandardVectorQuantizer(dim=vq_dim, codebook_size=self.num_embeddings)
+        else:
+            raise ValueError(f"Unknown vq_type: {self.vq_type}")
         
         self.proj_in = nn.Sequential(
             nn.Linear(self.dim, self.dim*4),
@@ -108,12 +121,21 @@ class VectorQuantizer(nn.Module):
         # Compute stats using all valid positions
         stats = _batch_vq_stats(indices_bt, valid, self.num_embeddings, z)
         
-        recon_loss = F.mse_loss(z_q_rec[valid], z_qtz[valid])
+        recon_loss = F.mse_loss(z_q_rec[valid], z_qtz[valid]) 
+        
+        if self.vq_type == "vq":
+            e_latent_loss = F.mse_loss(z_q_proj.detach()[valid], z_proj[valid])
+            q_latent_loss = F.mse_loss(z_q_proj[valid], z_proj.detach()[valid])
+            commitment_weight = getattr(self.config, "commitment_weight", 0.25)
+            commitment_loss = q_latent_loss + commitment_weight * e_latent_loss
+            total_loss = recon_loss + commitment_loss
+        else:
+            total_loss = recon_loss
 
         return VQVAEOutput(
             indices=indices_bt,
             quantized=z_q,
             residual=z_residual,
             stats=stats,
-            loss=recon_loss,
+            loss=total_loss,
         )

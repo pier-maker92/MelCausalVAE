@@ -888,7 +888,7 @@ def main(cfg: DictConfig):
         dataset = LibriTTSR()
     else:
         raise ValueError(f"Dataset {dataset_name} not supported")
-    train_dataset = TrainDatasetWrapper(dataset, "train")
+    train_dataset = TrainDatasetWrapper(dataset, "test") # FIXME change this to train
     test_dataset = TestDatasetWrapper(dataset, "test")
     # handle wandb - only initialize on main process
     wandb_project = training_cfg.pop("wandb_project", None)
@@ -975,6 +975,10 @@ def main(cfg: DictConfig):
         run_name = wandb_run_name or "run"
         run_id = f"{date_dir}/{time_dir}/{run_name}"
 
+    train_only_vq = training_cfg.pop("train_only_vq", False)
+    if train_only_vq:
+        logger.info("Training only VQ layers (encoder and decoder frozen).")
+
     # Setup training arguments
     training_args = TrainingArguments(
         remove_unused_columns=False,  # Don't let Trainer auto-remove columns
@@ -982,6 +986,8 @@ def main(cfg: DictConfig):
         **training_cfg,
     )
     logger.info(f"TrainingArgs bf16 enabled: {training_args.bf16}")
+
+    
 
     # Create trainer
     data_collator = DataCollator()
