@@ -888,7 +888,7 @@ def main(cfg: DictConfig):
         dataset = LibriTTSR()
     else:
         raise ValueError(f"Dataset {dataset_name} not supported")
-    train_dataset = TrainDatasetWrapper(dataset, "test") # FIXME change this to train
+    train_dataset = TrainDatasetWrapper(dataset, "train") # FIXME change this to train
     test_dataset = TestDatasetWrapper(dataset, "test")
     # handle wandb - only initialize on main process
     wandb_project = training_cfg.pop("wandb_project", None)
