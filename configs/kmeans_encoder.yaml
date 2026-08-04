@@ -1,0 +1,27 @@
+# Frozen encoder K-means over valid LibriTTS-R frames.
+checkpoint_dir: /scratch/piermel/MelCausalVAE/checkpoints/paper/wavlm/15
+output_dir: /scratch/piermel/agente/kmeans/libritts-r
+
+# Accepted but unused overrides injected by /scratch/piermel/scripts/run_job.sh.
+settings: null
+training:
+  dataset_name: libritts-r
+  run_id: null
+  wandb_run_name: null
+  output_dir: null
+
+device: cuda
+batch_size: 8
+num_workers: 8
+max_audio_seconds: 20.0
+max_batches: null
+
+# First N dimensions of encoder_output.mu.
+feature_dims: 8
+max_frames: 500000
+
+num_clusters: 512
+max_iterations: 50
+tolerance: 1.0e-4
+kmeans_chunk_size: 16384
+seed: 42

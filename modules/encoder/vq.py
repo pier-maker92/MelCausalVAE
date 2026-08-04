@@ -55,7 +55,7 @@ class VectorQuantizer(nn.Module):
             from .std_vq import StandardVectorQuantizer
             vq_dim = getattr(config, "vq_dim", None)
             if vq_dim is None:
-                vq_dim = max(1, int(math.log2(self.num_embeddings)))
+                vq_dim = 128
             self.quantizer = StandardVectorQuantizer(dim=vq_dim, codebook_size=self.num_embeddings)
         else:
             raise ValueError(f"Unknown vq_type: {self.vq_type}")
