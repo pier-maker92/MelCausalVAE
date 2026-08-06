@@ -9,7 +9,7 @@ sample_rate: 24000
 training:
   num_train_epochs: 10
   dataset_name: libritts-r
-  output_dir: checkpoints/exps/15_wavlm_libritts-r
+  output_dir: checkpoints/exps/15_mel_libritts-r
   per_device_train_batch_size: 16
   per_device_eval_batch_size: 8
 
@@ -26,7 +26,7 @@ training:
   # report
   report_to: wandb
   wandb_project: speech-vae-paper
-  wandb_run_name: 15_wavlm-libritts-r
+  wandb_run_name: 15_mel-libritts-r
 
   fp16: false
   bf16: true
@@ -50,12 +50,6 @@ training:
   dataloader_num_workers: 8
   eval_num_samples: 100
 
-wavlm_config:
-  pretrained_model_name: "microsoft/wavlm-large"
-  layer: 6
-  sampling_rate: 16000
-  normalize: true
-
 # Encoder configuration
 encoder:
   d_model: 1024
@@ -66,8 +60,8 @@ encoder:
   target_std: 1.0
   kl_loss_warmup_ratio: 0.1
   kl_loss_weight: 1e-3
-  use_reparameterization_trick: false
-  use_std_sweep: false
+  use_reparameterization_trick: true
+  use_std_sweep: true
   semantic_downsample_factor: 1  # Imposta qui il factor di downsampling (es. 2, 4, 8)
 
   # --- VQ Config ---

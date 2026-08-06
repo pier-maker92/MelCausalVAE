@@ -85,7 +85,20 @@ class SigmaVAEEncoder(nn.Module):
             torch.randn(mu.shape[0], mu.shape[1], dtype=mu.dtype, device=mu.device)
             * std
         )
-        return torch.clamp(weight, min=-2 * std, max=2 * std)
+        weight = torch.clamp(weight, min=-2 * std, max=2 * std)
+        if not self.config.use_std_sweep:
+            return weight
+
+        x = torch.linspace(0.0, 1.0, mu.shape[-1], dtype=mu.dtype, device=mu.device)
+        k = 20.0
+        x0 = 0.2
+        sweep = torch.sigmoid(k * (x - x0))
+        sweep_start = torch.sigmoid(torch.tensor(-k * x0, dtype=mu.dtype, device=mu.device))
+        sweep_end = torch.sigmoid(
+            torch.tensor(k * (1.0 - x0), dtype=mu.dtype, device=mu.device)
+        )
+        sweep = (sweep - sweep_start) / (sweep_end - sweep_start)
+        return weight.unsqueeze(-1) * sweep
 
     def _resize_padding_mask(
         self, padding_mask: torch.BoolTensor, target_length: int, dtype: torch.dtype
@@ -97,7 +110,7 @@ class SigmaVAEEncoder(nn.Module):
                 mode="linear",
                 align_corners=False,
             ).squeeze(1)
-            > 0.5  # Use threshold instead of .bool()
+            > 0.5
         )
         return padding_mask
 
