@@ -1,5 +1,6 @@
 import os
 import json
+from dataclasses import fields
 from typing import Dict, Any
 
 from .VAE import VAE
@@ -19,6 +20,11 @@ from .configs import (
 )
 
 
+def _filter_dataclass_kwargs(config_cls, values: Dict[str, Any]) -> Dict[str, Any]:
+    allowed = {field.name for field in fields(config_cls)}
+    return {key: value for key, value in values.items() if key in allowed}
+
+
 def _load_vq_config(encoder_cfg: Dict[str, Any]):
     """Load VQ/BSQ config from encoder config without broad normalization hacks."""
     vq_dict = encoder_cfg.pop("vq_config", None)
@@ -29,6 +35,7 @@ def _load_vq_config(encoder_cfg: Dict[str, Any]):
         if "residual_and_tail_dropout_p" in vq_dict and "drop_acoustic_p" not in vq_dict:
             vq_dict["drop_acoustic_p"] = vq_dict.pop("residual_and_tail_dropout_p")
         vq_dict.setdefault("vq_type", "vq")
+        vq_dict = _filter_dataclass_kwargs(VQConfig, vq_dict)
         return VQConfig(**vq_dict)
 
     if bsq_dict is not None:
@@ -61,22 +68,38 @@ def build_model(cfg_dict: Dict[str, Any]) -> VAE:
     decoder_cfg.setdefault("expansion_factor", cfg_dict.get("compress_factor"))
     decoder_cfg.setdefault("upsample", cfg_dict.get("upsample"))
 
-    decoder_config = DiTConfig(**decoder_cfg)
+    decoder_config = DiTConfig(**_filter_dataclass_kwargs(DiTConfig, decoder_cfg))
 
     vq_config = _load_vq_config(encoder_cfg)
 
     dropout_dict = encoder_cfg.pop("dropout_regularizer_config", None)
-    dropout_config = DropoutConfig(**dropout_dict) if dropout_dict else None
+    dropout_config = (
+        DropoutConfig(**_filter_dataclass_kwargs(DropoutConfig, dropout_dict))
+        if dropout_dict
+        else None
+    )
 
     kl_dict = encoder_cfg.pop("kl_chunk_regularizer_config", None)
-    kl_config = KLChunkRegularizer(**kl_dict) if kl_dict else None
+    kl_config = (
+        KLChunkRegularizer(**_filter_dataclass_kwargs(KLChunkRegularizer, kl_dict))
+        if kl_dict
+        else None
+    )
 
     noise_dict = encoder_cfg.pop("noise_regularizer_config", None)
-    noise_config = NoiseConfig(**noise_dict) if noise_dict else None
+    noise_config = (
+        NoiseConfig(**_filter_dataclass_kwargs(NoiseConfig, noise_dict))
+        if noise_dict
+        else None
+    )
 
     distill_dict = encoder_cfg.pop("semantic_distillation_config", None)
     distill_config = (
-        SemanticDistillationConfig(**distill_dict) if distill_dict else None
+        SemanticDistillationConfig(
+            **_filter_dataclass_kwargs(SemanticDistillationConfig, distill_dict)
+        )
+        if distill_dict
+        else None
     )
 
     encoder_config = EncoderConfig(
@@ -85,18 +108,24 @@ def build_model(cfg_dict: Dict[str, Any]) -> VAE:
         kl_chunk_regularizer_config=kl_config,
         noise_regularizer_config=noise_config,
         semantic_distillation_config=distill_config,
-        **encoder_cfg,
+        **_filter_dataclass_kwargs(EncoderConfig, encoder_cfg),
     )
 
     mel_spec_cfg["use_bigvgan_mel"] = cfg_dict.get(
         "use_bigvgan_mel", mel_spec_cfg.get("use_bigvgan_mel", False)
     )
-    mel_spec_config = MelSpectrogramConfig(**mel_spec_cfg)
+    mel_spec_config = MelSpectrogramConfig(
+        **_filter_dataclass_kwargs(MelSpectrogramConfig, mel_spec_cfg)
+    )
 
     from .configs import WavLMConfig
 
     wavlm_dict = cfg_dict.get("wavlm_config", None)
-    wavlm_config = WavLMConfig(**wavlm_dict) if wavlm_dict else None
+    wavlm_config = (
+        WavLMConfig(**_filter_dataclass_kwargs(WavLMConfig, wavlm_dict))
+        if wavlm_dict
+        else None
+    )
 
     vae_config = VAEConfig(
         mel_dim=cfg_dict.get("mel_dim"),
