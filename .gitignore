@@ -98,6 +98,9 @@ Thumbs.db
 *.csv
 *.parquet
 ablations/
+agent/
+agent_smoke*/
+audio_outputs/
 
 # Ignore all hidden directories and their contents
 **/.*/**
