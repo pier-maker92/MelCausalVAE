@@ -91,7 +91,7 @@ class SigmaVAEEncoder(nn.Module):
 
         x = torch.linspace(0.0, 1.0, mu.shape[-1], dtype=mu.dtype, device=mu.device)
         k = 20.0
-        x0 = 0.2
+        x0 = 0.3
         sweep = torch.sigmoid(k * (x - x0))
         sweep_start = torch.sigmoid(torch.tensor(-k * x0, dtype=mu.dtype, device=mu.device))
         sweep_end = torch.sigmoid(
