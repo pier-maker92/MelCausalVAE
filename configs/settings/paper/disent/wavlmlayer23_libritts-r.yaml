@@ -6,15 +6,15 @@ latent_dim: 64
 sample_rate: 24000
 
 training:
-  enable_perturbed_audio: true
-  perturbed_pitch_shift_max_semitones: 8.0
+  enable_perturbed_audio: false
+  perturbed_pitch_shift_max_semitones: 0.0
 
   
   num_train_epochs: 10
   dataset_name: libritts-r
-  output_dir: checkpoints/exps/1_ecapa
-  per_device_train_batch_size: 16
-  per_device_eval_batch_size: 8
+  output_dir: checkpoints/exps/narval-layer23
+  per_device_train_batch_size: 4
+  per_device_eval_batch_size: 2
 
   learning_rate: 1e-4
   encoder_lr: 3e-4
@@ -26,8 +26,8 @@ training:
   decoder_min_lr: 5.0e-5
 
   report_to: wandb
-  wandb_project: speech-vae-paper
-  wandb_run_name: 1_ecapa
+  wandb_project: dicodec
+  wandb_run_name: narval-layer23
 
   fp16: false
   bf16: true
@@ -73,7 +73,7 @@ encoder:
     num_embeddings: 128
     add_residual: true
     add_residual_p: 0.5
-    vq_type: "bsq"
+    vq_type: "vq"
     commitment_weight: 0.25
 
   dropout_regularizer_config: null
@@ -101,7 +101,7 @@ speaker_encoder_config:
   encoder_type: wavlm
   pretrained_model_name: "microsoft/wavlm-large"
   sampling_rate: 16000
-  embedding_dim: 192
+  embedding_dim: 512
   wavlm_layers: [1, 2, 3]
   wavlm_layer_combine: weighted_sum
   wavlm_pooling: mean_std

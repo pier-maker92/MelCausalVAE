@@ -897,7 +897,7 @@ def main(cfg: DictConfig):
 
     train_dataset = TrainDatasetWrapper(
         dataset,
-        "train",
+        "test", # FIXME this is a bug
         enable_perturbed_audio=enable_perturbed_audio,
         perturbed_pitch_shift_max_semitones=perturbed_pitch_shift_max_semitones,
     )

@@ -1,19 +1,21 @@
 # @package _global_
-# Global VAE parameters that override configs/main.yaml defaults
+# 15-mel LibriTTS-R baseline with frozen WavLM speaker conditioning and per-layer FiLM.
 compress_factor: 4
 mel_dim: 100
 latent_dim: 64
 sample_rate: 24000
 
-# Training configuration
 training:
-  num_train_epochs: 10
-  dataset_name: librispeech_aligned
-  output_dir: checkpoints/paper/noise-additive-fixed-test
-  per_device_train_batch_size: 2
-  per_device_eval_batch_size: 4
+  enable_perturbed_audio: false
+  perturbed_pitch_shift_max_semitones: 8.0
 
-  # lr
+  
+  num_train_epochs: 10
+  dataset_name: libritts-r
+  output_dir: checkpoints/exps/narval-wavlm23
+  per_device_train_batch_size: 4
+  per_device_eval_batch_size: 2
+
   learning_rate: 1e-4
   encoder_lr: 3e-4
   decoder_lr: 1e-4
@@ -22,38 +24,38 @@ training:
   lr_scheduler_type: "cosine"
   encoder_min_lr: 1.0e-4
   decoder_min_lr: 5.0e-5
-  
-  # report
+
   report_to: wandb
-  wandb_project: speech-vae
-  wandb_run_name: noise-additive-fixed-test
+  wandb_project: dicodec
+  wandb_run_name: narval-wavlm23
 
   fp16: false
   bf16: true
 
-  save_steps: 500
+  save_steps: 1000
   logging_steps: 10
-
-  # eval 
   eval_strategy: "steps"
-  eval_steps: 500
+  eval_steps: 1000
   save_total_limit: 3
-  load_best_model_at_end: true
+  load_best_model_at_end: false
   metric_for_best_model: "avg_WER"
   greater_is_better: false
   early_stopping_patience: 5
-  # vq patience
   vq_collapse_threshold: 0.5
-  vq_collapse_patience: 3
+  vq_collapse_patience: 5
 
   gradient_accumulation_steps: 2
   dataloader_num_workers: 8
-  eval_num_samples: 10
+  dataloader_prefetch_factor: 1
+  dataloader_persistent_workers: true
+  eval_num_samples: 100
 
-  generate_and_log_samples: true
-  
+wavlm_config:
+  pretrained_model_name: "microsoft/wavlm-large"
+  layer: 23
+  sampling_rate: 16000
+  normalize: true
 
-# Encoder configuration
 encoder:
   d_model: 1024
   tf_heads: 8
@@ -61,39 +63,45 @@ encoder:
   n_residual_blocks: 3
   logvar_layer: false
   target_std: 1.0
-  kl_loss_warmup_ratio: 0.0
-  kl_loss_weight: 1e-5
+  kl_loss_warmup_ratio: 0.1
+  kl_loss_weight: 1e-3
   use_reparameterization_trick: false
+  use_std_sweep: false
+  semantic_downsample_factor: 1
 
-  # --- VQ Config ---
-  vq_config: null
+  vq_config: 
+    num_embeddings: 128
+    add_residual: true
+    add_residual_p: 0.5
+    vq_type: "bsq"
+    commitment_weight: 0.25
 
-  # --- Dropout Config ---
   dropout_regularizer_config: null
-
-  # --- KL Config ---
   kl_chunk_regularizer_config: null
+  noise_regularizer_config: null
+  semantic_distillation_config: null
 
-  # --- Noise Config ---
-  noise_regularizer_config:
-    chunk_size: 4
-    noise_start: 0.0
-    noise_end: 0.8
-    strategy: "linear"
-    noise_type: "interpolate"
-    sigma_type: "stochastic"
-    use_softplus: false
-
-# Decoder configuration
 decoder:
-  dit_dim: 768            
-  dit_depth: 6            
-  dit_heads: 12           
-  dit_dropout_rate: 0.1   
+  dit_dim: 768
+  dit_depth: 6
+  dit_heads: 12
+  dit_dropout_rate: 0.1
   use_conv_layer: true
   uncond_prob: 0.15
   is_causal: true
   use_window_attention: true
-  window_attention_seconds: 3.0
-  kernel_size: 7
+  window_attention_seconds: 3
+  kernel_size: 17
   causal_convolution: false
+  normalize_context_vector: true
+  speaker_cond_dim: 512
+  local_speaker_conditioning: true
+
+speaker_encoder_config:
+  encoder_type: wavlm
+  pretrained_model_name: "microsoft/wavlm-large"
+  sampling_rate: 16000
+  embedding_dim: 512
+  wavlm_layers: [1, 2]
+  wavlm_layer_combine: weighted_sum
+  wavlm_pooling: mean_std
