@@ -255,7 +255,7 @@ class SpeakerEncoderConfig:
     embedding_dim: int = 192
     wavlm_layers: Optional[list[int]] = None
     wavlm_layer_weights: Optional[list[float]] = None
-    wavlm_layer_combine: str = "mean"
+    wavlm_layer_combine: str = "weighted_sum"
     wavlm_pooling: str = "mean_std"
     wavlm_normalize_features: bool = True
     wavlm_freeze: bool = True

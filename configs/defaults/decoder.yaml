@@ -23,6 +23,6 @@ decoder:
 #   pretrained_model_name: microsoft/wavlm-large
 #   embedding_dim: 128
 #   wavlm_layers: [1, 2]
-#   wavlm_layer_combine: mean
+#   wavlm_layer_combine: weighted_sum
 #   wavlm_pooling: mean_std
 speaker_encoder_config: null

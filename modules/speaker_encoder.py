@@ -88,15 +88,21 @@ class WavLMSpeakerEncoder(nn.Module):
                         "wavlm_layer_weights must have the same length as "
                         "wavlm_layers."
                     )
-                weights = torch.tensor(config.wavlm_layer_weights, dtype=torch.float32)
-                self.layer_weights = nn.Parameter(weights)
+                alpha = torch.tensor(config.wavlm_layer_weights, dtype=torch.float32)
+                if (alpha < 0).any() or alpha.sum() <= 0:
+                    raise ValueError(
+                        "wavlm_layer_weights must be non-negative and have "
+                        "positive sum."
+                    )
+                alpha = alpha / alpha.sum()
+                self.layer_alpha = nn.Parameter(torch.log(alpha.clamp(min=1e-8)))
             else:
-                self.layer_weights = nn.Parameter(torch.zeros(len(self.layers)))
+                self.layer_alpha = nn.Parameter(torch.zeros(len(self.layers)))
             pooled_input_dim = hidden_size
         elif self.layer_combine == "concat":
             pooled_input_dim = hidden_size * len(self.layers)
         else:
-            self.layer_weights = None
+            self.layer_alpha = None
             pooled_input_dim = hidden_size
 
         if self.pooling == "attentive_stats":
@@ -155,8 +161,8 @@ class WavLMSpeakerEncoder(nn.Module):
             return torch.cat(selected, dim=-1)
         stacked = torch.stack(selected, dim=0)
         if self.layer_combine == "weighted_sum":
-            weights = torch.softmax(self.layer_weights, dim=0).view(-1, 1, 1, 1)
-            return (weights * stacked).sum(dim=0)
+            alpha = torch.softmax(self.layer_alpha, dim=0).view(-1, 1, 1, 1)
+            return (alpha * stacked).sum(dim=0)
         return stacked.mean(dim=0)
 
     def _masked_pool(
@@ -181,14 +187,20 @@ class WavLMSpeakerEncoder(nn.Module):
         device = next(self.parameters()).device
         waveforms, padding_mask = self._prepare_audio(audios_srs, device)
 
-        wavlm_context = torch.no_grad() if self.freeze_wavlm else torch.enable_grad()
-        with wavlm_context:
+        if self.freeze_wavlm:
+            with torch.no_grad():
+                outputs = self.wavlm(
+                    waveforms.float(),
+                    attention_mask=(~padding_mask).long(),
+                    output_hidden_states=True,
+                )
+        else:
             outputs = self.wavlm(
                 waveforms.float(),
                 attention_mask=(~padding_mask).long(),
                 output_hidden_states=True,
             )
-            features = self._combine_layers(outputs.hidden_states)
+        features = self._combine_layers(outputs.hidden_states)
 
         feat_padding_mask = (
             F.interpolate(
