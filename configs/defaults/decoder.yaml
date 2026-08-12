@@ -13,7 +13,16 @@ decoder:
   window_attention_seconds: 3.0
   use_group_bidirectional: false
   speaker_cond_dim: null
+  local_speaker_conditioning: true
 
 # Set this to enable frozen ECAPA conditioning. Its embedding_dim must match
 # decoder.speaker_cond_dim.
+# For WavLM speaker conditioning, set:
+# speaker_encoder_config:
+#   encoder_type: wavlm
+#   pretrained_model_name: microsoft/wavlm-large
+#   embedding_dim: 128
+#   wavlm_layers: [1, 2]
+#   wavlm_layer_combine: mean
+#   wavlm_pooling: mean_std
 speaker_encoder_config: null

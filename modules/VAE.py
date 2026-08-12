@@ -11,6 +11,7 @@ from .configs import VAEConfig
 from .encoder.encoder import Encoder
 from .utils import count_parameters_by_module
 from .feature_extractor import FeatureExtractor, WavLMFeatureExtractor
+from .speaker_encoder import WavLMSpeakerEncoder
 from .output_dataclasses import VAEOutput, DecoderOutput, FeatureExtractorOutput
 
 logger = logging.getLogger(__name__)
@@ -29,8 +30,18 @@ class VAE(torch.nn.Module):
             self.wavlm_extractor = WavLMFeatureExtractor(config.wavlm_config)
 
         self.speaker_encoder = None
+        self.speaker_encoder_type = None
         speaker_cfg = getattr(config, "speaker_encoder_config", None)
         if speaker_cfg is not None:
+            self.speaker_encoder_type = speaker_cfg.encoder_type
+            if self.speaker_encoder_type == "wavlm":
+                self.speaker_encoder = WavLMSpeakerEncoder(speaker_cfg)
+            elif self.speaker_encoder_type != "ecapa":
+                raise ValueError(
+                    "speaker_encoder_config.encoder_type must be 'ecapa' or 'wavlm'."
+                )
+
+        if speaker_cfg is not None and self.speaker_encoder_type == "ecapa":
             try:
                 from speechbrain.inference.speaker import EncoderClassifier
                 import huggingface_hub
@@ -101,7 +112,7 @@ class VAE(torch.nn.Module):
 
     def train(self, mode: bool = True):
         super().train(mode)
-        if self.speaker_encoder is not None:
+        if self.speaker_encoder is not None and self.speaker_encoder_type == "ecapa":
             self.speaker_encoder.eval()
         return self
 
@@ -189,10 +200,14 @@ class VAE(torch.nn.Module):
         )
         return encoder_output
 
-    @torch.no_grad()
     def extract_speaker_embedding(self, audios_srs):
         if self.speaker_encoder is None:
             return None
+        if self.speaker_encoder_type == "wavlm":
+            self.speaker_encoder = self.speaker_encoder.to(device=self.device)
+            return self.speaker_encoder(audios_srs).to(
+                device=self.device, dtype=self.dtype
+            )
 
         # Keep ECAPA frozen in fp32 for numerical stability and dtype consistency.
         self.speaker_encoder = self.speaker_encoder.to(
@@ -224,7 +239,9 @@ class VAE(torch.nn.Module):
         relative_lengths = torch.tensor(
             lengths, device=padded.device, dtype=padded.dtype
         ) / padded.shape[1]
-        with torch.autocast(device_type=speaker_device.type, enabled=False):
+        with torch.no_grad(), torch.autocast(
+            device_type=speaker_device.type, enabled=False
+        ):
             # Use SpeechBrain submodules directly to avoid internal device moves in
             # encode_batch that can desynchronize input/peso device under Trainer.
             mods = self.speaker_encoder.mods

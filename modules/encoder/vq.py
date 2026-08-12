@@ -57,6 +57,17 @@ class VectorQuantizer(nn.Module):
             if vq_dim is None:
                 vq_dim = 128
             self.quantizer = StandardVectorQuantizer(dim=vq_dim, codebook_size=self.num_embeddings)
+        elif self.vq_type == "vq_ema":
+            from .vq_ema import EMAVectorQuantizer
+            vq_dim = getattr(config, "vq_dim", None)
+            if vq_dim is None:
+                vq_dim = 128
+            self.quantizer = EMAVectorQuantizer(
+                dim=vq_dim,
+                codebook_size=self.num_embeddings,
+                decay=config.ema_decay,
+                eps=config.ema_eps,
+            )
         else:
             raise ValueError(f"Unknown vq_type: {self.vq_type}")
 
@@ -107,8 +118,26 @@ class VectorQuantizer(nn.Module):
         if flat_valid.any():
             z_proj_valid = z_proj_flat[flat_valid]
             indices_valid, z_q_proj_valid = self.quantizer(z_proj_valid)
+            indices_valid = indices_valid.long()
+            if indices_valid.shape != z_proj_valid.shape[:-1]:
+                raise ValueError(
+                    f"{self.vq_type} quantizer returned indices with shape "
+                    f"{tuple(indices_valid.shape)}, expected "
+                    f"{tuple(z_proj_valid.shape[:-1])}."
+                )
+            if indices_valid.min() < 0 or indices_valid.max() >= self.num_embeddings:
+                raise ValueError(
+                    f"{self.vq_type} quantizer returned indices outside "
+                    f"[0, {self.num_embeddings - 1}]."
+                )
+            if z_q_proj_valid.shape != z_proj_valid.shape:
+                raise ValueError(
+                    f"{self.vq_type} quantizer returned codes with shape "
+                    f"{tuple(z_q_proj_valid.shape)}, expected "
+                    f"{tuple(z_proj_valid.shape)}."
+                )
             z_q_proj_flat[flat_valid] = z_q_proj_valid.to(dtype=z_proj_flat.dtype)
-            indices_flat[flat_valid] = indices_valid.long()
+            indices_flat[flat_valid] = indices_valid
 
         z_q_proj = z_q_proj_flat.view_as(z_proj)
         indices_bt = indices_flat.view(B, T)
@@ -116,8 +145,7 @@ class VectorQuantizer(nn.Module):
         # Straight-Through Estimator (STE)
         z_q_proj_st = z_proj + (z_q_proj - z_proj).detach()
         
-        z_q_rec = self.proj_out(z_q_proj_st)
-        z_q = z_q_rec
+        z_q = self.proj_out(z_q_proj_st)
 
         z_residual = z - z_q.detach()
         
@@ -125,8 +153,18 @@ class VectorQuantizer(nn.Module):
         stats = _batch_vq_stats(indices_bt, valid, self.num_embeddings, z)
 
         total_loss = z.new_zeros(())
-        if valid.any():
-            total_loss = F.mse_loss(z_q_rec[valid], z[valid])
+        if self.vq_type in {"vq", "vq_ema"} and z_proj_valid is not None:
+            commitment_loss = F.mse_loss(z_proj_valid, z_q_proj_valid.detach())
+            if self.vq_type == "vq":
+                codebook_loss = F.mse_loss(
+                    z_q_proj_valid,
+                    z_proj_valid.detach(),
+                )
+                total_loss = (
+                    codebook_loss + self.config.commitment_weight * commitment_loss
+                )
+            else:
+                total_loss = self.config.commitment_weight * commitment_loss
 
         return VQVAEOutput(
             indices=indices_bt,

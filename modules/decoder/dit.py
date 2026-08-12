@@ -63,14 +63,18 @@ class Transformer(Module):
         )
 
         if speaker_cond_dim is not None:
-            self.speaker_film = nn.Sequential(
+            self.speaker_proj = nn.Linear(speaker_cond_dim, time_hidden_dim)
+            self.speaker_time_film = nn.Sequential(
                 nn.SiLU(),
-                nn.Linear(speaker_cond_dim, depth * 2 * time_hidden_dim),
+                nn.Linear(time_hidden_dim * 2, time_hidden_dim),
+                nn.SiLU(),
+                nn.Linear(time_hidden_dim, depth * 2 * time_hidden_dim),
             )
-            nn.init.zeros_(self.speaker_film[-1].weight)
-            nn.init.zeros_(self.speaker_film[-1].bias)
+            nn.init.zeros_(self.speaker_time_film[-1].weight)
+            nn.init.zeros_(self.speaker_time_film[-1].bias)
         else:
-            self.speaker_film = None
+            self.speaker_proj = None
+            self.speaker_time_film = None
 
         if use_conv_layer:
             self.conv_embed = ConvPositionEmbed(
@@ -133,10 +137,16 @@ class Transformer(Module):
         # time embedding
         time_emb = self.sinu_pos_emb(t)
         speaker_film = None
-        if self.speaker_film is not None and speaker_embedding is not None:
-            speaker_film = self.speaker_film(speaker_embedding).view(
-                batch, len(self.layers), 2, -1
+        if self.speaker_time_film is not None and speaker_embedding is not None:
+            speaker_embedding = speaker_embedding.to(
+                device=x.device, dtype=time_emb.dtype
             )
+            speaker_embedding = F.normalize(speaker_embedding, p=2, dim=-1)
+            speaker_emb = self.speaker_proj(speaker_embedding)
+            global_cond = self.speaker_time_film(
+                torch.cat([time_emb, speaker_emb], dim=-1)
+            )
+            speaker_film = global_cond.view(batch, len(self.layers), 2, -1)
 
         # add register tokens to the left
         if self.has_register_tokens:

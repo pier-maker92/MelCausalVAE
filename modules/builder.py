@@ -38,6 +38,10 @@ def _load_vq_config(encoder_cfg: Dict[str, Any]):
         )
         if "add_residual_p" not in vq_dict and legacy_drop_p is not None:
             vq_dict["add_residual_p"] = 1.0 - float(legacy_drop_p)
+        if "vq_dim" not in vq_dict and "dim_to_quantize" in vq_dict:
+            vq_dict["vq_dim"] = vq_dict.pop("dim_to_quantize")
+        if vq_dict.pop("use_ema_codebook", False):
+            vq_dict["vq_type"] = "vq_ema"
         vq_dict.setdefault("vq_type", "vq")
         vq_dict = _filter_dataclass_kwargs(VQConfig, vq_dict)
         return VQConfig(**vq_dict)
@@ -184,6 +188,7 @@ def build_standard_model(cfg_dict: Dict[str, Any]):
         "window_attention_seconds",
         "use_group_bidirectional",
         "speaker_cond_dim",
+        "local_speaker_conditioning",
         "kernel_size",
         "causal_convolution",
         "upsample",

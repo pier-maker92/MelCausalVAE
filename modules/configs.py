@@ -119,20 +119,28 @@ class VQConfig:
     num_embeddings: int
     add_residual:bool
     add_residual_p:float
-    vq_type: str # "bsq" or "fsq" or "vq"
+    vq_type: str # "bsq" or "fsq" or "vq" or "vq_ema"
     vq_dim: Optional[int] = None
     commitment_weight: float = 0.25
+    ema_decay: float = 0.99
+    ema_eps: float = 1e-5
     # BSQ-only: per-bit entropy regularization to prevent codebook collapse.
     entropy_loss_weight: float = 0.0
     entropy_temperature: float = 1.0
 
     def __post_init__(self):
+        if self.vq_type not in {"bsq", "fsq", "vq", "vq_ema"}:
+            raise ValueError("vq_type must be one of: bsq, fsq, vq, vq_ema.")
         if not 0.0 <= self.add_residual_p <= 1.0:
             raise ValueError("add_residual_p must be in [0, 1].")
         if self.entropy_loss_weight < 0.0:
             raise ValueError("entropy_loss_weight must be >= 0.")
         if self.entropy_temperature <= 0.0:
             raise ValueError("entropy_temperature must be > 0.")
+        if not 0.0 < self.ema_decay < 1.0:
+            raise ValueError("ema_decay must be in (0, 1).")
+        if self.ema_eps <= 0.0:
+            raise ValueError("ema_eps must be > 0.")
 
 @dataclass
 class SemanticDistillationConfig:
@@ -185,6 +193,7 @@ class DiTConfig:
     sigma: float = 1e-5
     use_group_bidirectional: bool = False
     speaker_cond_dim: Optional[int] = None
+    local_speaker_conditioning: bool = True
     normalize_context_vector: bool = False
 
 
@@ -240,9 +249,34 @@ class WavLMConfig:
 
 @dataclass
 class SpeakerEncoderConfig:
+    encoder_type: str = "ecapa"
     pretrained_model_name: str = "speechbrain/spkrec-ecapa-voxceleb"
     sampling_rate: int = 16000
     embedding_dim: int = 192
+    wavlm_layers: Optional[list[int]] = None
+    wavlm_layer_weights: Optional[list[float]] = None
+    wavlm_layer_combine: str = "mean"
+    wavlm_pooling: str = "mean_std"
+    wavlm_normalize_features: bool = True
+    wavlm_freeze: bool = True
+    wavlm_attention_channels: int = 128
+
+    def __post_init__(self):
+        if self.encoder_type not in {"ecapa", "wavlm"}:
+            raise ValueError(
+                "speaker_encoder_config.encoder_type must be ecapa or wavlm."
+            )
+        if (
+            self.encoder_type == "wavlm"
+            and self.pretrained_model_name == "speechbrain/spkrec-ecapa-voxceleb"
+        ):
+            self.pretrained_model_name = "microsoft/wavlm-large"
+        if self.wavlm_layers is not None and len(self.wavlm_layers) == 0:
+            raise ValueError("speaker_encoder_config.wavlm_layers cannot be empty.")
+        if self.wavlm_layer_weights is not None and self.wavlm_layers is None:
+            raise ValueError(
+                "speaker_encoder_config.wavlm_layer_weights requires wavlm_layers."
+            )
 
 
 #########################
@@ -286,7 +320,8 @@ class VAEConfig:
             if configured_dim is not None and configured_dim != speaker_cond_dim:
                 raise ValueError(
                     "decoder.speaker_cond_dim must match "
-                    "speaker_encoder_config.embedding_dim when ECAPA conditioning is enabled"
+                    "speaker_encoder_config.embedding_dim when speaker conditioning "
+                    "is enabled"
                 )
             self.decoder_config.speaker_cond_dim = speaker_cond_dim
         elif getattr(self.encoder_config, "use_instance_norm", False):

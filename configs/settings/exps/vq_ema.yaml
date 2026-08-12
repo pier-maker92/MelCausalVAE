@@ -42,12 +42,12 @@ encoder:
   # --- VQ Config ---
   vq_config:
     num_embeddings: 128
+    vq_type: vq_ema
+    vq_dim: 32
     commitment_weight: 0.25
-    reset_dead_codes: true
-    reset_every_forward: 10
+    ema_decay: 0.99
+    ema_eps: 1.0e-5
     residual_and_tail_dropout_p: 0.2  # (was vq_residual_dropout)
-    dim_to_quantize: 32
-    use_ema_codebook: true
 
   # --- Dropout Config ---
   dropout_regularizer_config:

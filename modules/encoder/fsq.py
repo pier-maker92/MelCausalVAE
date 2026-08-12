@@ -63,13 +63,7 @@ class FiniteScalarQuantizer(nn.Module):
         offset = torch.where(self._levels % 2 == 0, 0.5, 0.0)
         
         z = z * half_l - offset
-        z_rounded = torch.round(z)
-        
-        # Note: In standard FSQ, you want gradients to flow through `tanh`.
-        # Since the wrapper (VectorQuantizer) applies STE over the entire quantizer block,
-        # we don't strictly need to apply it here, BUT if we don't, the tanh gradient is skipped.
-        # It is highly recommended to apply STE to the round operation itself:
-        z_q = z + (z_rounded - z).detach()
+        z_q = torch.round(z)
         
         z_q = z_q + offset
         z_q = z_q / half_l
