@@ -72,7 +72,7 @@ encoder:
   vq_config: 
     num_embeddings: 128
     add_residual: true
-    add_residual_p: 0.5
+    add_residual_p: 0.65
     vq_type: "vq"
     commitment_weight: 0.25
 
@@ -94,7 +94,7 @@ decoder:
   kernel_size: 17
   causal_convolution: false
   normalize_context_vector: true
-  speaker_cond_dim: 192
+  speaker_cond_dim: 512
   local_speaker_conditioning: true
 
 speaker_encoder_config:
@@ -102,6 +102,6 @@ speaker_encoder_config:
   pretrained_model_name: "microsoft/wavlm-large"
   sampling_rate: 16000
   embedding_dim: 512
-  wavlm_layers: [1, 2, 3]
+  wavlm_layers: [2, 3]
   wavlm_layer_combine: weighted_sum
   wavlm_pooling: mean_std
