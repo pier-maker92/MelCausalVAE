@@ -41,6 +41,10 @@ class BinarySphericalQuantizer(nn.Module):
 
     def __init__(self, codebook_size: "int" = 4096) -> "None":
         super().__init__()
+        if codebook_size < 2 or codebook_size & (codebook_size - 1):
+            raise ValueError(
+                "BinarySphericalQuantizer codebook_size must be a power of two >= 2."
+            )
         self.codebook_size = codebook_size
         self.dim = int(math.log2(codebook_size))
 
@@ -73,7 +77,7 @@ class BinarySphericalQuantizer(nn.Module):
 
         """
         toks = self.lats_to_toks(lats)
-        codes = self.toks_to_codes(toks)
+        codes = self.toks_to_codes(toks).to(lats.dtype)
         return toks, codes
 
     @torch.jit.export
@@ -90,7 +94,8 @@ class BinarySphericalQuantizer(nn.Module):
             Output codes of shape (..., dim).
 
         """
-        return torch.where(lats > 0, self.codebook_value, -self.codebook_value)
+        codebook_value = self.codebook_value.to(lats.dtype)
+        return torch.where(lats > 0, codebook_value, -codebook_value)
 
     @torch.jit.export
     def lats_to_toks(self, lats: "Tensor") -> "Tensor":

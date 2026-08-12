@@ -106,6 +106,19 @@ def main(args):
             "temperature": args.temperature,
             "guidance_scale": args.guidance_scale,
         }
+        if args.target_audio is not None:
+            target_wav = load_wav_mono_resampled(
+                args.target_audio, model.config.sample_rate
+            ).to(device)
+            speaker_embedding = model.extract_speaker_embedding(
+                [(target_wav, model.config.sample_rate)]
+            )
+            if speaker_embedding is None:
+                raise RuntimeError(
+                    "Speaker embedding swapping requires a checkpoint with a speaker "
+                    "encoder."
+                )
+            params["speaker_embedding"] = speaker_embedding
         if args.quantized or args.residual or args.tail:
             params["quantized"] = False
             params["residual"] = False
@@ -159,6 +172,12 @@ if __name__ == "__main__":
         "-c", "--checkpoint_dir", type=str, default="checkpoints/vq-refactored"
     )
     parser.add_argument("-i", "--audio_path", type=str, default="ablations/male.wav")
+    parser.add_argument(
+        "--target_audio",
+        type=str,
+        default=None,
+        help="Audio file whose speaker embedding conditions the reconstruction",
+    )
     parser.add_argument("-o", "--output_path", type=str, default=None)
     parser.add_argument("--num_steps", type=int, default=16)
     parser.add_argument("--temperature", type=float, default=0.3)

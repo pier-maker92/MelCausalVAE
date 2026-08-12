@@ -117,12 +117,22 @@ class NoiseConfig(RegularizationConfig, DeprecatedConfigMixin):
 @dataclass
 class VQConfig:
     num_embeddings: int
-    dim_to_quantize:int
     add_residual:bool
-    drop_acoustic_p:float
+    add_residual_p:float
     vq_type: str # "bsq" or "fsq" or "vq"
     vq_dim: Optional[int] = None
     commitment_weight: float = 0.25
+    # BSQ-only: per-bit entropy regularization to prevent codebook collapse.
+    entropy_loss_weight: float = 0.0
+    entropy_temperature: float = 1.0
+
+    def __post_init__(self):
+        if not 0.0 <= self.add_residual_p <= 1.0:
+            raise ValueError("add_residual_p must be in [0, 1].")
+        if self.entropy_loss_weight < 0.0:
+            raise ValueError("entropy_loss_weight must be >= 0.")
+        if self.entropy_temperature <= 0.0:
+            raise ValueError("entropy_temperature must be > 0.")
 
 @dataclass
 class SemanticDistillationConfig:
@@ -228,6 +238,13 @@ class WavLMConfig:
     normalize: bool = True
 
 
+@dataclass
+class SpeakerEncoderConfig:
+    pretrained_model_name: str = "speechbrain/spkrec-ecapa-voxceleb"
+    sampling_rate: int = 16000
+    embedding_dim: int = 192
+
+
 #########################
 #          VAE          #
 #########################
@@ -245,6 +262,7 @@ class VAEConfig:
         default_factory=MelSpectrogramConfig
     )
     wavlm_config: Optional[WavLMConfig] = None
+    speaker_encoder_config: Optional[SpeakerEncoderConfig] = None
 
     def __post_init__(self):
         self.mel_spectrogram_config.n_mels = self.mel_dim
@@ -262,7 +280,16 @@ class VAEConfig:
         self.decoder_config.audio_latent_dim = self.latent_dim
         self.decoder_config.expansion_factor = self.compress_factor
 
-        if getattr(self.encoder_config, "use_instance_norm", False):
+        if self.speaker_encoder_config is not None:
+            speaker_cond_dim = self.speaker_encoder_config.embedding_dim
+            configured_dim = self.decoder_config.speaker_cond_dim
+            if configured_dim is not None and configured_dim != speaker_cond_dim:
+                raise ValueError(
+                    "decoder.speaker_cond_dim must match "
+                    "speaker_encoder_config.embedding_dim when ECAPA conditioning is enabled"
+                )
+            self.decoder_config.speaker_cond_dim = speaker_cond_dim
+        elif getattr(self.encoder_config, "use_instance_norm", False):
             spk_dim = self.latent_dim * 2
             self.decoder_config.speaker_cond_dim = spk_dim
 

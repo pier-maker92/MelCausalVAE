@@ -27,6 +27,7 @@ training = [
     "deepspeed==0.18.4",
     "accelerate==1.13.0",
     "datasets==4.1.0",
+    "speechbrain",
     "utmosv2 @ git+https://github.com/sarulab-speech/UTMOSv2.git",
     "matplotlib",
     "wandb",

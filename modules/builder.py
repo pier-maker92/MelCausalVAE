@@ -17,6 +17,7 @@ from .configs import (
     KLChunkRegularizer,
     SemanticDistillationConfig,
     NoiseConfig,
+    SpeakerEncoderConfig,
 )
 
 
@@ -32,24 +33,22 @@ def _load_vq_config(encoder_cfg: Dict[str, Any]):
 
     if vq_dict is not None:
         vq_dict = dict(vq_dict)
-        if "residual_and_tail_dropout_p" in vq_dict and "drop_acoustic_p" not in vq_dict:
-            vq_dict["drop_acoustic_p"] = vq_dict.pop("residual_and_tail_dropout_p")
+        legacy_drop_p = vq_dict.pop(
+            "drop_acoustic_p", vq_dict.pop("residual_and_tail_dropout_p", None)
+        )
+        if "add_residual_p" not in vq_dict and legacy_drop_p is not None:
+            vq_dict["add_residual_p"] = 1.0 - float(legacy_drop_p)
         vq_dict.setdefault("vq_type", "vq")
         vq_dict = _filter_dataclass_kwargs(VQConfig, vq_dict)
         return VQConfig(**vq_dict)
 
     if bsq_dict is not None:
         bsq_dict = dict(bsq_dict)
-        drop_acoustic_p = bsq_dict.pop("residual_and_tail_dropout_p", 0.0)
         num_embeddings = bsq_dict["codebook_size"]
-        dim_to_quantize = bsq_dict.pop("dim_to_quantize", None)
-        if dim_to_quantize is None:
-            dim_to_quantize = int(round(num_embeddings).bit_length() - 1)
         return VQConfig(
             num_embeddings=num_embeddings,
-            dim_to_quantize=dim_to_quantize,
             add_residual=False,
-            drop_acoustic_p=drop_acoustic_p,
+            add_residual_p=0.0,
             vq_type="bsq",
         )
 
@@ -127,6 +126,15 @@ def build_model(cfg_dict: Dict[str, Any]) -> VAE:
         else None
     )
 
+    speaker_encoder_dict = cfg_dict.get("speaker_encoder_config", None)
+    speaker_encoder_config = (
+        SpeakerEncoderConfig(
+            **_filter_dataclass_kwargs(SpeakerEncoderConfig, speaker_encoder_dict)
+        )
+        if speaker_encoder_dict
+        else None
+    )
+
     vae_config = VAEConfig(
         mel_dim=cfg_dict.get("mel_dim"),
         latent_dim=cfg_dict.get("latent_dim"),
@@ -136,6 +144,7 @@ def build_model(cfg_dict: Dict[str, Any]) -> VAE:
         decoder_config=decoder_config,
         mel_spectrogram_config=mel_spec_config,
         wavlm_config=wavlm_config,
+        speaker_encoder_config=speaker_encoder_config,
     )
 
     training_cfg = cfg_dict.get("training", {}) or {}

@@ -63,11 +63,14 @@ class Transformer(Module):
         )
 
         if speaker_cond_dim is not None:
-            self.speaker_proj = nn.Sequential(
-                nn.SiLU(), nn.Linear(speaker_cond_dim, time_hidden_dim)
+            self.speaker_film = nn.Sequential(
+                nn.SiLU(),
+                nn.Linear(speaker_cond_dim, depth * 2 * time_hidden_dim),
             )
+            nn.init.zeros_(self.speaker_film[-1].weight)
+            nn.init.zeros_(self.speaker_film[-1].bias)
         else:
-            self.speaker_proj = None
+            self.speaker_film = None
 
         if use_conv_layer:
             self.conv_embed = ConvPositionEmbed(
@@ -129,8 +132,11 @@ class Transformer(Module):
 
         # time embedding
         time_emb = self.sinu_pos_emb(t)
-        if self.speaker_proj is not None and speaker_embedding is not None:
-            time_emb = time_emb + self.speaker_proj(speaker_embedding)
+        speaker_film = None
+        if self.speaker_film is not None and speaker_embedding is not None:
+            speaker_film = self.speaker_film(speaker_embedding).view(
+                batch, len(self.layers), 2, -1
+            )
 
         # add register tokens to the left
         if self.has_register_tokens:
@@ -157,17 +163,20 @@ class Transformer(Module):
 
         rotary_emb = self.rotary_emb(positions)
 
-        # adaptive rmsnorm
-        rmsnorm_kwargs = dict(cond=time_emb)
-
         # layers
-        for (
+        for layer_index, (
             skip_combiner,
             attn_prenorm,
             attn,
             ff_prenorm,
             ff,
-        ) in self.layers:
+        ) in enumerate(self.layers):
+            layer_time_emb = time_emb
+            if speaker_film is not None:
+                gamma, beta = speaker_film[:, layer_index].unbind(dim=1)
+                layer_time_emb = layer_time_emb * (1 + gamma) + beta
+            rmsnorm_kwargs = dict(cond=layer_time_emb)
+
             if not exists(skip_combiner):
                 skip_connects.append(x)
             else:

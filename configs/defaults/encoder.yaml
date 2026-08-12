@@ -20,9 +20,10 @@ encoder:
   # --- VQ ---
   vq_config:
     num_embeddings: null
-    dim_to_quantize: null
     add_residual: false
-    drop_acoustic_p: 0.0
+    add_residual_p: 1.0
+    # BSQ-only: prevents codebook collapse (0 disables, ~0.1 is a reasonable start).
+    entropy_loss_weight: 0.0
 
   dropout_regularizer_config: null
     # chunk_size: 2

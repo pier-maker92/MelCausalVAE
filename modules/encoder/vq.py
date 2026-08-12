@@ -1,4 +1,3 @@
-import math
 import torch
 import torch.nn as nn
 from typing import Optional
@@ -41,10 +40,11 @@ class VectorQuantizer(nn.Module):
     def __init__(
         self,
         config: VQConfig,
+        dim: int,
     ):
         super().__init__()
         self.config = config
-        self.dim = config.dim_to_quantize
+        self.dim = dim
         self.num_embeddings = config.num_embeddings
         self.vq_type = config.vq_type
         if self.vq_type == "fsq":
@@ -60,14 +60,18 @@ class VectorQuantizer(nn.Module):
         else:
             raise ValueError(f"Unknown vq_type: {self.vq_type}")
 
-        self.proj_in = nn.Linear(self.dim, self.quantizer.dim)
-        self.proj_out = nn.Linear(self.quantizer.dim, self.dim)
+        self.proj_in = nn.Sequential(
+            nn.Linear(self.dim, self.quantizer.dim, bias=False),
+            nn.LayerNorm(self.quantizer.dim),
+        )
+        self.proj_out = nn.Sequential(
+            nn.Linear(self.quantizer.dim, self.dim, bias=True),
+        )
 
     def forward(
         self,
         z: torch.Tensor,
         padding_mask: Optional[torch.BoolTensor] = None,
-        drop_acoustic: bool = False,
     ) -> VQVAEOutput:
         """
         Args:
@@ -79,45 +83,50 @@ class VectorQuantizer(nn.Module):
         """
         B, T, D = z.shape
         
-        # Split z if D > self.dim
-        z_qtz = z[..., :self.dim]
-        z_pass = z[..., self.dim:] if not drop_acoustic else torch.zeros_like(z[..., self.dim:])
+        if D != self.dim:
+            raise ValueError(
+                f"VectorQuantizer expected {self.dim} dimensions, received {D}."
+            )
 
-        # Project down to BSQ dim
-        z_proj = self.proj_in(z_qtz)
-        
-        # Quantize using BSQ
-        indices_bt, z_q_proj = self.quantizer(z_proj)
-        
-        # Straight-Through Estimator (STE)
-        z_q_proj_st = z_proj + (z_q_proj - z_proj).detach()
-        
-        # Project back to original quantized dim
-        z_q_rec = self.proj_out(z_q_proj_st)
-        
-        # Recombine if there were extra dimensions
-        z_q = torch.cat([z_q_rec, z_pass], dim=-1)
-
-        z_residual = z - z_q.detach()
+        z_proj = self.proj_in(z)
         
         if padding_mask is None:
             valid = torch.ones(B, T, dtype=torch.bool, device=z.device)
         else:
             valid = ~padding_mask
 
+        flat_valid = valid.reshape(-1)
+        z_proj_flat = z_proj.reshape(-1, z_proj.shape[-1])
+        z_q_proj_flat = z_proj_flat.clone()
+        indices_flat = torch.zeros(
+            z_proj_flat.shape[0], device=z.device, dtype=torch.long
+        )
+
+        z_proj_valid = None
+        z_q_proj_valid = None
+        if flat_valid.any():
+            z_proj_valid = z_proj_flat[flat_valid]
+            indices_valid, z_q_proj_valid = self.quantizer(z_proj_valid)
+            z_q_proj_flat[flat_valid] = z_q_proj_valid.to(dtype=z_proj_flat.dtype)
+            indices_flat[flat_valid] = indices_valid.long()
+
+        z_q_proj = z_q_proj_flat.view_as(z_proj)
+        indices_bt = indices_flat.view(B, T)
+
+        # Straight-Through Estimator (STE)
+        z_q_proj_st = z_proj + (z_q_proj - z_proj).detach()
+        
+        z_q_rec = self.proj_out(z_q_proj_st)
+        z_q = z_q_rec
+
+        z_residual = z - z_q.detach()
+        
         # Compute stats using all valid positions
         stats = _batch_vq_stats(indices_bt, valid, self.num_embeddings, z)
-        
-        recon_loss = F.mse_loss(z_q_rec[valid], z_qtz[valid]) 
-        
-        if self.vq_type == "vq":
-            e_latent_loss = F.mse_loss(z_q_proj.detach()[valid], z_proj[valid])
-            q_latent_loss = F.mse_loss(z_q_proj[valid], z_proj.detach()[valid])
-            commitment_weight = getattr(self.config, "commitment_weight", 0.25)
-            commitment_loss = q_latent_loss + commitment_weight * e_latent_loss
-            total_loss = recon_loss + commitment_loss
-        else:
-            total_loss = recon_loss
+
+        total_loss = z.new_zeros(())
+        if valid.any():
+            total_loss = F.mse_loss(z_q_rec[valid], z[valid])
 
         return VQVAEOutput(
             indices=indices_bt,

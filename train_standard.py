@@ -166,6 +166,7 @@ class VAEStandardTrainer(VAEtrainer):
         model.train()
         inputs = self._prepare_inputs(inputs)
         audios_srs = inputs["output_audios_srs"]
+        feature_audios_srs = inputs.get("perturbed_audio_srs", audios_srs)
         actual_model = model.module if hasattr(model, "module") else model
         disc_cfg = actual_model.config.discriminator_config
 
@@ -176,7 +177,10 @@ class VAEStandardTrainer(VAEtrainer):
                     enc_features, enc_mask,
                     dec_features, dec_mask,
                     _distill,
-                ) = actual_model.extract_features(audios_srs)
+                ) = actual_model.extract_features(
+                    feature_audios_srs,
+                    target_audios_srs=audios_srs,
+                )
 
             # ── Encoder forward ─────────────────────────────────────────────
             enc_output = actual_model.encode(
@@ -322,8 +326,23 @@ def main(cfg: DictConfig):
     else:
         raise ValueError(f"Dataset {dataset_name} not supported")
 
-    train_dataset = TrainDatasetWrapper(dataset, "train")
-    test_dataset = TestDatasetWrapper(dataset, "test")
+    enable_perturbed_audio = bool(training_cfg.pop("enable_perturbed_audio", False))
+    perturbed_pitch_shift_max_semitones = float(
+        training_cfg.pop("perturbed_pitch_shift_max_semitones", 8.0)
+    )
+
+    train_dataset = TrainDatasetWrapper(
+        dataset,
+        "train",
+        enable_perturbed_audio=enable_perturbed_audio,
+        perturbed_pitch_shift_max_semitones=perturbed_pitch_shift_max_semitones,
+    )
+    test_dataset = TestDatasetWrapper(
+        dataset,
+        "test",
+        enable_perturbed_audio=enable_perturbed_audio,
+        perturbed_pitch_shift_max_semitones=perturbed_pitch_shift_max_semitones,
+    )
 
     wandb_project = training_cfg.pop("wandb_project", None)
     wandb_run_name = training_cfg.pop("wandb_run_name", None)

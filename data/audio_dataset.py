@@ -2,21 +2,17 @@ import os
 import json
 import torch
 import random
+import warnings
 from dataclasses import dataclass
 import torchaudio.transforms as T
+import torchaudio.sox_effects as SoxEffects
 from torch.utils.data import Dataset
 from typing import Optional, Sequence, Dict
-
-import torch
-import torch.nn as nn
-import torchaudio.transforms as T
-from torchaudio_filters import LowPass, Pad, BandPass
-import random
 
 
 class SimpleAudioDataset(Dataset):
     def __init__(self):
-        pass
+        self._audio_worker_pid = None
 
     def _process_audio(self, audio: torch.Tensor, sr: int, target_sr: int):
         if target_sr is not None:  # handle resampling
@@ -49,6 +45,55 @@ class SimpleAudioDataset(Dataset):
         )
         data_dict.update({f"{key_name}": [audio_output], f"{key_name}_sr": [sr_output]})
 
+    def _pitch_shift_audio(
+        self, audio: torch.Tensor, sr: int, max_abs_semitones: float
+    ) -> torch.Tensor:
+        if max_abs_semitones <= 0.0:
+            return audio
+
+        worker_pid = os.getpid()
+        if self._audio_worker_pid != worker_pid:
+            torch.set_num_threads(1)
+            self._audio_worker_pid = worker_pid
+
+        n_steps = random.uniform(-max_abs_semitones, max_abs_semitones)
+        if abs(n_steps) < 1e-6:
+            return audio
+
+        audio_in = audio
+        if audio_in.ndim == 1:
+            audio_in = audio_in.unsqueeze(0)
+
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=".*torchaudio\.sox_effects.*deprecated.*",
+                category=UserWarning,
+            )
+            shifted, shifted_sr = SoxEffects.apply_effects_tensor(
+                audio_in,
+                sr,
+                effects=[
+                    ["pitch", f"{n_steps * 100.0:.4f}"],
+                    ["rate", str(sr)],
+                ],
+                channels_first=True,
+            )
+        if shifted_sr != sr:
+            raise RuntimeError(
+                f"Pitch shifting changed sample rate from {sr} to {shifted_sr}."
+            )
+
+        shifted = shifted[..., : audio_in.shape[-1]]
+        if shifted.shape[-1] < audio_in.shape[-1]:
+            shifted = torch.nn.functional.pad(
+                shifted, (0, audio_in.shape[-1] - shifted.shape[-1])
+            )
+        if audio.ndim == 1:
+            shifted = shifted.squeeze(0)
+        shifted = shifted.to(audio.dtype)
+        return shifted / (shifted.abs().max() + 1e-8)
+
 
 @dataclass
 class DataCollator(object):
@@ -59,6 +104,7 @@ class DataCollator(object):
         # handling etherogeneous samples in the batch, if a key is not present in the batch, add None in the index corresponding to the sample
         batch_input_audios_srs = [None] * len(instances)
         batch_output_audios_srs = [None] * len(instances)
+        batch_perturbed_audios_srs = [None] * len(instances)
         batch_condition_audios_srs = [None] * len(instances)
         batch_transcription_ids = [None] * len(instances)
         batch_aligned_transcription_ids = [None] * len(instances)
@@ -76,6 +122,11 @@ class DataCollator(object):
                 batch_output_audios_srs[i] = (
                     instance["audio_output"][0],
                     instance["audio_output_sr"][0],
+                )
+            if "perturbed_audio" in instance:
+                batch_perturbed_audios_srs[i] = (
+                    instance["perturbed_audio"][0],
+                    instance["perturbed_audio_sr"][0],
                 )
             if "audio_condition" in instance:
                 batch_condition_audios_srs[i] = (
@@ -105,6 +156,8 @@ class DataCollator(object):
             batch["input_audios_srs"] = batch_input_audios_srs
         if not all_none(batch_output_audios_srs):
             batch["output_audios_srs"] = batch_output_audios_srs
+        if not all_none(batch_perturbed_audios_srs):
+            batch["perturbed_audio_srs"] = batch_perturbed_audios_srs
         if not all_none(batch_condition_audios_srs):
             batch["condition_audios_srs"] = batch_condition_audios_srs
         if not all_none(batch_transcription_ids):
@@ -167,9 +220,20 @@ class EvalDataCollator(object):
 
 
 class TrainDatasetWrapper(SimpleAudioDataset):
-    def __init__(self, dataset: SimpleAudioDataset, split: str, max_audio_len: Optional[float] = None):
+    def __init__(
+        self,
+        dataset: SimpleAudioDataset,
+        split: str,
+        max_audio_len: Optional[float] = None,
+        enable_perturbed_audio: bool = False,
+        perturbed_pitch_shift_max_semitones: float = 8.0,
+    ):
         super().__init__()
         assert split in ["train", "test"], "split must be either train or test"
+        self.enable_perturbed_audio = enable_perturbed_audio
+        self.perturbed_pitch_shift_max_semitones = float(
+            perturbed_pitch_shift_max_semitones
+        )
         self.dataset = getattr(dataset, f"{split}_dataset")
         if max_audio_len is not None:
             self.dataset = self.dataset.filter(
@@ -186,15 +250,36 @@ class TrainDatasetWrapper(SimpleAudioDataset):
         data_dict = {}
         data = self.dataset[idx]
         self._process_audio_output(data_dict, data["audio"])
+        if self.enable_perturbed_audio:
+            clean_audio = data_dict["audio_output"][0]
+            clean_sr = data_dict["audio_output_sr"][0]
+            perturbed_audio = self._pitch_shift_audio(
+                clean_audio,
+                clean_sr,
+                self.perturbed_pitch_shift_max_semitones,
+            )
+            data_dict["perturbed_audio"] = [perturbed_audio]
+            data_dict["perturbed_audio_sr"] = [clean_sr]
         data_dict["ids"] = data.get("id")
         data_dict["phoneme_alignments"] = data.get("phonemes", None)
         return data_dict
 
 
 class TestDatasetWrapper(SimpleAudioDataset):
-    def __init__(self, dataset: SimpleAudioDataset, split: str, max_audio_len: Optional[float] = None):
+    def __init__(
+        self,
+        dataset: SimpleAudioDataset,
+        split: str,
+        max_audio_len: Optional[float] = None,
+        enable_perturbed_audio: bool = False,
+        perturbed_pitch_shift_max_semitones: float = 8.0,
+    ):
         super().__init__()
         assert split in ["test", "train"], "split must be test or train"
+        self.enable_perturbed_audio = enable_perturbed_audio
+        self.perturbed_pitch_shift_max_semitones = float(
+            perturbed_pitch_shift_max_semitones
+        )
         self.dataset = getattr(dataset, f"{split}_dataset")
         if max_audio_len is not None:
             self.dataset = self.dataset.filter(
@@ -211,6 +296,16 @@ class TestDatasetWrapper(SimpleAudioDataset):
         data_dict = {}
         data = self.dataset[idx]
         self._process_audio_output(data_dict, data["audio"])
+        if self.enable_perturbed_audio:
+            clean_audio = data_dict["audio_output"][0]
+            clean_sr = data_dict["audio_output_sr"][0]
+            perturbed_audio = self._pitch_shift_audio(
+                clean_audio,
+                clean_sr,
+                self.perturbed_pitch_shift_max_semitones,
+            )
+            data_dict["perturbed_audio"] = [perturbed_audio]
+            data_dict["perturbed_audio_sr"] = [clean_sr]
         self._process_audio_output(
             data_dict, data["audio"], key_name="16k_audio", target_sr=16000
         )

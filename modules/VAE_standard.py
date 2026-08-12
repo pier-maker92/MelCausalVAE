@@ -42,12 +42,7 @@ class VAEWithStandardDecoder(nn.Module):
             self.distill_wavlm_extractor = WavLMFeatureExtractor(
                 WavLMConfig(layer=sem_cfg.wavlm_layer)
             )
-            dim_to_quantize = (
-                config.encoder_config.vq_config.dim_to_quantize
-                if config.encoder_config.vq_config
-                else config.encoder_config.latent_dim
-            )
-            self.distill_proj_head = nn.Linear(dim_to_quantize, 1024)
+            self.distill_proj_head = nn.Linear(config.encoder_config.latent_dim, 1024)
 
         self.encoder = Encoder(config.encoder_config)
         self.decoder = ConvDecoder(config.decoder_config)
@@ -64,26 +59,38 @@ class VAEWithStandardDecoder(nn.Module):
         logger.info(f"Loaded checkpoint from {checkpoint_path}")
 
     @torch.no_grad()
-    def extract_features(self, audios_srs, **kwargs):
-        features_extractor_output = self.feature_extractor(audios_srs)
-        features = features_extractor_output.audio_features.to(self.dtype)
-        padding_mask = features_extractor_output.padding_mask
+    def extract_features(self, encoder_audios_srs, target_audios_srs=None, **kwargs):
+        if target_audios_srs is None:
+            target_audios_srs = encoder_audios_srs
+
+        target_features_output = self.feature_extractor(target_audios_srs)
+        target_features = target_features_output.audio_features.to(self.dtype)
+        target_padding_mask = target_features_output.padding_mask
 
         distill_features = None
         if self.distill_wavlm_extractor is not None:
-            distill_features = self.distill_wavlm_extractor(audios_srs).audio_features.to(self.dtype)
+            distill_features = self.distill_wavlm_extractor(encoder_audios_srs).audio_features.to(self.dtype)
 
         if self.wavlm_extractor is not None:
-            wavlm_output = self.wavlm_extractor(audios_srs)
+            wavlm_output = self.wavlm_extractor(encoder_audios_srs)
             return (
                 wavlm_output.audio_features.to(self.dtype),
                 wavlm_output.padding_mask,
-                features,
-                padding_mask,
+                target_features,
+                target_padding_mask,
                 distill_features,
             )
 
-        return features, padding_mask, features, padding_mask, distill_features
+        encoder_features_output = self.feature_extractor(encoder_audios_srs)
+        encoder_features = encoder_features_output.audio_features.to(self.dtype)
+        encoder_padding_mask = encoder_features_output.padding_mask
+        return (
+            encoder_features,
+            encoder_padding_mask,
+            target_features,
+            target_padding_mask,
+            distill_features,
+        )
 
     def encode(self, features, padding_mask, **kwargs):
         return self.encoder(
@@ -93,13 +100,18 @@ class VAEWithStandardDecoder(nn.Module):
         )
 
     def forward(self, audios_srs, **kwargs) -> VAEStandardOutput:
+        feature_audios_srs = kwargs.get("feature_audios_srs", audios_srs)
         (
             enc_features,
             enc_padding_mask,
             dec_features,
             dec_padding_mask,
             distill_features,
-        ) = self.extract_features(audios_srs, **kwargs)
+        ) = self.extract_features(
+            feature_audios_srs,
+            target_audios_srs=audios_srs,
+            **kwargs,
+        )
 
         encoder_output = self.encode(enc_features, enc_padding_mask, **kwargs)
 
@@ -147,13 +159,7 @@ class VAEWithStandardDecoder(nn.Module):
             align_corners=False,
         ).transpose(1, 2)
         mask = ~encoder_output.padding_mask
-        qd = (
-            self.config.encoder_config.vq_config.dim_to_quantize
-            if getattr(self.config.encoder_config, "vq_config", None)
-            else self.config.encoder_config.latent_dim
-        )
-        mu_head = mu_pre_vq[..., :qd]
-        projected = self.distill_proj_head(mu_head)
+        projected = self.distill_proj_head(mu_pre_vq)
         return (
             1.0 - F.cosine_similarity(projected[mask], aligned_wavlm[mask], dim=-1).mean()
         )
@@ -202,7 +208,11 @@ class VAEWithStandardDecoder(nn.Module):
         **kwargs,
     ):
         enc_features, enc_padding_mask, dec_features, dec_padding_mask, _ = (
-            self.extract_features(audios_srs, **kwargs)
+            self.extract_features(
+                audios_srs,
+                target_audios_srs=audios_srs,
+                **kwargs,
+            )
         )
         encoder_output = self.encode(enc_features, enc_padding_mask, **kwargs)
 

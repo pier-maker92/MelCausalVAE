@@ -1,6 +1,9 @@
 import logging
+import inspect
+from pathlib import Path
 import torch
 import torch.nn.functional as F
+import torchaudio.functional as AF
 import safetensors.torch
 from typing import Optional
 from .decoder.cfm import DiT
@@ -25,6 +28,44 @@ class VAE(torch.nn.Module):
         if getattr(config, "wavlm_config", None) is not None:
             self.wavlm_extractor = WavLMFeatureExtractor(config.wavlm_config)
 
+        self.speaker_encoder = None
+        speaker_cfg = getattr(config, "speaker_encoder_config", None)
+        if speaker_cfg is not None:
+            try:
+                from speechbrain.inference.speaker import EncoderClassifier
+                import huggingface_hub
+            except ImportError as exc:
+                raise ImportError(
+                    "ECAPA speaker conditioning requires speechbrain. "
+                    "Install it with `pip install speechbrain`."
+                ) from exc
+
+            hf_download_sig = inspect.signature(huggingface_hub.hf_hub_download)
+            if "use_auth_token" not in hf_download_sig.parameters:
+                original_hf_download = huggingface_hub.hf_hub_download
+
+                def _hf_hub_download_compat(*args, use_auth_token=None, **kwargs):
+                    if use_auth_token is not None and "token" not in kwargs:
+                        kwargs["token"] = use_auth_token
+                    return original_hf_download(*args, **kwargs)
+
+                huggingface_hub.hf_hub_download = _hf_hub_download_compat
+
+            source = speaker_cfg.pretrained_model_name
+            source_path = Path(source)
+            from_hparams_kwargs = {}
+            if source_path.is_dir() and (source_path / "hyperparams.yaml").exists():
+                # Force local-only loading path when local files are available.
+                from_hparams_kwargs["savedir"] = str(source_path)
+
+            self.speaker_encoder = EncoderClassifier.from_hparams(
+                source=source,
+                **from_hparams_kwargs,
+            )
+            for parameter in self.speaker_encoder.parameters():
+                parameter.requires_grad = False
+            self.speaker_encoder.eval()
+
         self.distill_wavlm_extractor = None
         sem_cfg = getattr(config.encoder_config, "semantic_distillation_config", None)
         if sem_cfg is not None:
@@ -33,12 +74,9 @@ class VAE(torch.nn.Module):
             self.distill_wavlm_extractor = WavLMFeatureExtractor(
                 WavLMConfig(layer=sem_cfg.wavlm_layer)
             )
-            dim_to_quantize = (
-                config.encoder_config.vq_config.dim_to_quantize
-                if config.encoder_config.vq_config
-                else config.encoder_config.latent_dim
+            self.distill_proj_head = torch.nn.Linear(
+                config.encoder_config.latent_dim, 1024
             )
-            self.distill_proj_head = torch.nn.Linear(dim_to_quantize, 1024)
 
         self.encoder = Encoder(config.encoder_config)
         self.decoder = DiT(config.decoder_config)
@@ -48,13 +86,7 @@ class VAE(torch.nn.Module):
         )
         if self.semantic_downsample_factor > 1:
             raise NotImplementedError("Semantic downsampling is not implemented yet.")
-            # from .encoder.utils import TimeCausalConv1d
-            # qd = config.encoder_config.vq_config.dim_to_quantize if config.encoder_config.vq_config else config.encoder_config.latent_dim
-            # # Upsampler: casual Conv1d. We will use repeat_interleave and then a causal Conv1d for smoothing,
-            # # or just a causal Conv1d with stride=1 to smooth after repeat.
-            # self.semantic_upsampler_conv = TimeCausalConv1d(
-            #     qd, qd, k=self.semantic_downsample_factor * 2, d=1, s=1
-            # )
+          
         if kwargs.get("train_only_vq"):
             for name, param in self.named_parameters():
                 if "vq" not in name:
@@ -67,18 +99,14 @@ class VAE(torch.nn.Module):
         count_parameters_by_module(self.encoder, "Encoder")
         count_parameters_by_module(self.decoder, "Decoder")
 
+    def train(self, mode: bool = True):
+        super().train(mode)
+        if self.speaker_encoder is not None:
+            self.speaker_encoder.eval()
+        return self
+
     def semantic_upsample(self, z_semantic):
         raise NotImplementedError("Semantic upsampling is not implemented yet.")
-        # if self.semantic_downsample_factor <= 1 or z_semantic is None:
-        #     return z_semantic
-        # # z_semantic is [B, T/factor, qd]
-        # z_semantic = z_semantic.repeat_interleave(
-        #     self.semantic_downsample_factor, dim=1
-        # )
-        # z_semantic = z_semantic.transpose(1, 2)
-        # z_semantic = self.semantic_upsampler_conv(z_semantic)
-        # z_semantic = z_semantic.transpose(1, 2)
-        # return z_semantic
 
     def from_pretrained(self, checkpoint_path: str):
         import os
@@ -95,21 +123,24 @@ class VAE(torch.nn.Module):
         print(f"Loaded checkpoint from {checkpoint_file}")
 
     @torch.no_grad()
-    def extract_features(self, audios_srs, **kwargs):
-        features_extractor_output = self.feature_extractor(audios_srs)
-        features = features_extractor_output.audio_features.to(self.dtype)
-        padding_mask = features_extractor_output.padding_mask
+    def extract_features(self, encoder_audios_srs, target_audios_srs=None, **kwargs):
+        if target_audios_srs is None:
+            target_audios_srs = encoder_audios_srs
+
+        target_features_output = self.feature_extractor(target_audios_srs)
+        target_features = target_features_output.audio_features.to(self.dtype)
+        target_padding_mask = target_features_output.padding_mask
 
         distill_features = None
         if self.distill_wavlm_extractor is not None:
             distill_features = self.distill_wavlm_extractor(
-                audios_srs
+                encoder_audios_srs
             ).audio_features.to(self.dtype)
 
         if self.wavlm_extractor is not None:
-            wavlm_output = self.wavlm_extractor(audios_srs)
+            wavlm_output = self.wavlm_extractor(encoder_audios_srs)
             wavlm_feats = wavlm_output.audio_features.to(self.dtype)  # [B, T_w, 1024]
-            T_mel = features.shape[1]
+            T_mel = target_features.shape[1]
             # Causal upsample ×2 (repeat), then interpolate to exact mel length
             wavlm_feats = wavlm_feats.repeat_interleave(2, dim=1)  # [B, 2*T_w, 1024]
             wavlm_feats = (
@@ -134,12 +165,21 @@ class VAE(torch.nn.Module):
             return (
                 wavlm_feats,
                 enc_padding_mask,
-                features,
-                padding_mask,
+                target_features,
+                target_padding_mask,
                 distill_features,
             )
 
-        return features, padding_mask, features, padding_mask, distill_features
+        encoder_features_output = self.feature_extractor(encoder_audios_srs)
+        encoder_features = encoder_features_output.audio_features.to(self.dtype)
+        encoder_padding_mask = encoder_features_output.padding_mask
+        return (
+            encoder_features,
+            encoder_padding_mask,
+            target_features,
+            target_padding_mask,
+            distill_features,
+        )
 
     def encode(self, features, padding_mask, **kwargs):
         encoder_output = self.encoder(
@@ -148,6 +188,65 @@ class VAE(torch.nn.Module):
             step=kwargs.get("training_step", None),
         )
         return encoder_output
+
+    @torch.no_grad()
+    def extract_speaker_embedding(self, audios_srs):
+        if self.speaker_encoder is None:
+            return None
+
+        # Keep ECAPA frozen in fp32 for numerical stability and dtype consistency.
+        self.speaker_encoder = self.speaker_encoder.to(
+            device=self.device, dtype=torch.float32
+        )
+        speaker_param = next(self.speaker_encoder.parameters())
+        speaker_device = speaker_param.device
+        speaker_dtype = speaker_param.dtype
+
+        speaker_cfg = self.config.speaker_encoder_config
+        waveforms = []
+        lengths = []
+        for audio, sample_rate in audios_srs:
+            waveform = audio.to(device=speaker_device, dtype=torch.float32)
+            if waveform.ndim == 2:
+                waveform = waveform.mean(dim=0)
+            if sample_rate != speaker_cfg.sampling_rate:
+                waveform = AF.resample(
+                    waveform, sample_rate, speaker_cfg.sampling_rate
+                )
+            waveform = waveform.to(device=speaker_device, dtype=torch.float32)
+            waveforms.append(waveform)
+            lengths.append(waveform.numel())
+
+        padded = torch.nn.utils.rnn.pad_sequence(waveforms, batch_first=True).to(
+            device=speaker_device,
+            dtype=speaker_dtype
+        )
+        relative_lengths = torch.tensor(
+            lengths, device=padded.device, dtype=padded.dtype
+        ) / padded.shape[1]
+        with torch.autocast(device_type=speaker_device.type, enabled=False):
+            # Use SpeechBrain submodules directly to avoid internal device moves in
+            # encode_batch that can desynchronize input/peso device under Trainer.
+            mods = self.speaker_encoder.mods
+            wavs = padded.float()
+            wav_lens = relative_lengths.float()
+
+            feats = mods.compute_features(wavs)
+            feats = mods.mean_var_norm(feats, wav_lens)
+            try:
+                embedding = mods.embedding_model(feats, wav_lens)
+            except TypeError:
+                embedding = mods.embedding_model(feats)
+
+            if hasattr(mods, "mean_var_norm_emb"):
+                ones = torch.ones(
+                    embedding.shape[0], device=embedding.device, dtype=wav_lens.dtype
+                )
+                embedding = mods.mean_var_norm_emb(embedding, ones)
+
+        if embedding.ndim == 3 and embedding.shape[1] == 1:
+            embedding = embedding.squeeze(1)
+        return embedding.to(device=self.device, dtype=self.dtype)
 
     def decode(
         self,
@@ -165,6 +264,8 @@ class VAE(torch.nn.Module):
         return decoder_output
 
     def forward(self, audios_srs, **kwargs):
+        feature_audios_srs = kwargs.get("feature_audios_srs", audios_srs)
+
         # extract features
         (
             enc_features,
@@ -172,9 +273,16 @@ class VAE(torch.nn.Module):
             dec_features,
             dec_padding_mask,
             distill_features,
-        ) = self.extract_features(audios_srs, **kwargs)
+        ) = self.extract_features(
+            feature_audios_srs,
+            target_audios_srs=audios_srs,
+            **kwargs,
+        )
         # encode to latent space
         encoder_output = self.encode(enc_features, enc_padding_mask, **kwargs)
+        speaker_embedding = kwargs.get("speaker_embedding")
+        if speaker_embedding is None:
+            speaker_embedding = self.extract_speaker_embedding(audios_srs)
         if self.train_only_vq:
             # If training only VQ, we don't compute the decoder loss, but we still return the encoder output for VQ loss.
             out = {
@@ -193,7 +301,9 @@ class VAE(torch.nn.Module):
             z=encoder_output.z,
             target_features=dec_features,
             target_padding_mask=dec_padding_mask,
-            speaker_embedding=getattr(encoder_output, "speaker_embedding", None),
+            speaker_embedding=speaker_embedding
+            if speaker_embedding is not None
+            else getattr(encoder_output, "speaker_embedding", None),
         )
         audio_loss = decoder_output.loss
 
@@ -236,14 +346,7 @@ class VAE(torch.nn.Module):
         ).transpose(1, 2)
 
         mask = ~encoder_output.padding_mask
-        qd = (
-            self.config.encoder_config.vq_config.dim_to_quantize
-            if getattr(self.config.encoder_config, "vq_config", None)
-            else self.config.encoder_config.latent_dim
-        )
-
-        mu_head = mu_pre_vq[..., :qd]
-        projected_mu_head = self.distill_proj_head(mu_head)
+        projected_mu_head = self.distill_proj_head(mu_pre_vq)
 
         projected_mu_head_masked = projected_mu_head[mask]
         aligned_wavlm_masked = aligned_wavlm[mask]
@@ -313,16 +416,43 @@ class VAE(torch.nn.Module):
 
         # Encode audio to mel spectrogram
         enc_features, enc_padding_mask, dec_features, dec_padding_mask, _ = (
-            self.extract_features(audios_srs, **kwargs)
+            self.extract_features(
+                audios_srs,
+                target_audios_srs=audios_srs,
+                **kwargs,
+            )
         )
+
         encoder_output = self.encode(enc_features, enc_padding_mask, **kwargs)
 
         # speaker embedding
-        speaker_embedding = getattr(encoder_output, "speaker_embedding", None)
+        speaker_embedding = kwargs.get("speaker_embedding")
+        if speaker_embedding is None:
+            speaker_embedding = self.extract_speaker_embedding(audios_srs)
+        if speaker_embedding is None:
+            speaker_embedding = getattr(encoder_output, "speaker_embedding", None)
         if kwargs.get("zero_speaker", False) and speaker_embedding is not None:
             speaker_embedding = torch.zeros_like(speaker_embedding)
 
-        z = encoder_output.z
+        use_quantized = kwargs.get("quantized", False)
+        use_residual = kwargs.get("residual", False)
+        if use_quantized or use_residual:
+            quantized = getattr(encoder_output, "quantized", None)
+            residual = getattr(encoder_output, "residual", None)
+            if use_quantized and quantized is None:
+                raise ValueError("Quantized inference requires an encoder quantizer.")
+            if use_residual and residual is None:
+                raise ValueError("Residual inference requires an encoder quantizer.")
+
+            if use_quantized and use_residual:
+                z = quantized + residual
+            elif use_quantized:
+                z = quantized
+            else:
+                z = residual
+        else:
+            z = encoder_output.z
+        z = z.clone()
 
         chunk_size = kwargs.get("chunk_size", None)
         chunk = kwargs.get("chunk", None)

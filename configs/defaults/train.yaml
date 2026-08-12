@@ -30,6 +30,8 @@ training:
   bf16: true
   fp16: false
   dataloader_num_workers: 4
+  dataloader_prefetch_factor: 1
+  dataloader_persistent_workers: true
   dataloader_pin_memory: false
   dataloader_drop_last: true
   per_device_eval_batch_size: 1
@@ -43,6 +45,8 @@ training:
   resume_from_checkpoint: null
   from_pretrained: null
   dataset_name: null
+  enable_perturbed_audio: false
+  perturbed_pitch_shift_max_semitones: 8.0
   generate_and_log_samples: false
   eval_num_samples: 100
   run_id: null

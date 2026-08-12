@@ -1,6 +1,5 @@
 import math
 import torch
-import random
 import torch.nn as nn
 from typing import Optional
 import torch.nn.functional as F
@@ -75,11 +74,7 @@ class Encoder(SigmaVAEEncoder):
             self.logvar = nn.Linear(d_model, latent_dim)
 
         if config.vq_config:
-            if config.vq_config.dim_to_quantize > config.latent_dim:
-                raise ValueError(
-                    f"dim_to_quantize ({config.vq_config.dim_to_quantize}) must be <= latent_dim ({config.latent_dim})."
-                )
-            self.vq = VectorQuantizer(config.vq_config)
+            self.vq = VectorQuantizer(config.vq_config, dim=latent_dim)
 
         if config.dropout_regularizer_config:
             self.dropout_regularizer = DropoutRegularizer(
@@ -110,16 +105,16 @@ class Encoder(SigmaVAEEncoder):
                     "semantic_downsample_factor > 1 is only supported when VQ is enabled"
                 )
             self.semantic_downsampler = TimeCausalConv1d(
-                self._qd,
-                self._qd,
+                latent_dim,
+                latent_dim,
                 k=self.semantic_downsample_factor * 2,
                 d=1,
                 s=self.semantic_downsample_factor,
             )
-            if self.add_vq_residual_to_stoch and hasattr(self, "logvar"):
+            if config.vq_config.add_residual and hasattr(self, "logvar"):
                 self.logvar_downsampler = TimeCausalConv1d(
-                    self._qd,
-                    self._qd,
+                    latent_dim,
+                    latent_dim,
                     k=self.semantic_downsample_factor * 2,
                     d=1,
                     s=self.semantic_downsample_factor,
@@ -205,10 +200,15 @@ class Encoder(SigmaVAEEncoder):
 
         vq_output = None
         if hasattr(self, "vq"):
-            drop_acoustic = random.random() < self.config.vq_config.drop_acoustic_p
-            vq_output = self.vq(mu, padding_mask, drop_acoustic=drop_acoustic)
+            vq_output = self.vq(mu, padding_mask)
             mu = vq_output.quantized
-            if self.config.vq_config.add_residual and not drop_acoustic: # NOTE : Should be added the residual when drop_acoustic is True?
+            if self.config.vq_config.add_residual and self.training:
+                residual_mask = (
+                    torch.rand(mu.shape[0], device=mu.device)
+                    < self.config.vq_config.add_residual_p
+                ).to(mu.dtype).view(-1, 1, 1)
+                mu = mu + vq_output.residual * residual_mask
+            elif self.config.vq_config.add_residual and not self.training:
                 mu = mu + vq_output.residual
 
         kl_weight = (

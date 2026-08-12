@@ -369,8 +369,10 @@ class VAEtrainer(Trainer):
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         if hasattr(self.control, "granular_losses") and model.training:
             audios_srs = inputs["output_audios_srs"]
+            feature_audios_srs = inputs.get("perturbed_audio_srs", audios_srs)
             output = model(
                 audios_srs=audios_srs,
+                feature_audios_srs=feature_audios_srs,
                 training_step=self.state.global_step,
                 phoneme_alignments=inputs.get("phoneme_alignments", None),
             )
@@ -888,8 +890,23 @@ def main(cfg: DictConfig):
         dataset = LibriTTSR()
     else:
         raise ValueError(f"Dataset {dataset_name} not supported")
-    train_dataset = TrainDatasetWrapper(dataset, "train")
-    test_dataset = TestDatasetWrapper(dataset, "test")
+    enable_perturbed_audio = bool(training_cfg.pop("enable_perturbed_audio", False))
+    perturbed_pitch_shift_max_semitones = float(
+        training_cfg.pop("perturbed_pitch_shift_max_semitones", 8.0)
+    )
+
+    train_dataset = TrainDatasetWrapper(
+        dataset,
+        "train",
+        enable_perturbed_audio=enable_perturbed_audio,
+        perturbed_pitch_shift_max_semitones=perturbed_pitch_shift_max_semitones,
+    )
+    test_dataset = TestDatasetWrapper(
+        dataset,
+        "test",
+        enable_perturbed_audio=enable_perturbed_audio,
+        perturbed_pitch_shift_max_semitones=perturbed_pitch_shift_max_semitones,
+    )
     # handle wandb - only initialize on main process
     wandb_project = training_cfg.pop("wandb_project", None)
     wandb_run_name = training_cfg.pop("wandb_run_name", None)
