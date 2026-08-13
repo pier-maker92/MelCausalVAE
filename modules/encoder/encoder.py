@@ -228,7 +228,7 @@ class Encoder(SigmaVAEEncoder):
         kl_loss = None
         if self.training:
             kl_term = self.kl_divergence(
-                pre_vq_mu or mu,
+                mu,
                 logvar,
                 padding_mask,
                 dtype=mu.dtype,
