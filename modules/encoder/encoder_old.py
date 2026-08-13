@@ -185,34 +185,33 @@ class Encoder(SigmaVAEEncoder):
         h = self.transformer(hiddens)  # [B, T/C, 512]
 
         mu = self.mu(h)
-        logvar = None
-        if hasattr(self, "logvar"):
-            raise NotImplementedError(
-                "logvar is not supported. Sigma-VAE does not use logvar, sigma is drawn from a Normal distribution with fixed std=1.0."
-            )
 
-        # vq
-        vq_output = None
-        pre_vq_mu = None
-        quantized = None
-        if hasattr(self, "vq"):
-            pre_vq_mu = mu.clone()
-            vq_output = self.vq(mu, padding_mask)
-            quantized = vq_output.quantized
-            mu = vq_output.residual
-
-        # regularization
-        # FIXME remove this 
         speaker_embedding = None
         if getattr(self.config, "use_instance_norm", False):
-            raise DeprecationWarning(
-                "use_instance_norm is deprecated. Use the new speaker embedding module instead."
-            )
+            mu, speaker_embedding = self._apply_instance_norm(mu, padding_mask)
         
         if hasattr(self, "dropout_regularizer"):
             mu = self.dropout_regularizer(mu)
         if hasattr(self, "noise_regularizer"):
             mu = self.noise_regularizer(mu)
+
+        logvar = None
+        if hasattr(self, "logvar"):
+            logvar = self.logvar(h)
+
+        vq_output = None
+        if hasattr(self, "vq"):
+            vq_output = self.vq(mu, padding_mask)
+            mu = vq_output.quantized
+            if self.config.vq_config.add_residual:
+                if self.training:
+                    residual_mask = (
+                        torch.rand(mu.shape[0], device=mu.device)
+                        < self.config.vq_config.add_residual_p
+                    ).to(mu.dtype).view(-1, 1, 1)
+                    mu = mu + vq_output.residual * residual_mask
+                else:
+                    mu = mu + vq_output.residual
 
         kl_weight = (
             self.get_kl_cosine_schedule(kwargs["step"])
@@ -228,22 +227,12 @@ class Encoder(SigmaVAEEncoder):
         kl_loss = None
         if self.training:
             kl_term = self.kl_divergence(
-                pre_vq_mu or mu,
+                mu,
                 logvar,
                 padding_mask,
                 dtype=mu.dtype,
             )
             kl_loss = kl_term * kl_weight
-
-        if hasattr(self, "vq") and self.config.vq_config.add_residual:
-            if self.training:
-                residual_mask = (
-                    torch.rand(mu.shape[0], device=mu.device)
-                    < self.config.vq_config.add_residual_p
-                ).to(mu.dtype).view(-1, 1, 1)
-                z = z * residual_mask + quantized
-            else:
-                z = z + quantized
 
         out = {
             "z": z,
