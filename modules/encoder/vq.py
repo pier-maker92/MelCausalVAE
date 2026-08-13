@@ -67,6 +67,8 @@ class VectorQuantizer(nn.Module):
                 codebook_size=self.num_embeddings,
                 decay=config.ema_decay,
                 eps=config.ema_eps,
+                reset_dead_codes=config.reset_dead_codes,
+                reset_every_forward=config.reset_every_forward,
             )
         else:
             raise ValueError(f"Unknown vq_type: {self.vq_type}")

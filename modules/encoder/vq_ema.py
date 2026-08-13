@@ -17,23 +17,30 @@ class EMAVectorQuantizer(nn.Module):
         codebook_size: int = 256,
         decay: float = 0.99,
         eps: float = 1e-5,
+        reset_dead_codes: bool = False,
+        reset_every_forward: int = 10,
     ):
         super().__init__()
         if not 0.0 < decay < 1.0:
             raise ValueError("EMA decay must be in (0, 1).")
         if eps <= 0.0:
             raise ValueError("EMA eps must be > 0.")
+        if reset_every_forward <= 0:
+            raise ValueError("reset_every_forward must be > 0.")
 
         self.dim = dim
         self.codebook_size = codebook_size
         self.decay = decay
         self.eps = eps
+        self.reset_dead_codes = reset_dead_codes
+        self.reset_every_forward = reset_every_forward
 
         embedding = torch.empty(codebook_size, dim)
         nn.init.uniform_(embedding, -1.0 / codebook_size, 1.0 / codebook_size)
         self.register_buffer("embedding", embedding)
         self.register_buffer("cluster_size", torch.ones(codebook_size))
         self.register_buffer("embed_avg", embedding.clone())
+        self.register_buffer("_forward_count", torch.zeros((), dtype=torch.long), persistent=False)
 
     def forward(self, lats: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -55,7 +62,21 @@ class EMAVectorQuantizer(nn.Module):
         encoding_indices = torch.argmin(distances, dim=1)
 
         if self.training:
-            self._ema_update(flatten.detach(), encoding_indices)
+            counts = self._ema_update(flatten.detach(), encoding_indices)
+            self._forward_count.add_(1)
+            if (
+                self.reset_dead_codes
+                and self._forward_count.item() % self.reset_every_forward == 0
+            ):
+                did_reset = self._reset_dead_codes(flatten.detach(), counts)
+                if did_reset:
+                    embedding = self.embedding.to(dtype=flatten.dtype)
+                    distances = (
+                        torch.sum(flatten**2, dim=1, keepdim=True)
+                        + torch.sum(embedding**2, dim=1)
+                        - 2 * torch.matmul(flatten, embedding.t())
+                    )
+                    encoding_indices = torch.argmin(distances, dim=1)
 
         toks = encoding_indices.view(*lats.shape[:-1])
         codes = F.embedding(toks, self.embedding).to(dtype=lats.dtype)
@@ -66,7 +87,7 @@ class EMAVectorQuantizer(nn.Module):
         self,
         flatten: torch.Tensor,
         encoding_indices: torch.Tensor,
-    ) -> None:
+    ) -> torch.Tensor:
         one_hot = F.one_hot(encoding_indices, self.codebook_size).to(
             dtype=self.cluster_size.dtype
         )
@@ -83,3 +104,29 @@ class EMAVectorQuantizer(nn.Module):
             * n.clamp(min=self.eps)
         )
         self.embedding.copy_(self.embed_avg / smoothed_cluster_size.unsqueeze(1))
+        return counts
+
+    @torch.no_grad()
+    def _reset_dead_codes(
+        self,
+        flatten: torch.Tensor,
+        counts: torch.Tensor,
+    ) -> bool:
+        dead_mask = counts == 0
+        num_dead = int(dead_mask.sum().item())
+        if num_dead == 0 or flatten.numel() == 0:
+            return False
+
+        dead_indices = torch.nonzero(dead_mask, as_tuple=False).squeeze(1)
+        random_indices = torch.randint(
+            0,
+            flatten.shape[0],
+            (num_dead,),
+            device=flatten.device,
+        )
+        replacement = flatten[random_indices].to(dtype=self.embedding.dtype)
+
+        self.embedding[dead_indices] = replacement
+        self.embed_avg[dead_indices] = replacement
+        self.cluster_size[dead_indices] = 1.0
+        return True

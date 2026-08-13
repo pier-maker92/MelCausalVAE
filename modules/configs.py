@@ -124,6 +124,8 @@ class VQConfig:
     commitment_weight: float = 0.25
     ema_decay: float = 0.99
     ema_eps: float = 1e-5
+    reset_dead_codes: bool = False
+    reset_every_forward: int = 10
     # BSQ-only: per-bit entropy regularization to prevent codebook collapse.
     entropy_loss_weight: float = 0.0
     entropy_temperature: float = 1.0
@@ -141,6 +143,8 @@ class VQConfig:
             raise ValueError("ema_decay must be in (0, 1).")
         if self.ema_eps <= 0.0:
             raise ValueError("ema_eps must be > 0.")
+        if self.reset_every_forward <= 0:
+            raise ValueError("reset_every_forward must be > 0.")
 
 @dataclass
 class SemanticDistillationConfig:
