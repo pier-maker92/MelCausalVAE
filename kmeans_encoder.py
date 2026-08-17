@@ -1,4 +1,5 @@
 import json
+import math
 import os
 from pathlib import Path
 from typing import Any, Tuple
@@ -125,21 +126,16 @@ def _collect_features(
     model: torch.nn.Module,
     dataloader: DataLoader,
     latent_selection: dict[str, Any],
-    max_frames: int,
+    max_frames: int | None,
     max_batches: int | None,
     dataset_name: str,
+    progress_bar: tqdm,
 ) -> torch.Tensor:
     chunks = []
     collected_frames = 0
-    total_batches = len(dataloader) if max_batches is None else min(len(dataloader), max_batches)
-    progress_bar = tqdm(
-        dataloader,
-        total=total_batches,
-        desc=f"Encoding {dataset_name}",
-        unit="batch",
-    )
+    progress_bar.set_description(f"Encoding {dataset_name}")
 
-    for batch_index, batch in enumerate(progress_bar):
+    for batch_index, batch in enumerate(dataloader):
         if max_batches is not None and batch_index >= max_batches:
             break
 
@@ -155,14 +151,16 @@ def _collect_features(
         features = _select_latent(valid_features, latent_selection)
         features = features.float().cpu()
 
-        remaining_frames = max_frames - collected_frames
-        if features.shape[0] > remaining_frames:
-            features = features[:remaining_frames]
+        if max_frames is not None:
+            remaining_frames = max_frames - collected_frames
+            if features.shape[0] > remaining_frames:
+                features = features[:remaining_frames]
         chunks.append(features)
         collected_frames += features.shape[0]
-        progress_bar.set_postfix(frames=collected_frames)
+        progress_bar.update(1)
+        progress_bar.set_postfix(phase="encode", frames=collected_frames)
 
-        if collected_frames >= max_frames:
+        if max_frames is not None and collected_frames >= max_frames:
             break
 
     if not chunks:
@@ -183,6 +181,7 @@ def _kmeans(
     tolerance: float,
     seed: int,
     chunk_size: int,
+    progress_bar: tqdm,
 ) -> Tuple[torch.Tensor, float, int]:
     if points.shape[0] < num_clusters:
         raise ValueError(
@@ -195,13 +194,12 @@ def _kmeans(
     )[:num_clusters]
     centroids = points[initial_indices].clone()
     inertia = float("nan")
+    num_chunks = math.ceil(points.shape[0] / chunk_size)
+    progress_bar.total = progress_bar.n + max_iterations * num_chunks
+    progress_bar.set_description("K-means")
+    progress_bar.refresh()
 
-    progress_bar = tqdm(
-        range(1, max_iterations + 1),
-        desc="K-means",
-        unit="iteration",
-    )
-    for iteration in progress_bar:
+    for iteration in range(1, max_iterations + 1):
         sums = torch.zeros_like(centroids)
         counts = torch.zeros(num_clusters, dtype=torch.long)
         inertia = 0.0
@@ -211,6 +209,12 @@ def _kmeans(
             sums.index_add_(0, assignments, point_chunk)
             counts += torch.bincount(assignments, minlength=num_clusters)
             inertia += min_distances.sum().item()
+            progress_bar.update(1)
+            progress_bar.set_postfix(
+                phase="kmeans",
+                iteration=f"{iteration}/{max_iterations}",
+                inertia=f"{inertia:.2f}",
+            )
 
         nonempty = counts > 0
         updated_centroids = centroids.clone()
@@ -228,8 +232,15 @@ def _kmeans(
 
         centroid_shift = (updated_centroids - centroids).norm(dim=1).max().item()
         centroids = updated_centroids
-        progress_bar.set_postfix(inertia=f"{inertia:.2f}", shift=f"{centroid_shift:.2e}")
+        progress_bar.set_postfix(
+            phase="kmeans",
+            iteration=f"{iteration}/{max_iterations}",
+            inertia=f"{inertia:.2f}",
+            shift=f"{centroid_shift:.2e}",
+        )
         if centroid_shift <= tolerance:
+            progress_bar.total = progress_bar.n
+            progress_bar.refresh()
             return centroids, inertia, iteration
 
     return centroids, inertia, max_iterations
@@ -247,6 +258,12 @@ def main(cfg: DictConfig) -> None:
         raise ValueError("Set dataset_name or training.dataset_name.")
     dataset_split = cfg.get("dataset_split", "test")
     latent_selection = _resolve_latent_selection(cfg)
+    max_frames = cfg.get("max_frames", None)
+    if max_frames is not None:
+        max_frames = int(max_frames)
+        if max_frames <= 0:
+            raise ValueError("max_frames must be positive, or null to use all frames.")
+    shuffle_dataset = bool(cfg.get("shuffle_dataset", False))
 
     device = torch.device(cfg.device)
     dataset = TrainDatasetWrapper(
@@ -261,29 +278,41 @@ def main(cfg: DictConfig) -> None:
     dataloader = DataLoader(
         dataset,
         batch_size=cfg.batch_size,
-        shuffle=False,
+        shuffle=shuffle_dataset,
         num_workers=cfg.num_workers,
         pin_memory=device.type == "cuda",
         collate_fn=DataCollator(),
+        generator=torch.Generator().manual_seed(int(cfg.seed)) if shuffle_dataset else None,
     )
 
     model = _load_frozen_model(checkpoint_dir, device)
-    features = _collect_features(
-        model=model,
-        dataloader=dataloader,
-        latent_selection=latent_selection,
-        max_frames=cfg.max_frames,
-        max_batches=cfg.max_batches,
-        dataset_name=dataset_name,
+    total_batches = len(dataloader) if cfg.max_batches is None else min(len(dataloader), cfg.max_batches)
+    progress_bar = tqdm(
+        total=total_batches,
+        desc="K-means encoder",
+        unit="step",
     )
-    centroids, inertia, iterations = _kmeans(
-        points=features,
-        num_clusters=cfg.num_clusters,
-        max_iterations=cfg.max_iterations,
-        tolerance=cfg.tolerance,
-        seed=cfg.seed,
-        chunk_size=cfg.kmeans_chunk_size,
-    )
+    try:
+        features = _collect_features(
+            model=model,
+            dataloader=dataloader,
+            latent_selection=latent_selection,
+            max_frames=max_frames,
+            max_batches=cfg.max_batches,
+            dataset_name=dataset_name,
+            progress_bar=progress_bar,
+        )
+        centroids, inertia, iterations = _kmeans(
+            points=features,
+            num_clusters=cfg.num_clusters,
+            max_iterations=cfg.max_iterations,
+            tolerance=cfg.tolerance,
+            seed=cfg.seed,
+            chunk_size=cfg.kmeans_chunk_size,
+            progress_bar=progress_bar,
+        )
+    finally:
+        progress_bar.close()
 
     torch.save(
         {

@@ -17,6 +17,7 @@ batch_size: 8
 num_workers: 8
 max_audio_seconds: 20.0
 max_batches: null
+shuffle_dataset: false
 
 # Latent subspace used for K-means.
 # Backward-compatible shortcut: with latent_start: 0 and feature_dims: 8, use mu[:, 0:8].
@@ -26,6 +27,9 @@ feature_dims: 8
 latent_start: 0
 latent_end: null
 latent_indices: null
+
+# Number of valid latent frames used for K-means.
+# Set to null to use every valid frame from the selected dataset/split.
 max_frames: 500000
 
 num_clusters: 512
