@@ -1,8 +1,8 @@
 # Frozen encoder K-means over valid encoder frames.
-checkpoint_dir: /scratch/piermel/MelCausalVAE/checkpoints/paper/wavlm/15
-output_dir: /scratch/piermel/agente/kmeans/libritts-r
+checkpoint_dir: /scratch/piermel/MelCausalVAE/checkpoints/paper/disent/dicodec-18
+output_dir: /scratch/piermel/MelCausalVAE/kmeans/128
 dataset_name: ${training.dataset_name}
-dataset_split: test
+dataset_split: train
 
 # Accepted but unused overrides injected by /scratch/piermel/scripts/run_job.sh.
 settings: null
@@ -13,26 +13,26 @@ training:
   output_dir: null
 
 device: cuda
-batch_size: 8
+batch_size: 2
 num_workers: 8
-max_audio_seconds: 20.0
+max_audio_seconds: null
 max_batches: null
-shuffle_dataset: false
+shuffle_dataset: true
 
 # Latent subspace used for K-means.
 # Backward-compatible shortcut: with latent_start: 0 and feature_dims: 8, use mu[:, 0:8].
 # To use a slice, set latent_start/latent_end, e.g. 4:64.
 # To use arbitrary dimensions, set latent_indices, e.g. [0, 3, 7].
-feature_dims: 8
+feature_dims: 4
 latent_start: 0
 latent_end: null
 latent_indices: null
 
 # Number of valid latent frames used for K-means.
 # Set to null to use every valid frame from the selected dataset/split.
-max_frames: 500000
+max_frames: 100000
 
-num_clusters: 512
+num_clusters: 128
 max_iterations: 50
 tolerance: 1.0e-4
 kmeans_chunk_size: 16384

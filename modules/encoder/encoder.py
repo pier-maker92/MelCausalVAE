@@ -196,10 +196,11 @@ class Encoder(SigmaVAEEncoder):
         pre_vq_mu = None
         quantized = None
         if hasattr(self, "vq"):
+            # no residual. it doesn't work
             pre_vq_mu = mu.clone()
-            vq_output = self.vq(mu, padding_mask)
+            vq_output = self.vq(mu[...,self.config.vq_config.dim_to_quantize:], padding_mask)
             quantized = vq_output.quantized
-            mu = vq_output.residual
+            mu = mu[...,:self.config.vq_config.dim_to_quantize]
 
         # regularization
         # FIXME remove this 

@@ -139,13 +139,16 @@ def _collect_features(
         if max_batches is not None and batch_index >= max_batches:
             break
 
+        audios_srs = [
+            (audio.to(model.device), sr) for audio, sr in batch["output_audios_srs"]
+        ]
         (
             encoder_features,
             encoder_padding_mask,
             _,
             _,
             _,
-        ) = model.extract_features(batch["output_audios_srs"])
+        ) = model.extract_features(audios_srs)
         encoder_output = model.encode(encoder_features, encoder_padding_mask)
         valid_features = encoder_output.mu[~encoder_output.padding_mask]
         features = _select_latent(valid_features, latent_selection)
