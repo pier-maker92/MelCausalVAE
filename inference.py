@@ -48,6 +48,21 @@ import torchaudio.transforms as T
 from modules.builder import build_model
 
 
+def load_kmeans_codebook(path: str) -> dict:
+    if os.path.isdir(path):
+        path = os.path.join(path, "encoder_kmeans.pt")
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"K-means checkpoint not found: {path}")
+    codebook = torch.load(path, map_location="cpu")
+    if "centroids" not in codebook:
+        raise ValueError(f"K-means checkpoint has no centroids: {path}")
+    if "latent_selection" not in codebook and "feature_dims" not in codebook:
+        raise ValueError(
+            "K-means checkpoint must contain latent_selection or legacy feature_dims."
+        )
+    return codebook
+
+
 def load_wav_mono_resampled(path: str, target_sr: int) -> torch.Tensor:
     wav, sr = torchaudio.load(path)
     if wav.shape[0] > 1:
@@ -148,6 +163,18 @@ def main(args):
         if getattr(args, "exclude_end_chunk", None) is not None:
             params["exclude_end_chunk"] = args.exclude_end_chunk
 
+        if getattr(args, "kmeans_path", None) is not None:
+            kmeans_codebook = load_kmeans_codebook(args.kmeans_path)
+            params["kmeans_codebook"] = kmeans_codebook
+            params["kmeans_chunk_size"] = args.kmeans_chunk_size
+            latent_selection = kmeans_codebook.get("latent_selection")
+            print(
+                "Using K-means codebook:",
+                args.kmeans_path,
+                "latent_selection=",
+                latent_selection,
+            )
+
         out = model.encode_decode(**params)
 
         reconstructed_mel = out["decoder_output"].audio_features
@@ -216,6 +243,18 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--exclude_end_chunk", type=int, default=None, help="End chunk to exclude"
+    )
+    parser.add_argument(
+        "--kmeans_path",
+        type=str,
+        default=None,
+        help="Path to encoder_kmeans.pt or to a directory containing it.",
+    )
+    parser.add_argument(
+        "--kmeans_chunk_size",
+        type=int,
+        default=16384,
+        help="Number of valid latent frames per nearest-centroid distance chunk.",
     )
     args = parser.parse_args()
     main(args)

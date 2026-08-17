@@ -417,6 +417,78 @@ class VAE(torch.nn.Module):
             reconstructed_mel = self.denormalize_mel(reconstructed_mel)
         return reconstructed_mel, reconstructed_padding_mask
 
+    def _apply_kmeans_codebook(
+        self,
+        z: torch.Tensor,
+        padding_mask: Optional[torch.BoolTensor],
+        kmeans_codebook: dict,
+        chunk_size: int,
+    ) -> torch.Tensor:
+        centroids = kmeans_codebook["centroids"].to(device=z.device, dtype=torch.float32)
+        selection = kmeans_codebook.get("latent_selection")
+        if selection is None:
+            selection = {
+                "indices": None,
+                "start": 0,
+                "end": int(kmeans_codebook["feature_dims"]),
+            }
+
+        indices = selection.get("indices")
+        if indices is not None:
+            dim_index = torch.as_tensor(indices, device=z.device, dtype=torch.long)
+            if dim_index.numel() == 0:
+                raise ValueError("K-means latent selection has no dimensions.")
+            if dim_index.min().item() < 0 or dim_index.max().item() >= z.shape[-1]:
+                raise ValueError(
+                    f"K-means latent indices {indices} are incompatible with "
+                    f"latent dim {z.shape[-1]}."
+                )
+            selected = z.index_select(dim=-1, index=dim_index)
+        else:
+            start = int(selection.get("start", 0))
+            end = int(selection["end"])
+            if start < 0 or end > z.shape[-1] or end <= start:
+                raise ValueError(
+                    f"K-means latent slice [{start}:{end}] is incompatible with "
+                    f"latent dim {z.shape[-1]}."
+                )
+            selected = z[..., start:end]
+
+        if selected.shape[-1] != centroids.shape[-1]:
+            raise ValueError(
+                f"K-means centroids have dim {centroids.shape[-1]}, "
+                f"but selected latent has dim {selected.shape[-1]}."
+            )
+
+        if padding_mask is None:
+            valid_mask = torch.ones(z.shape[:2], device=z.device, dtype=torch.bool)
+        else:
+            valid_mask = ~padding_mask
+
+        selected_valid = selected[valid_mask].to(dtype=torch.float32)
+        quantized_chunks = []
+        for selected_chunk in selected_valid.split(chunk_size):
+            distances = (
+                selected_chunk[:, None, :] - centroids[None, :, :]
+            ).square().sum(dim=-1)
+            nearest = distances.argmin(dim=1)
+            quantized_chunks.append(centroids.index_select(0, nearest))
+
+        if not quantized_chunks:
+            return z
+
+        quantized = torch.cat(quantized_chunks, dim=0).to(dtype=z.dtype)
+        out = z.clone()
+        out_flat = out.reshape(-1, out.shape[-1])
+        valid_positions = valid_mask.reshape(-1).nonzero(as_tuple=False).squeeze(1)
+        valid_values = out_flat.index_select(0, valid_positions)
+        if indices is not None:
+            valid_values[:, dim_index] = quantized
+        else:
+            valid_values[:, start:end] = quantized
+        out_flat.index_copy_(0, valid_positions, valid_values)
+        return out_flat.reshape_as(out)
+
     @torch.no_grad()
     def encode_decode(
         self,
@@ -481,6 +553,15 @@ class VAE(torch.nn.Module):
         if chunk_size and exclude_start_chunk:
             zero_len = exclude_start_chunk * chunk_size
             z[..., :zero_len] = 0
+
+        kmeans_codebook = kwargs.get("kmeans_codebook", None)
+        if kmeans_codebook is not None:
+            z = self._apply_kmeans_codebook(
+                z=z,
+                padding_mask=encoder_output.padding_mask,
+                kmeans_codebook=kmeans_codebook,
+                chunk_size=int(kwargs.get("kmeans_chunk_size", 16384)),
+            )
 
         reconstructed_mel, reconstructed_padding_mask = self.sample(
             num_steps=num_steps,

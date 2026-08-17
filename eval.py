@@ -24,6 +24,34 @@ from evaluation.scripts.utmos import UTMOS
 from evaluation.scripts.speaker_similarity import SpkSimWavLM
 
 
+def load_kmeans_codebook(path: str) -> tuple[dict, dict | None]:
+    if os.path.isdir(path):
+        summary_path = os.path.join(path, "summary.json")
+        path = os.path.join(path, "encoder_kmeans.pt")
+    else:
+        summary_path = os.path.join(os.path.dirname(path), "summary.json")
+
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"K-means checkpoint not found: {path}")
+
+    summary = None
+    if os.path.isfile(summary_path):
+        with open(summary_path, "r") as f:
+            summary = json.load(f)
+
+    codebook = torch.load(path, map_location="cpu")
+    if "centroids" not in codebook:
+        raise ValueError(f"K-means checkpoint has no centroids: {path}")
+    if "latent_selection" not in codebook and "feature_dims" not in codebook:
+        raise ValueError(
+            "K-means checkpoint must contain latent_selection or legacy feature_dims."
+        )
+
+    codebook["path"] = path
+    codebook["summary"] = summary
+    return codebook, summary
+
+
 def load_model(checkpoint, device):
     print(f"Loading model from {checkpoint}...")
     config_path = os.path.join(checkpoint, "config.json")
@@ -94,6 +122,9 @@ def get_hypothesis(model, vocoder, audios_srs, args, device):
         params["exclude_start_chunk"] = args.exclude_start_chunk
     if getattr(args, "exclude_end_chunk", None) is not None:
         params["exclude_end_chunk"] = args.exclude_end_chunk
+    if getattr(args, "kmeans_codebook", None) is not None:
+        params["kmeans_codebook"] = args.kmeans_codebook
+        params["kmeans_chunk_size"] = args.kmeans_chunk_size
 
     generator = torch.Generator(device=device).manual_seed(args.seed)
     params["generator"] = generator
@@ -123,6 +154,8 @@ def get_eval_id(args):
         eval_id += "_residual"
     if args.tail:
         eval_id += "_tail"
+    if getattr(args, "kmeans_path", None) is not None:
+        eval_id += "_kmeans"
     return eval_id
 
 
@@ -135,6 +168,16 @@ def main(args):
             "No CUDA device is available. CPU inference is strongly discouraged."
         )
     model, vocoder, model_name = load_model(args.checkpoint, device)
+    kmeans_summary = None
+    args.kmeans_codebook = None
+    if args.kmeans_path is not None:
+        args.kmeans_codebook, kmeans_summary = load_kmeans_codebook(args.kmeans_path)
+        print(
+            "Using K-means codebook:",
+            args.kmeans_codebook["path"],
+            "latent_selection=",
+            args.kmeans_codebook.get("latent_selection"),
+        )
 
     # get models
     DWER_computer = DWER("small", device=device)  # FIXME
@@ -212,6 +255,11 @@ def main(args):
                         "chunk_size": args.chunk_size,
                         "chunk": args.chunk,
                         "exclude_chunk": args.exclude_chunk,
+                        "exclude_start_chunk": args.exclude_start_chunk,
+                        "exclude_end_chunk": args.exclude_end_chunk,
+                        "kmeans_path": args.kmeans_path,
+                        "kmeans_chunk_size": args.kmeans_chunk_size,
+                        "kmeans_summary": kmeans_summary,
                     },
                 },
                 f,
@@ -283,6 +331,24 @@ if __name__ == "__main__":
         type=int,
         default=None,
         help="Number of chunks to exclude, starting from the bottom of the bottleneck",
+    )
+    parser.add_argument(
+        "--exclude_start_chunk", type=int, default=None, help="Start chunk to exclude"
+    )
+    parser.add_argument(
+        "--exclude_end_chunk", type=int, default=None, help="End chunk to exclude"
+    )
+    parser.add_argument(
+        "--kmeans_path",
+        type=str,
+        default=None,
+        help="Path to a k-means folder containing encoder_kmeans.pt and summary.json.",
+    )
+    parser.add_argument(
+        "--kmeans_chunk_size",
+        type=int,
+        default=16384,
+        help="Number of valid latent frames per nearest-centroid distance chunk.",
     )
     args = parser.parse_args()
     main(args)
