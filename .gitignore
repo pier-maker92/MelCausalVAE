@@ -101,6 +101,7 @@ ablations/
 agent/
 agent_smoke*/
 audio_outputs/
+demopage/
 
 # Ignore all hidden directories and their contents
 **/.*/**

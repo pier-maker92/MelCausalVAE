@@ -1,16 +1,15 @@
 import json
 import os
 from pathlib import Path
-from typing import Tuple
+from typing import Any, Tuple
 
 import hydra
 import torch
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig, ListConfig, OmegaConf
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from data.audio_dataset import DataCollator, TrainDatasetWrapper
-from data.libri_tts_r import LibriTTSR
 from modules.builder import build_model
 
 
@@ -30,13 +29,105 @@ def _load_frozen_model(checkpoint_dir: str, device: torch.device) -> torch.nn.Mo
     return model
 
 
+def _build_base_dataset(dataset_name: str):
+    if dataset_name == "mls":
+        from data.mls import MLSDataset
+
+        return MLSDataset()
+    if dataset_name == "libritts":
+        from data.libri_tts import LibriTTS
+
+        return LibriTTS()
+    if dataset_name in ["librispeech_aligned", "librispeech-aligned"]:
+        from data.librispeech_align import LibriSpeechAlignDataset
+
+        return LibriSpeechAlignDataset()
+    if dataset_name in ["libritts-r", "libritts_r"]:
+        from data.libri_tts_r import LibriTTSR
+
+        return LibriTTSR()
+    raise ValueError(f"Dataset {dataset_name} not supported")
+
+
+def _as_int_list(values: Any) -> list[int] | None:
+    if values is None:
+        return None
+    if isinstance(values, (list, tuple, ListConfig)):
+        return [int(value) for value in values]
+    raise TypeError("latent_indices must be a list of integer dimensions.")
+
+
+def _resolve_latent_selection(cfg: DictConfig) -> dict[str, Any]:
+    latent_indices = _as_int_list(cfg.get("latent_indices", None))
+    if latent_indices is not None:
+        if not latent_indices:
+            raise ValueError("latent_indices cannot be empty.")
+        if min(latent_indices) < 0:
+            raise ValueError("latent_indices cannot contain negative dimensions.")
+        return {
+            "indices": latent_indices,
+            "start": None,
+            "end": None,
+            "num_dims": len(latent_indices),
+        }
+
+    latent_start = int(cfg.get("latent_start", 0) or 0)
+    if latent_start < 0:
+        raise ValueError("latent_start cannot be negative.")
+
+    latent_end = cfg.get("latent_end", None)
+    if latent_end is None:
+        feature_dims = cfg.get("feature_dims", None)
+        if feature_dims is None:
+            raise ValueError("Set feature_dims, latent_end, or latent_indices.")
+        latent_end = latent_start + int(feature_dims)
+    else:
+        latent_end = int(latent_end)
+
+    if latent_end <= latent_start:
+        raise ValueError(
+            f"Invalid latent slice [{latent_start}:{latent_end}]. "
+            "latent_end must be greater than latent_start."
+        )
+
+    return {
+        "indices": None,
+        "start": latent_start,
+        "end": latent_end,
+        "num_dims": latent_end - latent_start,
+    }
+
+
+def _select_latent(features: torch.Tensor, selection: dict[str, Any]) -> torch.Tensor:
+    indices = selection["indices"]
+    if indices is not None:
+        max_index = max(indices)
+        if max_index >= features.shape[-1]:
+            raise ValueError(
+                f"latent_indices contains dimension {max_index}, "
+                f"but encoder latent has only {features.shape[-1]} dimensions."
+            )
+        index_tensor = torch.as_tensor(indices, device=features.device, dtype=torch.long)
+        return features.index_select(dim=-1, index=index_tensor)
+
+    start = selection["start"]
+    end = selection["end"]
+    if end > features.shape[-1]:
+        raise ValueError(
+            f"Requested latent slice [{start}:{end}], "
+            f"but encoder latent has only {features.shape[-1]} dimensions."
+        )
+    return features[:, start:end]
+
+
 @torch.no_grad()
 def _collect_features(
     model: torch.nn.Module,
     dataloader: DataLoader,
-    feature_dims: int,
+    latent_selection: dict[str, Any],
     max_frames: int,
     max_batches: int | None,
+    dataset_name: str,
 ) -> torch.Tensor:
     chunks = []
     collected_frames = 0
@@ -44,7 +135,7 @@ def _collect_features(
     progress_bar = tqdm(
         dataloader,
         total=total_batches,
-        desc="Encoding LibriTTS-R",
+        desc=f"Encoding {dataset_name}",
         unit="batch",
     )
 
@@ -60,7 +151,8 @@ def _collect_features(
             _,
         ) = model.extract_features(batch["output_audios_srs"])
         encoder_output = model.encode(encoder_features, encoder_padding_mask)
-        features = encoder_output.mu[~encoder_output.padding_mask, :feature_dims]
+        valid_features = encoder_output.mu[~encoder_output.padding_mask]
+        features = _select_latent(valid_features, latent_selection)
         features = features.float().cpu()
 
         remaining_frames = max_frames - collected_frames
@@ -74,7 +166,7 @@ def _collect_features(
             break
 
     if not chunks:
-        raise RuntimeError("No valid encoder frames were collected from LibriTTS-R.")
+        raise RuntimeError(f"No valid encoder frames were collected from {dataset_name}.")
 
     return torch.cat(chunks, dim=0)
 
@@ -149,11 +241,22 @@ def main(cfg: DictConfig) -> None:
     output_dir = Path(os.path.expandvars(cfg.output_dir))
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    training_cfg = OmegaConf.to_container(cfg.get("training", {}), resolve=True) or {}
+    dataset_name = cfg.get("dataset_name", None) or training_cfg.get("dataset_name")
+    if dataset_name is None:
+        raise ValueError("Set dataset_name or training.dataset_name.")
+    dataset_split = cfg.get("dataset_split", "test")
+    latent_selection = _resolve_latent_selection(cfg)
+
     device = torch.device(cfg.device)
     dataset = TrainDatasetWrapper(
-        LibriTTSR(),
-        "test",
+        _build_base_dataset(dataset_name),
+        dataset_split,
         max_audio_len=cfg.max_audio_seconds,
+        enable_perturbed_audio=bool(training_cfg.get("enable_perturbed_audio", False)),
+        perturbed_pitch_shift_max_semitones=float(
+            training_cfg.get("perturbed_pitch_shift_max_semitones", 8.0)
+        ),
     )
     dataloader = DataLoader(
         dataset,
@@ -168,9 +271,10 @@ def main(cfg: DictConfig) -> None:
     features = _collect_features(
         model=model,
         dataloader=dataloader,
-        feature_dims=cfg.feature_dims,
+        latent_selection=latent_selection,
         max_frames=cfg.max_frames,
         max_batches=cfg.max_batches,
+        dataset_name=dataset_name,
     )
     centroids, inertia, iterations = _kmeans(
         points=features,
@@ -184,16 +288,22 @@ def main(cfg: DictConfig) -> None:
     torch.save(
         {
             "centroids": centroids,
-            "feature_dims": cfg.feature_dims,
+            "feature_dims": latent_selection["num_dims"],
+            "latent_selection": latent_selection,
             "num_clusters": cfg.num_clusters,
             "checkpoint_dir": checkpoint_dir,
+            "dataset_name": dataset_name,
+            "dataset_split": dataset_split,
         },
         output_dir / "encoder_kmeans.pt",
     )
     summary = {
         "checkpoint_dir": checkpoint_dir,
+        "dataset_name": dataset_name,
+        "dataset_split": dataset_split,
         "num_frames": features.shape[0],
-        "feature_dims": cfg.feature_dims,
+        "feature_dims": latent_selection["num_dims"],
+        "latent_selection": latent_selection,
         "num_clusters": cfg.num_clusters,
         "iterations": iterations,
         "inertia": inertia,
