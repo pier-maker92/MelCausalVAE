@@ -144,7 +144,9 @@ class FeatureExtractor(nn.Module):
             self._update_std_mean_with_momentum(mel_spec, padding_mask)
 
         if self.normalize:
-            mel_spec = (mel_spec - self.mean) / self.std
+            mel_spec = (
+                mel_spec - self.mean.to(device=mel_spec.device, dtype=mel_spec.dtype)
+            ) / self.std.to(device=mel_spec.device, dtype=mel_spec.dtype)
 
         return FeatureExtractorOutput(
             audio_features=mel_spec,
@@ -253,7 +255,9 @@ class WavLMFeatureExtractor(nn.Module):
             self._update_std_mean_with_momentum(features, feat_padding_mask)
 
         if self.normalize:
-            features = (features - self.mean) / self.std
+            features = (
+                features - self.mean.to(device=features.device, dtype=features.dtype)
+            ) / self.std.to(device=features.device, dtype=features.dtype)
 
         return FeatureExtractorOutput(
             audio_features=features,
