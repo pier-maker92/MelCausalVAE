@@ -119,6 +119,7 @@ class VQConfig:
     num_embeddings: int
     add_residual:bool
     add_residual_p:float
+    drop_acoustic_p:float
     vq_type: str # "bsq" or "fsq" or "vq" or "vq_ema"
     vq_dim: Optional[int] = None
     commitment_weight: float = 0.25

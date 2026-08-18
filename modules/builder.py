@@ -33,11 +33,6 @@ def _load_vq_config(encoder_cfg: Dict[str, Any]):
 
     if vq_dict is not None:
         vq_dict = dict(vq_dict)
-        legacy_drop_p = vq_dict.pop(
-            "drop_acoustic_p", vq_dict.pop("residual_and_tail_dropout_p", None)
-        )
-        if "add_residual_p" not in vq_dict and legacy_drop_p is not None:
-            vq_dict["add_residual_p"] = 1.0 - float(legacy_drop_p)
         if "vq_dim" not in vq_dict and "dim_to_quantize" in vq_dict:
             vq_dict["vq_dim"] = vq_dict.pop("dim_to_quantize")
         if vq_dict.pop("use_ema_codebook", False):
@@ -152,7 +147,11 @@ def build_model(cfg_dict: Dict[str, Any]) -> VAE:
     )
 
     training_cfg = cfg_dict.get("training", {}) or {}
-    return VAE(config=vae_config, train_only_vq=training_cfg.get("train_only_vq", False))
+    return VAE(
+        config=vae_config,
+        train_only_vq=training_cfg.get("train_only_vq", False),
+        train_only_vq_and_decoder=training_cfg.get("train_only_vq_and_decoder", False),
+    )
 
 
 def build_standard_model(cfg_dict: Dict[str, Any]):

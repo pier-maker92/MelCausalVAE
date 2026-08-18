@@ -98,13 +98,25 @@ class VAE(torch.nn.Module):
         if self.semantic_downsample_factor > 1:
             raise NotImplementedError("Semantic downsampling is not implemented yet.")
           
-        if kwargs.get("train_only_vq"):
+        # Option to train only VQ parameters, or only VQ + decoder parameters.
+        # `train_only_vq_and_decoder` takes precedence over `train_only_vq`.
+        if kwargs.get("train_only_vq_and_decoder"):
+            for name, param in self.named_parameters():
+                if ("vq" in name) or ("decoder" in name):
+                    param.requires_grad = True
+                else:
+                    param.requires_grad = False
+            self.train_only_vq_and_decoder = True
+            self.train_only_vq = False
+        elif kwargs.get("train_only_vq"):
             for name, param in self.named_parameters():
                 if "vq" not in name:
                     param.requires_grad = False
             self.train_only_vq = True
+            self.train_only_vq_and_decoder = False
         else:
             self.train_only_vq = False
+            self.train_only_vq_and_decoder = False
 
 
         count_parameters_by_module(self.encoder, "Encoder")

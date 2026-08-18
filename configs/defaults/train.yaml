@@ -24,7 +24,7 @@ training:
   eval_steps: null
   eval_strategy: "steps"
   logging_steps: 1
-  seed: 42
+  seed: 42 
   
   # Hardware / Data
   bf16: true
@@ -53,3 +53,4 @@ training:
 
   # vq
   train_only_vq: false
+  train_only_vq_and_decoder: false

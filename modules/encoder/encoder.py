@@ -162,16 +162,6 @@ class Encoder(SigmaVAEEncoder):
             mu = self.dropout_regularizer(mu)
         if hasattr(self, "noise_regularizer"):
             mu = self.noise_regularizer(mu)
-
-        kl_weight = (
-            self.get_kl_cosine_schedule(kwargs["step"])
-            if kwargs.get("step", None) is not None
-            else 0.0
-        )
-        if self.use_reparameterization_trick and self.training:
-            z = self.reparameterize(mu, logvar, std=1.0)
-        else:
-            z = mu
         
         # vq
         vq_output = None
@@ -179,6 +169,7 @@ class Encoder(SigmaVAEEncoder):
         if hasattr(self, "vq"):
             vq_output = self.vq(mu[...,:self.config.vq_config.dim_to_quantize], padding_mask)
             quantized = vq_output.quantized
+            # residual ? 
             if self.config.vq_config.add_residual:
                 if self.training:
                     residual_mask = (
@@ -188,9 +179,31 @@ class Encoder(SigmaVAEEncoder):
                     quantized = quantized + vq_output.residual * residual_mask
                 else:
                     quantized = quantized + vq_output.residual
-            mu = torch.cat([quantized, mu[...,self.config.vq_config.dim_to_quantize:]], dim=-1)
 
-        # KL loss computation
+            # acoustic ? 
+            if self.config.vq_config.drop_acoustic_p > 0.0 and self.training:
+                drop_mask = (
+                    torch.rand(mu.shape[0], device=mu.device)
+                    < self.config.vq_config.drop_acoustic_p
+                ).to(mu.dtype).view(-1, 1, 1)
+            else: 
+                drop_mask = torch.ones((mu.shape[0], 1, 1), device=mu.device, dtype=mu.dtype)
+
+            # get latent
+            acoustic = mu[...,self.config.vq_config.dim_to_quantize:] * drop_mask
+            mu = torch.cat([quantized, acoustic], dim=-1)
+        
+        if self.use_reparameterization_trick and self.training:
+            z = self.reparameterize(mu, logvar, std=1.0)
+        else:
+            z = mu
+
+        # L2 penalty computation
+        kl_weight = (
+            self.get_kl_cosine_schedule(kwargs["step"])
+            if kwargs.get("step", None) is not None
+            else 0.0
+        )
         kl_loss = None
         if self.training:
             kl_term = self.kl_divergence(

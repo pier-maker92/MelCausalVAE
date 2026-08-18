@@ -68,6 +68,8 @@ class VectorQuantizer(nn.Module):
             )
         else:
             raise ValueError(f"Unknown vq_type: {self.vq_type}")
+        
+        self.recon_weight = getattr(config, "recon_weight", None)
 
         self.proj_in = nn.Sequential(
             nn.Linear(self.dim, self.quantizer.dim, bias=False),
@@ -117,23 +119,6 @@ class VectorQuantizer(nn.Module):
             z_proj_valid = z_proj_flat[flat_valid]
             indices_valid, z_q_proj_valid = self.quantizer(z_proj_valid)
             indices_valid = indices_valid.long()
-            if indices_valid.shape != z_proj_valid.shape[:-1]:
-                raise ValueError(
-                    f"{self.vq_type} quantizer returned indices with shape "
-                    f"{tuple(indices_valid.shape)}, expected "
-                    f"{tuple(z_proj_valid.shape[:-1])}."
-                )
-            if indices_valid.min() < 0 or indices_valid.max() >= self.num_embeddings:
-                raise ValueError(
-                    f"{self.vq_type} quantizer returned indices outside "
-                    f"[0, {self.num_embeddings - 1}]."
-                )
-            if z_q_proj_valid.shape != z_proj_valid.shape:
-                raise ValueError(
-                    f"{self.vq_type} quantizer returned codes with shape "
-                    f"{tuple(z_q_proj_valid.shape)}, expected "
-                    f"{tuple(z_proj_valid.shape)}."
-                )
             z_q_proj_flat[flat_valid] = z_q_proj_valid.to(dtype=z_proj_flat.dtype)
             indices_flat[flat_valid] = indices_valid
 
@@ -163,6 +148,10 @@ class VectorQuantizer(nn.Module):
                 )
             else:
                 total_loss = self.config.commitment_weight * commitment_loss
+        
+        if self.recon_weight is not None:
+            recon_loss = F.mse_loss(z_q[valid], z[valid])
+            total_loss = total_loss + self.recon_weight * recon_loss
 
         return VQVAEOutput(
             indices=indices_bt,

@@ -16,6 +16,7 @@ encoder:
   use_softplus: false
   use_reparameterization_trick: false
   use_instance_norm: false
+  semantic_downsample_factor: 1
 
   # --- VQ ---
   vq_config:
@@ -26,6 +27,7 @@ encoder:
     entropy_loss_weight: 0.0
     dim_to_quantize: null
     recon_weight: null
+    drop_acoustic_p: 0.0
 
     
 

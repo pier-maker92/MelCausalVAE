@@ -993,8 +993,11 @@ def main(cfg: DictConfig):
         run_id = f"{date_dir}/{time_dir}/{run_name}"
 
     train_only_vq = training_cfg.pop("train_only_vq", False)
-    if train_only_vq:
-        logger.info("Training only VQ layers (encoder and decoder frozen).")
+    train_only_vq_and_decoder = training_cfg.pop("train_only_vq_and_decoder", False)
+    if train_only_vq_and_decoder:
+        logger.info("Training only VQ + decoder parameters (encoder frozen).")
+    elif train_only_vq:
+        logger.info("Training only VQ parameters (encoder and decoder frozen).")
 
     # Setup training arguments
     training_args = TrainingArguments(
