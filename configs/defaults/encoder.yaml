@@ -21,9 +21,13 @@ encoder:
   vq_config:
     num_embeddings: null
     add_residual: false
-    add_residual_p: 1.0
-    # BSQ-only: prevents codebook collapse (0 disables, ~0.1 is a reasonable start).
+    add_residual_p: 0.0
+    vq_dim: 128
     entropy_loss_weight: 0.0
+    dim_to_quantize: null
+    recon_weight: null
+
+    
 
   dropout_regularizer_config: null
     # chunk_size: 2

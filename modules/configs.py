@@ -129,6 +129,8 @@ class VQConfig:
     # BSQ-only: per-bit entropy regularization to prevent codebook collapse.
     entropy_loss_weight: float = 0.0
     entropy_temperature: float = 1.0
+    dim_to_quantize: Optional[int] = None
+    recon_weight: Optional[float] = None
 
     def __post_init__(self):
         if self.vq_type not in {"bsq", "fsq", "vq", "vq_ema"}:

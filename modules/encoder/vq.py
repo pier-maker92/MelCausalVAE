@@ -53,15 +53,11 @@ class VectorQuantizer(nn.Module):
             self.quantizer = BinarySphericalQuantizer(codebook_size=self.num_embeddings)
         elif self.vq_type == "vq":
             from .std_vq import StandardVectorQuantizer
-            vq_dim = getattr(config, "vq_dim", None)
-            if vq_dim is None:
-                vq_dim = 128
+            vq_dim = getattr(config, "vq_dim")
             self.quantizer = StandardVectorQuantizer(dim=vq_dim, codebook_size=self.num_embeddings)
         elif self.vq_type == "vq_ema":
             from .vq_ema import EMAVectorQuantizer
-            vq_dim = getattr(config, "vq_dim", None)
-            if vq_dim is None:
-                vq_dim = 128
+            vq_dim = getattr(config, "vq_dim")
             self.quantizer = EMAVectorQuantizer(
                 dim=vq_dim,
                 codebook_size=self.num_embeddings,

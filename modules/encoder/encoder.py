@@ -74,7 +74,7 @@ class Encoder(SigmaVAEEncoder):
             self.logvar = nn.Linear(d_model, latent_dim)
 
         if config.vq_config:
-            self.vq = VectorQuantizer(config.vq_config, dim=latent_dim)
+            self.vq = VectorQuantizer(config.vq_config, dim=getattr(config.vq_config, "dim_to_quantize", latent_dim))
 
         if config.dropout_regularizer_config:
             self.dropout_regularizer = DropoutRegularizer(
@@ -100,25 +100,8 @@ class Encoder(SigmaVAEEncoder):
             config, "semantic_downsample_factor", 1
         )
         if self.semantic_downsample_factor > 1:
-            if not hasattr(self, "vq"):
-                raise ValueError(
-                    "semantic_downsample_factor > 1 is only supported when VQ is enabled"
-                )
-            self.semantic_downsampler = TimeCausalConv1d(
-                latent_dim,
-                latent_dim,
-                k=self.semantic_downsample_factor * 2,
-                d=1,
-                s=self.semantic_downsample_factor,
-            )
-            if config.vq_config.add_residual and hasattr(self, "logvar"):
-                self.logvar_downsampler = TimeCausalConv1d(
-                    latent_dim,
-                    latent_dim,
-                    k=self.semantic_downsample_factor * 2,
-                    d=1,
-                    s=self.semantic_downsample_factor,
-                )
+            raise NotImplementedError("Semantic downsampling is not implemented yet.")
+            
 
         if config.freeze_encoder_before_latent_heads:
             self._freeze_encoder_before_latent_heads()
@@ -141,24 +124,7 @@ class Encoder(SigmaVAEEncoder):
                 param.requires_grad = True
 
     def _apply_instance_norm(self, mu, padding_mask):
-        valid_mask = ~padding_mask
-
-        valid_lens = valid_mask.sum(dim=1, keepdim=True).float()
-        valid_lens = valid_lens.clamp(min=1.0)
-        valid_lens = valid_lens.unsqueeze(-1)
-        valid_mask_expanded = valid_mask.unsqueeze(-1).to(mu.dtype)
-
-        spk_mu = (mu * valid_mask_expanded).sum(dim=1, keepdim=True) / valid_lens
-        spk_variance = (((mu - spk_mu) ** 2) * valid_mask_expanded).sum(
-            dim=1, keepdim=True
-        ) / valid_lens
-        spk_sigma = torch.sqrt(spk_variance + 1e-6)
-
-        mu = (mu - spk_mu) / (spk_sigma + 1e-6)
-        mu = mu * valid_mask_expanded
-
-        speaker_embedding = torch.cat([spk_mu.squeeze(1), spk_sigma.squeeze(1)], dim=-1)
-        return mu, speaker_embedding
+        raise DeprecationWarning("Instance norm is deprecated.")
 
     def forward(
         self,
@@ -191,25 +157,7 @@ class Encoder(SigmaVAEEncoder):
                 "logvar is not supported. Sigma-VAE does not use logvar, sigma is drawn from a Normal distribution with fixed std=1.0."
             )
 
-        # vq
-        vq_output = None
-        pre_vq_mu = None
-        quantized = None
-        if hasattr(self, "vq"):
-            # no residual. it doesn't work
-            pre_vq_mu = mu.clone()
-            vq_output = self.vq(mu[...,self.config.vq_config.dim_to_quantize:], padding_mask)
-            quantized = vq_output.quantized
-            mu = mu[...,:self.config.vq_config.dim_to_quantize]
-
         # regularization
-        # FIXME remove this 
-        speaker_embedding = None
-        if getattr(self.config, "use_instance_norm", False):
-            raise DeprecationWarning(
-                "use_instance_norm is deprecated. Use the new speaker embedding module instead."
-            )
-        
         if hasattr(self, "dropout_regularizer"):
             mu = self.dropout_regularizer(mu)
         if hasattr(self, "noise_regularizer"):
@@ -224,6 +172,23 @@ class Encoder(SigmaVAEEncoder):
             z = self.reparameterize(mu, logvar, std=1.0)
         else:
             z = mu
+        
+        # vq
+        vq_output = None
+        quantized = None
+        if hasattr(self, "vq"):
+            vq_output = self.vq(mu[...,:self.config.vq_config.dim_to_quantize], padding_mask)
+            quantized = vq_output.quantized
+            if self.config.vq_config.add_residual:
+                if self.training:
+                    residual_mask = (
+                        torch.rand(mu.shape[0], device=mu.device)
+                        < self.config.vq_config.add_residual_p
+                    ).to(mu.dtype).view(-1, 1, 1)
+                    quantized = quantized + vq_output.residual * residual_mask
+                else:
+                    quantized = quantized + vq_output.residual
+            mu = torch.cat([quantized, mu[...,self.config.vq_config.dim_to_quantize:]], dim=-1)
 
         # KL loss computation
         kl_loss = None
@@ -236,22 +201,12 @@ class Encoder(SigmaVAEEncoder):
             )
             kl_loss = kl_term * kl_weight
 
-        if hasattr(self, "vq") and self.config.vq_config.add_residual:
-            if self.training:
-                residual_mask = (
-                    torch.rand(mu.shape[0], device=mu.device)
-                    < self.config.vq_config.add_residual_p
-                ).to(mu.dtype).view(-1, 1, 1)
-                z = z * residual_mask + quantized
-            else:
-                z = z + quantized
-
         out = {
             "z": z,
             "kl_loss": kl_loss,
             "mu": mu,
             "padding_mask": padding_mask,
-            "speaker_embedding": speaker_embedding,
+            "speaker_embedding": None,
         }
 
         if hasattr(self, "vq"):

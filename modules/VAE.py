@@ -489,6 +489,115 @@ class VAE(torch.nn.Module):
         out_flat.index_copy_(0, valid_positions, valid_values)
         return out_flat.reshape_as(out)
 
+    def _kmeans_encode(
+        self,
+        z: torch.Tensor,
+        padding_mask: Optional[torch.BoolTensor],
+        kmeans_codebook: dict,
+        chunk_size: int,
+    ) -> dict[str, torch.Tensor]:
+        centroids = kmeans_codebook["centroids"].to(device=z.device, dtype=torch.float32)
+        selection = kmeans_codebook.get("latent_selection")
+        if selection is None:
+            selection = {
+                "indices": None,
+                "start": 0,
+                "end": int(kmeans_codebook["feature_dims"]),
+            }
+
+        indices = selection.get("indices")
+        if indices is not None:
+            dim_index = torch.as_tensor(indices, device=z.device, dtype=torch.long)
+            if dim_index.numel() == 0:
+                raise ValueError("K-means latent selection has no dimensions.")
+            if dim_index.min().item() < 0 or dim_index.max().item() >= z.shape[-1]:
+                raise ValueError(
+                    f"K-means latent indices {indices} are incompatible with "
+                    f"latent dim {z.shape[-1]}."
+                )
+            selected = z.index_select(dim=-1, index=dim_index)
+            tail_mask = torch.ones(z.shape[-1], device=z.device, dtype=torch.bool)
+            tail_mask[dim_index] = False
+            tail = z[..., tail_mask]
+        else:
+            start = int(selection.get("start", 0))
+            end = int(selection["end"])
+            if start < 0 or end > z.shape[-1] or end <= start:
+                raise ValueError(
+                    f"K-means latent slice [{start}:{end}] is incompatible with "
+                    f"latent dim {z.shape[-1]}."
+                )
+            selected = z[..., start:end]
+            tail = torch.cat((z[..., :start], z[..., end:]), dim=-1)
+
+        if selected.shape[-1] != centroids.shape[-1]:
+            raise ValueError(
+                f"K-means centroids have dim {centroids.shape[-1]}, "
+                f"but selected latent has dim {selected.shape[-1]}."
+            )
+
+        if padding_mask is None:
+            valid_mask = torch.ones(z.shape[:2], device=z.device, dtype=torch.bool)
+        else:
+            valid_mask = ~padding_mask
+
+        selected_valid = selected[valid_mask].to(dtype=torch.float32)
+        index_chunks = []
+        quantized_chunks = []
+        for selected_chunk in selected_valid.split(chunk_size):
+            distances = (
+                selected_chunk[:, None, :] - centroids[None, :, :]
+            ).square().sum(dim=-1)
+            nearest = distances.argmin(dim=1)
+            index_chunks.append(nearest)
+            quantized_chunks.append(centroids.index_select(0, nearest))
+
+        flat_shape = z.shape[0] * z.shape[1]
+        out_indices = torch.full(
+            (flat_shape,),
+            -1,
+            device=z.device,
+            dtype=torch.long,
+        )
+        out_quantized = torch.zeros(
+            (flat_shape, centroids.shape[-1]),
+            device=z.device,
+            dtype=z.dtype,
+        )
+        if index_chunks:
+            valid_positions = valid_mask.reshape(-1).nonzero(as_tuple=False).squeeze(1)
+            nearest = torch.cat(index_chunks, dim=0)
+            quantized = torch.cat(quantized_chunks, dim=0).to(dtype=z.dtype)
+            out_indices.index_copy_(0, valid_positions, nearest)
+            out_quantized.index_copy_(0, valid_positions, quantized)
+
+        return {
+            "indices": out_indices.reshape(z.shape[:2]),
+            "quantized": out_quantized.reshape(*z.shape[:2], centroids.shape[-1]),
+            "tail": tail,
+        }
+
+    @torch.no_grad()
+    def encode_audio(
+        self,
+        audios_srs,
+        kmeans_codebook: dict,
+        kmeans_chunk_size: int = 16384,
+        **kwargs,
+    ) -> dict[str, torch.Tensor]:
+        enc_features, enc_padding_mask, _, _, _ = self.extract_features(
+            audios_srs,
+            target_audios_srs=audios_srs,
+            **kwargs,
+        )
+        encoder_output = self.encode(enc_features, enc_padding_mask, **kwargs)
+        return self._kmeans_encode(
+            z=encoder_output.z,
+            padding_mask=encoder_output.padding_mask,
+            kmeans_codebook=kmeans_codebook,
+            chunk_size=int(kmeans_chunk_size),
+        )
+
     @torch.no_grad()
     def encode_decode(
         self,
