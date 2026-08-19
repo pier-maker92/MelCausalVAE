@@ -112,6 +112,7 @@ class DataCollator(object):
         batch_language = [None] * len(instances)
         batch_ids = [None] * len(instances)
         batch_phoneme_alignments = [None] * len(instances)
+        batch_pitch_targets = [None] * len(instances)
         for i, instance in enumerate(instances):
             if "audio_input" in instance:
                 batch_input_audios_srs[i] = (
@@ -147,10 +148,25 @@ class DataCollator(object):
                 batch_language[i] = instance["language"]
             if "ids" in instance:
                 batch_ids[i] = instance["ids"]
+            if "pitch_targets" in instance:
+                batch_pitch_targets[i] = instance["pitch_targets"]
 
         # if not all none add to the batch
         def all_none(batch):
             return all([x is None for x in batch])
+
+        def collate_pitch_targets(targets):
+            log_f0 = torch.nn.utils.rnn.pad_sequence(
+                [target["log_f0"] for target in targets],
+                batch_first=True,
+                padding_value=0.0,
+            )
+            voiced = torch.nn.utils.rnn.pad_sequence(
+                [target["voiced"] for target in targets],
+                batch_first=True,
+                padding_value=False,
+            )
+            return {"log_f0": log_f0, "voiced": voiced}
 
         if not all_none(batch_input_audios_srs):
             batch["input_audios_srs"] = batch_input_audios_srs
@@ -172,6 +188,8 @@ class DataCollator(object):
             batch["ids"] = batch_ids
         if not all_none(batch_phoneme_alignments):
             batch["phoneme_alignments"] = batch_phoneme_alignments
+        if not all_none(batch_pitch_targets):
+            batch["pitch_targets"] = collate_pitch_targets(batch_pitch_targets)
         return batch
 
 
@@ -227,6 +245,7 @@ class TrainDatasetWrapper(SimpleAudioDataset):
         max_audio_len: Optional[float] = None,
         enable_perturbed_audio: bool = False,
         perturbed_pitch_shift_max_semitones: float = 8.0,
+        pitch_extractor: Optional[object] = None,
     ):
         super().__init__()
         assert split in ["train", "test"], "split must be either train or test"
@@ -234,6 +253,7 @@ class TrainDatasetWrapper(SimpleAudioDataset):
         self.perturbed_pitch_shift_max_semitones = float(
             perturbed_pitch_shift_max_semitones
         )
+        self.pitch_extractor = pitch_extractor
         self.dataset = getattr(dataset, f"{split}_dataset")
         if max_audio_len is not None:
             self.dataset = self.dataset.filter(
@@ -260,6 +280,14 @@ class TrainDatasetWrapper(SimpleAudioDataset):
             )
             data_dict["perturbed_audio"] = [perturbed_audio]
             data_dict["perturbed_audio_sr"] = [clean_sr]
+        if self.pitch_extractor is not None:
+            pitch_targets = self.pitch_extractor(
+                [(data_dict["audio_output"][0], data_dict["audio_output_sr"][0])]
+            )
+            data_dict["pitch_targets"] = {
+                "log_f0": pitch_targets["log_f0"].squeeze(0),
+                "voiced": pitch_targets["voiced"].squeeze(0),
+            }
         data_dict["ids"] = data.get("id")
         data_dict["phoneme_alignments"] = data.get("phonemes", None)
         return data_dict

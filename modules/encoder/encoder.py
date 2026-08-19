@@ -69,47 +69,38 @@ class Encoder(SigmaVAEEncoder):
             d_model=d_model, nheads=tf_heads, nlayers=tf_layers, drop_p=drop_p
         )
 
-        self.mu = nn.Linear(d_model, latent_dim)
-        if config.logvar_layer:
-            self.logvar = nn.Linear(d_model, latent_dim)
-
-        if config.vq_config:
-            self.vq = VectorQuantizer(config.vq_config, dim=getattr(config.vq_config, "dim_to_quantize", latent_dim))
+        # dual encoder heads: semantic and acoustic
+        self.semantic_proj = nn.Linear(d_model, config.semantic_dim)
+        self.acoustic_proj = nn.Linear(d_model, config.acoustic_dim)
+        # vq is mandatory for the semantic head, but optional for the acoustic head
+        self.vq = VectorQuantizer(
+            config.vq_config,
+            dim=config.semantic_dim,
+            pitch_loss_config=config.pitch_loss_config,
+            acoustic_dim=config.acoustic_dim,
+        )
+        if self.config.vq_acoustic_config is not None:
+            self.vq_acoustic = VectorQuantizer(
+                config.vq_acoustic_config, dim=config.acoustic_dim
+            )
 
         if config.dropout_regularizer_config:
-            self.dropout_regularizer = DropoutRegularizer(
-                config=config.dropout_regularizer_config
-            )
+            raise NotImplementedError("Dropout regularizer is not supported yet")
+            # self.dropout_regularizer = DropoutRegularizer(
+            #     config=config.dropout_regularizer_config
+            # )
 
-        if config.kl_chunk_regularizer_config:
-            self.kl_chunk_regularizer = KLChunkRegularizer(
-                config=config.kl_chunk_regularizer_config,
-                vq_quant_dim=None,
-            )
-
-        if config.noise_regularizer_config:
-            if getattr(config, "use_reparameterization_trick", False):
-                raise ValueError(
-                    "Cannot use both noise_regularizer and use_reparameterization_trick=True"
-                )
-            self.noise_regularizer = NoiseRegularizer(
-                config=config.noise_regularizer_config,
-            )
-
-        self.semantic_downsample_factor = getattr(
-            config, "semantic_downsample_factor", 1
-        )
-        if self.semantic_downsample_factor > 1:
-            raise NotImplementedError("Semantic downsampling is not implemented yet.")
-            
-
-        if config.freeze_encoder_before_latent_heads:
-            self._freeze_encoder_before_latent_heads()
-
-        self.config = config
         self.use_reparameterization_trick = getattr(
             config, "use_reparameterization_trick"
         )
+
+        if self.config.acoustic_logvar:
+            assert (
+                self.use_reparameterization_trick
+            ), "acoustic_logvar requires reparameterization trick"
+            self.acoustic_logvar = nn.Linear(d_model, config.acoustic_dim)
+
+        self.proj_out = nn.Linear(config.semantic_dim + config.acoustic_dim, latent_dim)
 
     def _freeze_encoder_before_latent_heads(self):
         for param in self.parameters():
@@ -125,6 +116,23 @@ class Encoder(SigmaVAEEncoder):
 
     def _apply_instance_norm(self, mu, padding_mask):
         raise DeprecationWarning("Instance norm is deprecated.")
+
+    def handle_drop_acoustic(self, acoustic):
+        if self.config.vq_config.drop_acoustic_p > 0.0 and self.training:
+            drop_mask = (
+                (
+                    torch.rand(acoustic.shape[0], device=acoustic.device)
+                    < self.config.vq_config.drop_acoustic_p
+                )
+                .to(acoustic.dtype)
+                .view(-1, 1, 1)
+            )
+        else:
+            drop_mask = torch.ones(
+                (acoustic.shape[0], 1, 1), device=acoustic.device, dtype=acoustic.dtype
+            )
+        acoustic = acoustic * drop_mask
+        return acoustic
 
     def forward(
         self,
@@ -150,55 +158,33 @@ class Encoder(SigmaVAEEncoder):
         hiddens = x.transpose(1, 2)  # [B, T/C, 512]
         h = self.transformer(hiddens)  # [B, T/C, 512]
 
-        mu = self.mu(h)
+        semantic = self.semantic_proj(h)  # [B, T/C, semantic_dim]
+        acoustic = self.acoustic_proj(h)  # [B, T/C, acoustic
         logvar = None
-        if hasattr(self, "logvar"):
-            raise NotImplementedError(
-                "logvar is not supported. Sigma-VAE does not use logvar, sigma is drawn from a Normal distribution with fixed std=1.0."
-            )
+        if hasattr(self, "acoustic_logvar"):
+            logvar = self.acoustic_logvar(h)  # [B, T/C, acoustic_dim]
 
-        # regularization
-        if hasattr(self, "dropout_regularizer"):
-            mu = self.dropout_regularizer(mu)
-        if hasattr(self, "noise_regularizer"):
-            mu = self.noise_regularizer(mu)
-        
-        # vq
-        vq_output = None
-        quantized = None
-        if hasattr(self, "vq"):
-            vq_output = self.vq(mu[...,:self.config.vq_config.dim_to_quantize], padding_mask)
-            quantized = vq_output.quantized
-            # residual ? 
-            if self.config.vq_config.add_residual:
-                if self.training:
-                    residual_mask = (
-                        torch.rand(mu.shape[0], device=mu.device)
-                        < self.config.vq_config.add_residual_p
-                    ).to(mu.dtype).view(-1, 1, 1)
-                    quantized = quantized + vq_output.residual * residual_mask
-                else:
-                    quantized = quantized + vq_output.residual
-
-            # acoustic ? 
-            if self.config.vq_config.drop_acoustic_p > 0.0 and self.training:
-                drop_mask = (
-                    torch.rand(mu.shape[0], device=mu.device)
-                    < self.config.vq_config.drop_acoustic_p
-                ).to(mu.dtype).view(-1, 1, 1)
-            else: 
-                drop_mask = torch.ones((mu.shape[0], 1, 1), device=mu.device, dtype=mu.dtype)
-
-            # get latent
-            acoustic = mu[...,self.config.vq_config.dim_to_quantize:] * drop_mask
-            mu = torch.cat([quantized, acoustic], dim=-1)
-        
+        # acoustic branch
         if self.use_reparameterization_trick and self.training:
-            z = self.reparameterize(mu, logvar, std=1.0)
-        else:
-            z = mu
+            acoustic = self.reparameterize(acoustic, logvar)
 
-        # L2 penalty computation
+        acoustic = self.handle_drop_acoustic(acoustic)
+
+        # quantized semantic branch
+        vq_output = self.vq(
+            semantic,
+            padding_mask,
+            acoustic=acoustic,
+            pitch_targets=kwargs.get("pitch_targets", None),
+            step=kwargs.get("step", None),
+        )
+        quantized = vq_output.quantized
+
+        # concat the semantic and acoustic branches
+        z = torch.cat([quantized, acoustic], dim=-1)
+        z = self.proj_out(z)  # [B, T/C, latent_dim]
+
+        # KL penalty computation
         kl_weight = (
             self.get_kl_cosine_schedule(kwargs["step"])
             if kwargs.get("step", None) is not None
@@ -207,17 +193,17 @@ class Encoder(SigmaVAEEncoder):
         kl_loss = None
         if self.training:
             kl_term = self.kl_divergence(
-                mu,
+                acoustic,
                 logvar,
                 padding_mask,
-                dtype=mu.dtype,
+                dtype=acoustic.dtype,
             )
             kl_loss = kl_term * kl_weight
 
         out = {
             "z": z,
             "kl_loss": kl_loss,
-            "mu": mu,
+            "mu": acoustic,
             "padding_mask": padding_mask,
             "speaker_embedding": None,
         }
@@ -228,6 +214,10 @@ class Encoder(SigmaVAEEncoder):
             out["quantized"] = vq_output.quantized
             out["residual"] = vq_output.residual
             out["indices"] = vq_output.indices
+            out["acoustic_f0_loss"] = vq_output.acoustic_f0_loss
+            out["semantic_f0_adv_loss"] = vq_output.semantic_f0_adv_loss
+            out["pitch_voiced_loss"] = vq_output.pitch_voiced_loss
+            out["pitch_contour_loss"] = vq_output.pitch_contour_loss
 
         return EncoderOutput(**out)
 

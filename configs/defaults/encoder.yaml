@@ -17,6 +17,9 @@ encoder:
   use_reparameterization_trick: false
   use_instance_norm: false
   semantic_downsample_factor: 1
+  semantic_dim: null
+  acoustic_dim: null
+  acoustic_logvar: false
 
   # --- VQ ---
   vq_config:
@@ -28,6 +31,23 @@ encoder:
     dim_to_quantize: null
     recon_weight: null
     drop_acoustic_p: 0.0
+
+  vq_acoustic_config: null
+
+  pitch_loss_config: null
+    # fmin: 50.0
+    # fmax: 550.0
+    # torchcrepe_model: tiny
+    # torchcrepe_decoder: weighted_argmax
+    # torchcrepe_batch_size: 128
+    # torchcrepe_hop_length: null  # null = mel hop length
+    # periodicity_threshold: 0.5
+    # acoustic_loss_weight: 1.0
+    # semantic_adv_loss_weight: 0.1
+    # voiced_loss_weight: 0.1
+    # contour_loss_weight: 0.0
+    # grl_lambda: 1.0
+    # grl_warmup_steps: 0
 
     
 

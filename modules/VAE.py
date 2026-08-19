@@ -18,7 +18,14 @@ logger = logging.getLogger(__name__)
 
 
 class VAE(torch.nn.Module):
-    _keys_to_ignore_on_save = None
+    _state_dict_exclude_prefixes = (
+        "wavlm_extractor.wavlm.",
+        "distill_wavlm_extractor.wavlm.",
+        "speaker_encoder.wavlm.",
+    )
+    _keys_to_ignore_on_save = [
+        f"^{prefix}" for prefix in _state_dict_exclude_prefixes
+    ]
 
     def __init__(self, config: VAEConfig, **kwargs):
         super().__init__()
@@ -145,6 +152,13 @@ class VAE(torch.nn.Module):
         self.load_state_dict(state_dict, strict=False)
         print(f"Loaded checkpoint from {checkpoint_file}")
 
+    def state_dict(self, *args, **kwargs):
+        state_dict = super().state_dict(*args, **kwargs)
+        for key in list(state_dict.keys()):
+            if key.startswith(self._state_dict_exclude_prefixes):
+                del state_dict[key]
+        return state_dict
+
     @torch.no_grad()
     def extract_features(self, encoder_audios_srs, target_audios_srs=None, **kwargs):
         if target_audios_srs is None:
@@ -209,6 +223,7 @@ class VAE(torch.nn.Module):
             x=features,
             padding_mask=padding_mask,
             step=kwargs.get("training_step", None),
+            pitch_targets=kwargs.get("pitch_targets", None),
         )
         return encoder_output
 
@@ -323,6 +338,7 @@ class VAE(torch.nn.Module):
             vq_stats = getattr(encoder_output, "vq_stats", None)
             if vq_stats is not None:
                 out.update({"vq_loss": encoder_output.vq_loss, "vq_stats": vq_stats})
+            self._add_pitch_metrics(out, encoder_output)
             return VAEOutput(**out)
 
         # decode from latent space
@@ -361,7 +377,20 @@ class VAE(torch.nn.Module):
         if getattr(encoder_output, "ortho_loss", None) is not None:
             out["distill_ortho_loss"] = encoder_output.ortho_loss
 
+        self._add_pitch_metrics(out, encoder_output)
+
         return VAEOutput(**out)
+
+    def _add_pitch_metrics(self, out, encoder_output):
+        for key in (
+            "acoustic_f0_loss",
+            "semantic_f0_adv_loss",
+            "pitch_voiced_loss",
+            "pitch_contour_loss",
+        ):
+            value = getattr(encoder_output, key, None)
+            if value is not None:
+                out[key] = value
 
     def _compute_distillation_losses(self, encoder_output, distill_features):
         mu_pre_vq = encoder_output.mu_pre_vq

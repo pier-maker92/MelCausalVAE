@@ -157,6 +157,43 @@ class SemanticDistillationConfig:
 
 
 @dataclass
+class PitchLossConfig:
+    fmin: float = 50.0
+    fmax: float = 550.0
+    torchcrepe_model: str = "tiny"
+    torchcrepe_decoder: str = "weighted_argmax"
+    torchcrepe_batch_size: int = 128
+    torchcrepe_hop_length: Optional[int] = None
+    periodicity_threshold: float = 0.5
+    acoustic_loss_weight: float = 1.0
+    semantic_adv_loss_weight: float = 0.1
+    voiced_loss_weight: float = 0.1
+    contour_loss_weight: float = 0.0
+    grl_lambda: float = 1.0
+    grl_warmup_steps: int = 0
+
+    def __post_init__(self):
+        if self.fmin <= 0.0 or self.fmax <= self.fmin:
+            raise ValueError("PitchLossConfig requires 0 < fmin < fmax.")
+        if self.torchcrepe_model not in {"tiny", "full"}:
+            raise ValueError("torchcrepe_model must be 'tiny' or 'full'.")
+        if self.torchcrepe_decoder not in {"weighted_argmax", "argmax", "viterbi"}:
+            raise ValueError(
+                "torchcrepe_decoder must be 'weighted_argmax', 'argmax', or 'viterbi'."
+            )
+        if self.torchcrepe_batch_size <= 0:
+            raise ValueError("torchcrepe_batch_size must be > 0.")
+        if self.torchcrepe_hop_length is not None and self.torchcrepe_hop_length <= 0:
+            raise ValueError("torchcrepe_hop_length must be > 0 when set.")
+        if not 0.0 <= self.periodicity_threshold <= 1.0:
+            raise ValueError("periodicity_threshold must be in [0, 1].")
+        if self.grl_lambda < 0.0:
+            raise ValueError("grl_lambda must be >= 0.")
+        if self.grl_warmup_steps < 0:
+            raise ValueError("grl_warmup_steps must be >= 0.")
+
+
+@dataclass
 class EncoderConfig(SigmaVAEEncoderConfig):
     mel_dim: int = 100
     d_model: int = 512
@@ -167,12 +204,17 @@ class EncoderConfig(SigmaVAEEncoderConfig):
     n_residual_blocks: int = 3
     freeze_encoder_before_latent_heads: bool = False
     semantic_downsample_factor: int = 1
+    semantic_dim: Optional[int] = None
+    acoustic_dim: Optional[int] = None
+    vq_acoustic_config: Optional[VQConfig] = None
+    acoustic_logvar: bool = False
     # Optional Modules
     vq_config: Optional[VQConfig] = None
     dropout_regularizer_config: Optional[DropoutConfig] = None
     kl_chunk_regularizer_config: Optional[KLChunkRegularizer] = None
     noise_regularizer_config: Optional[NoiseConfig] = None
     semantic_distillation_config: Optional[SemanticDistillationConfig] = None
+    pitch_loss_config: Optional[PitchLossConfig] = None
 
 
 #########################
@@ -316,6 +358,7 @@ class VAEConfig:
 
         self.encoder_config.latent_dim = self.latent_dim
         self.encoder_config.compress_factor_C = self.compress_factor
+        self._set_encoder_branch_dims()
 
         self.decoder_config.mel_dim = self.mel_dim
         self.decoder_config.audio_latent_dim = self.latent_dim
@@ -342,6 +385,29 @@ class VAEConfig:
             getattr(self.encoder_config, "d_model"),
             getattr(self.decoder_config, "dit_dim"),
         )
+
+    def _set_encoder_branch_dims(self):
+        semantic_dim = self.encoder_config.semantic_dim
+        acoustic_dim = self.encoder_config.acoustic_dim
+        if semantic_dim is None and acoustic_dim is None:
+            self.encoder_config.semantic_dim = self.latent_dim // 2
+            self.encoder_config.acoustic_dim = (
+                self.latent_dim - self.encoder_config.semantic_dim
+            )
+        elif semantic_dim is None:
+            self.encoder_config.semantic_dim = self.latent_dim - acoustic_dim
+        elif acoustic_dim is None:
+            self.encoder_config.acoustic_dim = self.latent_dim - semantic_dim
+
+        semantic_dim = self.encoder_config.semantic_dim
+        acoustic_dim = self.encoder_config.acoustic_dim
+        if semantic_dim <= 0 or acoustic_dim <= 0:
+            raise ValueError("semantic_dim and acoustic_dim must both be > 0.")
+        if semantic_dim + acoustic_dim != self.latent_dim:
+            raise ValueError(
+                "semantic_dim + acoustic_dim must match latent_dim "
+                f"({semantic_dim} + {acoustic_dim} != {self.latent_dim})."
+            )
 
     def to_dict(self):
         """Convert config to dict for W&B logging compatibility"""
@@ -387,6 +453,7 @@ class VAEStandardConfig:
 
         self.encoder_config.latent_dim = self.latent_dim
         self.encoder_config.compress_factor_C = self.compress_factor
+        self._set_encoder_branch_dims()
 
         self.decoder_config.mel_dim = self.mel_dim
         self.decoder_config.audio_latent_dim = self.latent_dim
@@ -395,6 +462,29 @@ class VAEStandardConfig:
     @property
     def hidden_size(self) -> int:
         return max(self.encoder_config.d_model, self.decoder_config.d_model)
+
+    def _set_encoder_branch_dims(self):
+        semantic_dim = self.encoder_config.semantic_dim
+        acoustic_dim = self.encoder_config.acoustic_dim
+        if semantic_dim is None and acoustic_dim is None:
+            self.encoder_config.semantic_dim = self.latent_dim // 2
+            self.encoder_config.acoustic_dim = (
+                self.latent_dim - self.encoder_config.semantic_dim
+            )
+        elif semantic_dim is None:
+            self.encoder_config.semantic_dim = self.latent_dim - acoustic_dim
+        elif acoustic_dim is None:
+            self.encoder_config.acoustic_dim = self.latent_dim - semantic_dim
+
+        semantic_dim = self.encoder_config.semantic_dim
+        acoustic_dim = self.encoder_config.acoustic_dim
+        if semantic_dim <= 0 or acoustic_dim <= 0:
+            raise ValueError("semantic_dim and acoustic_dim must both be > 0.")
+        if semantic_dim + acoustic_dim != self.latent_dim:
+            raise ValueError(
+                "semantic_dim + acoustic_dim must match latent_dim "
+                f"({semantic_dim} + {acoustic_dim} != {self.latent_dim})."
+            )
 
     def to_dict(self):
         d = asdict(self)

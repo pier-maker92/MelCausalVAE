@@ -16,6 +16,7 @@ from .configs import (
     DropoutConfig,
     KLChunkRegularizer,
     SemanticDistillationConfig,
+    PitchLossConfig,
     NoiseConfig,
     SpeakerEncoderConfig,
 )
@@ -54,6 +55,19 @@ def _load_vq_config(encoder_cfg: Dict[str, Any]):
     return None
 
 
+def _load_named_vq_config(encoder_cfg: Dict[str, Any], key: str):
+    vq_dict = encoder_cfg.pop(key, None)
+    if vq_dict is None:
+        return None
+    vq_dict = dict(vq_dict)
+    if "vq_dim" not in vq_dict and "dim_to_quantize" in vq_dict:
+        vq_dict["vq_dim"] = vq_dict.pop("dim_to_quantize")
+    if vq_dict.pop("use_ema_codebook", False):
+        vq_dict["vq_type"] = "vq_ema"
+    vq_dict.setdefault("vq_type", "vq")
+    return VQConfig(**_filter_dataclass_kwargs(VQConfig, vq_dict))
+
+
 def build_model(cfg_dict: Dict[str, Any]) -> VAE:
     """Builds a VAE model from a configuration dictionary."""
     # Handle both hydra config (encoder) and checkpoint config (encoder_config)
@@ -69,6 +83,7 @@ def build_model(cfg_dict: Dict[str, Any]) -> VAE:
     decoder_config = DiTConfig(**_filter_dataclass_kwargs(DiTConfig, decoder_cfg))
 
     vq_config = _load_vq_config(encoder_cfg)
+    vq_acoustic_config = _load_named_vq_config(encoder_cfg, "vq_acoustic_config")
 
     dropout_dict = encoder_cfg.pop("dropout_regularizer_config", None)
     dropout_config = (
@@ -100,12 +115,21 @@ def build_model(cfg_dict: Dict[str, Any]) -> VAE:
         else None
     )
 
+    pitch_dict = encoder_cfg.pop("pitch_loss_config", None)
+    pitch_config = (
+        PitchLossConfig(**_filter_dataclass_kwargs(PitchLossConfig, pitch_dict))
+        if pitch_dict
+        else None
+    )
+
     encoder_config = EncoderConfig(
         vq_config=vq_config,
+        vq_acoustic_config=vq_acoustic_config,
         dropout_regularizer_config=dropout_config,
         kl_chunk_regularizer_config=kl_config,
         noise_regularizer_config=noise_config,
         semantic_distillation_config=distill_config,
+        pitch_loss_config=pitch_config,
         **_filter_dataclass_kwargs(EncoderConfig, encoder_cfg),
     )
 
@@ -206,6 +230,7 @@ def build_standard_model(cfg_dict: Dict[str, Any]):
     )
 
     vq_config = _load_vq_config(encoder_cfg)
+    vq_acoustic_config = _load_named_vq_config(encoder_cfg, "vq_acoustic_config")
 
     dropout_dict = encoder_cfg.pop("dropout_regularizer_config", None)
     dropout_config = DropoutConfig(**dropout_dict) if dropout_dict else None
@@ -221,12 +246,17 @@ def build_standard_model(cfg_dict: Dict[str, Any]):
         SemanticDistillationConfig(**distill_dict) if distill_dict else None
     )
 
+    pitch_dict = encoder_cfg.pop("pitch_loss_config", None)
+    pitch_config = PitchLossConfig(**pitch_dict) if pitch_dict else None
+
     encoder_config = EncoderConfig(
         vq_config=vq_config,
+        vq_acoustic_config=vq_acoustic_config,
         dropout_regularizer_config=dropout_config,
         kl_chunk_regularizer_config=kl_config,
         noise_regularizer_config=noise_config,
         semantic_distillation_config=distill_config,
+        pitch_loss_config=pitch_config,
         **encoder_cfg,
     )
 

@@ -24,7 +24,13 @@ class VAEWithStandardDecoder(nn.Module):
     the trainer drives alternating D/G updates.
     """
 
-    _keys_to_ignore_on_save = None
+    _state_dict_exclude_prefixes = (
+        "wavlm_extractor.wavlm.",
+        "distill_wavlm_extractor.wavlm.",
+    )
+    _keys_to_ignore_on_save = [
+        f"^{prefix}" for prefix in _state_dict_exclude_prefixes
+    ]
 
     def __init__(self, config: VAEStandardConfig):
         super().__init__()
@@ -57,6 +63,13 @@ class VAEWithStandardDecoder(nn.Module):
         logger.info(f"Safetensors file loaded to {self.device}. Applying state dict...")
         self.load_state_dict(state_dict, strict=False)
         logger.info(f"Loaded checkpoint from {checkpoint_path}")
+
+    def state_dict(self, *args, **kwargs):
+        state_dict = super().state_dict(*args, **kwargs)
+        for key in list(state_dict.keys()):
+            if key.startswith(self._state_dict_exclude_prefixes):
+                del state_dict[key]
+        return state_dict
 
     @torch.no_grad()
     def extract_features(self, encoder_audios_srs, target_audios_srs=None, **kwargs):

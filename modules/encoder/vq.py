@@ -5,6 +5,7 @@ from ..configs import VQConfig
 import torch.nn.functional as F
 from .fsq import FiniteScalarQuantizer
 from .bsq import BinarySphericalQuantizer
+from .pitch_loss import PitchLoss
 from ..output_dataclasses import VQVAEOutput, VQStats
 
 
@@ -41,10 +42,21 @@ class VectorQuantizer(nn.Module):
         self,
         config: VQConfig,
         dim: int,
+        pitch_loss_config=None,
+        acoustic_dim: Optional[int] = None,
     ):
         super().__init__()
         self.config = config
         self.dim = dim
+        self.pitch_loss = None
+        if pitch_loss_config is not None:
+            if acoustic_dim is None:
+                raise ValueError("acoustic_dim is required when pitch_loss_config is set.")
+            self.pitch_loss = PitchLoss(
+                pitch_loss_config,
+                semantic_dim=dim,
+                acoustic_dim=acoustic_dim,
+            )
         self.num_embeddings = config.num_embeddings
         self.vq_type = config.vq_type
         if self.vq_type == "fsq":
@@ -83,6 +95,9 @@ class VectorQuantizer(nn.Module):
         self,
         z: torch.Tensor,
         padding_mask: Optional[torch.BoolTensor] = None,
+        acoustic: Optional[torch.Tensor] = None,
+        pitch_targets=None,
+        step: Optional[int] = None,
     ) -> VQVAEOutput:
         """
         Args:
@@ -153,12 +168,29 @@ class VectorQuantizer(nn.Module):
             recon_loss = F.mse_loss(z_q[valid], z[valid])
             total_loss = total_loss + self.recon_weight * recon_loss
 
+        pitch_losses = {}
+        if self.pitch_loss is not None and pitch_targets is not None:
+            if acoustic is None:
+                raise ValueError("acoustic is required when pitch targets are provided.")
+            pitch_losses = self.pitch_loss(
+                semantic_quantized=z_q,
+                acoustic=acoustic,
+                pitch_targets=pitch_targets,
+                padding_mask=padding_mask,
+                step=step,
+            )
+            total_loss = total_loss + pitch_losses["loss"]
+
         return VQVAEOutput(
             indices=indices_bt,
             quantized=z_q,
             residual=z_residual,
             stats=stats,
             loss=total_loss,
+            acoustic_f0_loss=pitch_losses.get("acoustic_f0_loss"),
+            semantic_f0_adv_loss=pitch_losses.get("semantic_f0_adv_loss"),
+            pitch_voiced_loss=pitch_losses.get("pitch_voiced_loss"),
+            pitch_contour_loss=pitch_losses.get("pitch_contour_loss"),
         )
 
     @property

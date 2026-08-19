@@ -1,82 +1,12 @@
 import os
 import math
+import json
 import wandb
 import torch
-
-# --- WORKAROUND FOR FAIRSEQ/HYDRA ON PYTHON 3.11 ---
-import dataclasses
-
-_orig_get_field = dataclasses._get_field
-
-
-def _patched_get_field(cls, a_name, a_type, *args, **kwargs):
-    try:
-        return _orig_get_field(cls, a_name, a_type, *args, **kwargs)
-    except ValueError as e:
-        if "mutable default" in str(e):
-            default = getattr(cls, a_name, dataclasses.MISSING)
-            actual_default = (
-                default.default if isinstance(default, dataclasses.Field) else default
-            )
-            if actual_default is not dataclasses.MISSING:
-                default_cls = actual_default.__class__
-                orig_hash = getattr(default_cls, "__hash__", None)
-                try:
-                    default_cls.__hash__ = lambda self: id(self)
-                except TypeError:
-                    pass
-
-                try:
-                    return _orig_get_field(cls, a_name, a_type, *args, **kwargs)
-                finally:
-                    try:
-                        if orig_hash is None:
-                            default_cls.__hash__ = None
-                        else:
-                            default_cls.__hash__ = orig_hash
-                    except TypeError:
-                        pass
-        raise
-
-
-dataclasses._get_field = _patched_get_field
-# ---------------------------------------------------
-
-# --- WORKAROUND FOR PYTORCH 2.6 WEIGHTS_ONLY ---
-_orig_torch_load = torch.load
-
-
-def _patched_torch_load(*args, **kwargs):
-    kwargs["weights_only"] = False
-    return _orig_torch_load(*args, **kwargs)
-
-
-torch.load = _patched_torch_load
-# -----------------------------------------------
-
 import hydra
-
-# --- WORKAROUND FOR FAIRSEQ HYDRA EXPERIMENTAL IMPORT ---
-import hydra.experimental
-
-hydra.experimental.initialize = hydra.initialize
-hydra.experimental.initialize_config_module = hydra.initialize_config_module
-hydra.experimental.initialize_config_dir = hydra.initialize_config_dir
-hydra.experimental.compose = hydra.compose
-
-import hydra.experimental.initialize as _hydra_exp_init
-
-_hydra_exp_init.initialize = hydra.initialize
-_hydra_exp_init.initialize_config_module = hydra.initialize_config_module
-_hydra_exp_init.initialize_config_dir = hydra.initialize_config_dir
-
-import hydra.experimental.compose as _hydra_exp_compose
-
-_hydra_exp_compose.compose = hydra.compose
-# --------------------------------------------------------
-
 import logging
 import datetime
+import dataclasses
 from vocos import Vocos
 from typing import Dict, List
 import matplotlib.pyplot as plt
@@ -100,6 +30,7 @@ from evaluate import run_evaluation
 from modules.builder import build_model
 from data.audio_dataset import DataCollator
 from data.audio_dataset import TrainDatasetWrapper
+from data.pitch_extractor import PitchExtractor
 
 # Set up logging
 logging.basicConfig(
@@ -185,10 +116,7 @@ class VAEtrainer(Trainer):
             "mu_mean",
             "mu_var",
         ]
-        if (
-            getattr(self.model.encoder.config, "vq_config", None) is not None
-            or getattr(self.model.encoder.config, "bsq_config", None) is not None
-        ):
+        if getattr(self.model.encoder.config, "vq_config", None) is not None:
             granular_losses.extend(
                 [
                     "vq_loss",
@@ -197,14 +125,13 @@ class VAEtrainer(Trainer):
                     "vq_codes_used_frac",
                 ]
             )
-        if (
-            getattr(self.model.encoder.config, "semantic_distillation_config", None)
-            is not None
-        ):
+        if getattr(self.model.encoder.config, "pitch_loss_config", None) is not None:
             granular_losses.extend(
                 [
-                    "distill_cosine_loss",
-                    "distill_ortho_loss",
+                    "acoustic_f0_loss",
+                    "semantic_f0_adv_loss",
+                    "pitch_voiced_loss",
+                    "pitch_contour_loss",
                 ]
             )
         self.add_callback(AddGranularLossesToTrainerState(granular_losses))
@@ -354,44 +281,37 @@ class VAEtrainer(Trainer):
             return
 
         # Save VAEConfig alongside the model
-        if output_dir is None:
-            output_dir = self.args.output_dir
-
-        if output_dir is not None:
-            import os
-            import json
-            import dataclasses
-
-            config_path = os.path.join(output_dir, "config.json")
-            with open(config_path, "w") as f:
-                json.dump(dataclasses.asdict(self.model.config), f, indent=4)
+        config_path = os.path.join(self.args.output_dir, "config.json")
+        with open(config_path, "w") as f:
+            json.dump(dataclasses.asdict(self.model.config), f, indent=4)
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         if hasattr(self.control, "granular_losses") and model.training:
             audios_srs = inputs["output_audios_srs"]
-            feature_audios_srs = inputs.get("perturbed_audio_srs", audios_srs)
+
+            feature_audios_srs = inputs.get(
+                "perturbed_audio_srs", audios_srs
+            )  # audio in input can be pitchshifted, thats why we do this
+
             output = model(
                 audios_srs=audios_srs,
                 feature_audios_srs=feature_audios_srs,
                 training_step=self.state.global_step,
-                phoneme_alignments=inputs.get("phoneme_alignments", None),
+                pitch_targets=inputs.get("pitch_targets", None),
             )
+
+            # primary losses
             audio_loss = output.audio_loss
             kl_loss = output.kl_loss
             vq_loss = getattr(output, "vq_loss", None)
             vq_stats = getattr(output, "vq_stats", None)
             loss = audio_loss + kl_loss + (vq_loss if vq_loss is not None else 0.0)
 
-            distill_cosine_loss = getattr(output, "distill_cosine_loss", None)
-            distill_ortho_loss = getattr(output, "distill_ortho_loss", None)
-            actual_model = model.module if hasattr(model, "module") else model
-            sem_cfg = getattr(
-                actual_model.encoder.config, "semantic_distillation_config", None
-            )
-            if distill_cosine_loss is not None and sem_cfg is not None:
-                loss += distill_cosine_loss * sem_cfg.cosine_loss_weight
-            if distill_ortho_loss is not None and sem_cfg is not None:
-                loss += distill_ortho_loss * sem_cfg.ortho_loss_weight
+            # optional losses
+            acoustic_f0_loss = getattr(output, "acoustic_f0_loss", None)
+            semantic_f0_adv_loss = getattr(output, "semantic_f0_adv_loss", None)
+            pitch_voiced_loss = getattr(output, "pitch_voiced_loss", None)
+            pitch_contour_loss = getattr(output, "pitch_contour_loss", None)
 
             # Accumulate granular losses
             flat_metrics = {
@@ -400,8 +320,10 @@ class VAEtrainer(Trainer):
                 "mu_mean": getattr(output, "mu_mean", None),
                 "mu_var": getattr(output, "mu_var", None),
                 "vq_loss": vq_loss,
-                "distill_cosine_loss": distill_cosine_loss,
-                "distill_ortho_loss": distill_ortho_loss,
+                "acoustic_f0_loss": acoustic_f0_loss,
+                "semantic_f0_adv_loss": semantic_f0_adv_loss,
+                "pitch_voiced_loss": pitch_voiced_loss,
+                "pitch_contour_loss": pitch_contour_loss,
             }
             if vq_stats is not None:
                 flat_metrics["vq_perplexity"] = vq_stats.perplexity
@@ -592,36 +514,14 @@ class VAEtrainer(Trainer):
         if self._vocoder is not None:
             return self._vocoder, self._vocoder_type
 
-        if getattr(self.model.config.mel_spectrogram_config, "use_bigvgan_mel", False):
-            import sys
-            import os
-
-            # Try to find bigvgan in the current workspace first
-            current_dir = os.path.dirname(os.path.abspath(__file__))
-            bigvgan_path = os.path.join(
-                current_dir, "bigvgan/bigvgan_v2_24khz_100band_256x"
-            )
-
-            # Fallback to the hardcoded path if it doesn't exist locally
-            if not os.path.exists(bigvgan_path):
-                bigvgan_path = "/home/piermel/links/scratch/MelCausalVAE/bigvgan/bigvgan_v2_24khz_100band_256x"
-
-            if bigvgan_path not in sys.path:
-                sys.path.append(bigvgan_path)
-            import bigvgan
-
-            vocoder = bigvgan.BigVGAN.from_pretrained(
-                bigvgan_path, use_cuda_kernel=False
-            )
-            vocoder_type = "bigvgan"
-        else:
-            vocoder = Vocos.from_pretrained("charactr/vocos-mel-24khz")
-            vocoder_type = "vocos"
-
+        vocoder = Vocos.from_pretrained("charactr/vocos-mel-24khz")
+        vocoder_type = "vocos"
         vocoder.to(self.args.device)
         vocoder.eval()
+
         self._vocoder = vocoder
         self._vocoder_type = vocoder_type
+
         return vocoder, vocoder_type
 
     def _generate_and_log_samples(self):
@@ -854,16 +754,49 @@ class VAEtrainer(Trainer):
         return fig
 
 
+def get_dataset(dataset_name: str):
+    if dataset_name == "mls":
+        raise NotImplementedError("MLS dataset support is not implemented yet.")
+
+    elif dataset_name == "libritts":
+        raise NotImplementedError("LibriTTS dataset support is not implemented yet.")
+
+    elif dataset_name in [
+        "librispeech_aligned",
+        "librispeech-aligned",
+    ]:  # FIXME those are typos
+        from data.librispeech_align import LibriSpeechAlignDataset
+
+        dataset = LibriSpeechAlignDataset()
+
+    elif dataset_name in ["libritts-r", "libritts_r"]:  # FIXME those are typos
+        from data.libri_tts_r import LibriTTSR
+
+        dataset = LibriTTSR()
+
+    else:
+        raise ValueError(f"Dataset {dataset_name} not supported")
+
+    return dataset
+
+
+def init_wandb(wandb_project: str, wandb_run_name: str, wandb_id: str):
+    wandb.init(
+        project=wandb_project,
+        name=wandb_run_name,
+        id=wandb_id,
+        resume="allow" if wandb_id else None,
+    )
+    logger.info(f"Initialized W&B (id: {wandb_id})")
+
+
 @hydra.main(version_base=None, config_path="configs", config_name="main")
 def main(cfg: DictConfig):
     # Convert OmegaConf DictConfig to standard python dict
     cfg_dict = OmegaConf.to_container(cfg, resolve=True)
 
-    training_cfg = cfg_dict.get("training", {})
-
-    # Increase timeout to 2 hours for lengthy evaluation on Rank 0
-    kwargs = InitProcessGroupKwargs(timeout=datetime.timedelta(seconds=7200))
-    accelerator = Accelerator(kwargs_handlers=[kwargs])
+    training_cfg = cfg_dict.get("training")
+    accelerator = Accelerator()
     logger.info(f"Using device: {accelerator.device}")
     logger.info(f"Mixed precision: {accelerator.state.mixed_precision}")
 
@@ -871,59 +804,41 @@ def main(cfg: DictConfig):
     set_seed(training_cfg.get("seed", 42))
 
     # Create AudioDataset
-    dataset_name = training_cfg.pop("dataset_name", None)
-    if dataset_name == "mls":
-        from data.mls import MLSDataset
-
-        dataset = MLSDataset()
-    elif dataset_name == "libritts":
-        from data.libri_tts import LibriTTS
-
-        dataset = LibriTTS()
-    elif dataset_name in ["librispeech_aligned", "librispeech-aligned"]:
-        from data.librispeech_align import LibriSpeechAlignDataset
-
-        dataset = LibriSpeechAlignDataset()
-    elif dataset_name in ["libritts-r", "libritts_r"]:
-        from data.libri_tts_r import LibriTTSR
-
-        dataset = LibriTTSR()
-    else:
-        raise ValueError(f"Dataset {dataset_name} not supported")
+    dataset_name = training_cfg.get("dataset_name")
+    dataset = get_dataset(dataset_name)
     enable_perturbed_audio = bool(training_cfg.pop("enable_perturbed_audio", False))
     perturbed_pitch_shift_max_semitones = float(
         training_cfg.pop("perturbed_pitch_shift_max_semitones", 8.0)
-    )
-
-    train_dataset = TrainDatasetWrapper(
-        dataset,
-        "train", # FIXME this is a bug
-        enable_perturbed_audio=enable_perturbed_audio,
-        perturbed_pitch_shift_max_semitones=perturbed_pitch_shift_max_semitones,
-    )
-    test_dataset = TestDatasetWrapper(
-        dataset,
-        "test",
-        enable_perturbed_audio=enable_perturbed_audio,
-        perturbed_pitch_shift_max_semitones=perturbed_pitch_shift_max_semitones,
     )
     # handle wandb - only initialize on main process
     wandb_project = training_cfg.pop("wandb_project", None)
     wandb_run_name = training_cfg.pop("wandb_run_name", None)
     wandb_id = training_cfg.pop("wandb_id", None)
     if training_cfg.get("report_to", "none") == "wandb" and accelerator.is_main_process:
-        wandb.init(
-            project=wandb_project,
-            name=wandb_run_name,
-            id=wandb_id,
-            resume="allow" if wandb_id else None,
-        )
-        logger.info(f"Initialized W&B on main process (id: {wandb_id})")
+        init_wandb(wandb_project, wandb_run_name, wandb_id)
 
     logger.info("Creating VAE model...")
     model = build_model(cfg_dict)
-    if getattr(model.config.mel_spectrogram_config, "use_bigvgan_mel", False):
-        logger.info("Using BigVGAN-compatible mel spectrogram")
+    pitch_extractor = None
+    if getattr(model.config.encoder_config, "pitch_loss_config", None) is not None:
+        pitch_extractor = PitchExtractor(
+            model.config.encoder_config,
+            sampling_rate=model.config.mel_spectrogram_config.sampling_rate,
+            hop_length=model.config.mel_spectrogram_config.hop_length,
+        )
+        logger.info("Enabled online torchcrepe pitch extraction in training dataset.")
+
+    train_dataset = TrainDatasetWrapper(
+        dataset,
+        "train",
+        enable_perturbed_audio=enable_perturbed_audio,
+        perturbed_pitch_shift_max_semitones=perturbed_pitch_shift_max_semitones,
+        pitch_extractor=pitch_extractor,
+    )
+    test_dataset = TestDatasetWrapper(
+        dataset,
+        "test",
+    )
 
     training_cfg["learning_rate"] = float(training_cfg.get("learning_rate"))
     min_learning_rate = float(training_cfg.pop("min_learning_rate", 0.0))
@@ -1007,8 +922,6 @@ def main(cfg: DictConfig):
     )
     logger.info(f"TrainingArgs bf16 enabled: {training_args.bf16}")
 
-    
-
     # Create trainer
     data_collator = DataCollator()
     trainer = VAEtrainer(
@@ -1018,7 +931,7 @@ def main(cfg: DictConfig):
         eval_dataset=test_dataset,
         data_collator=data_collator,
         min_learning_rate=min_learning_rate,
-        dataset_name=dataset_name or "librispeech",
+        dataset_name=dataset_name,
         generate_and_log_samples=generate_and_log_samples,
         eval_num_samples=eval_num_samples,
         run_id=run_id,

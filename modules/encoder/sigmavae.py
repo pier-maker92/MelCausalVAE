@@ -22,7 +22,7 @@ class SigmaVAEEncoder(nn.Module):
         self,
         mu: torch.FloatTensor,
         logvar: Optional[torch.FloatTensor] = None,
-        std: Optional[float] = None,
+        std: float = 1.0,
     ) -> torch.FloatTensor:
         eps = torch.randn_like(mu)
         if logvar is None:
@@ -93,7 +93,9 @@ class SigmaVAEEncoder(nn.Module):
         k = 20.0
         x0 = 0.3
         sweep = torch.sigmoid(k * (x - x0))
-        sweep_start = torch.sigmoid(torch.tensor(-k * x0, dtype=mu.dtype, device=mu.device))
+        sweep_start = torch.sigmoid(
+            torch.tensor(-k * x0, dtype=mu.dtype, device=mu.device)
+        )
         sweep_end = torch.sigmoid(
             torch.tensor(k * (1.0 - x0), dtype=mu.dtype, device=mu.device)
         )
