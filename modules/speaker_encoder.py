@@ -53,7 +53,7 @@ class WavLMSpeakerEncoder(nn.Module):
 
         self.config = config
         self.sampling_rate = config.sampling_rate
-        self.layers = list(config.wavlm_layers or [6])
+        requested_layers = config.wavlm_layers
         self.layer_combine = config.wavlm_layer_combine
         self.pooling = config.wavlm_pooling
         self.normalize_features = config.wavlm_normalize_features
@@ -70,6 +70,10 @@ class WavLMSpeakerEncoder(nn.Module):
 
         self.wavlm = WavLMModel.from_pretrained(config.pretrained_model_name)
         max_layer = self.wavlm.config.num_hidden_layers
+        if requested_layers == "*" or requested_layers == ["*"]:
+            self.layers = list(range(max_layer + 1))
+        else:
+            self.layers = list(requested_layers or [6])
         if min(self.layers) < 0 or max(self.layers) > max_layer:
             raise ValueError(
                 f"wavlm_layers must be in [0, {max_layer}] for "

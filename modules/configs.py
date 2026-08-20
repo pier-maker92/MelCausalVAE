@@ -1,4 +1,4 @@
-from typing import Optional, List
+from typing import Optional, List, Union
 from dataclasses import dataclass, field, asdict
 import json
 import warnings
@@ -288,7 +288,7 @@ class SpeakerEncoderConfig:
     pretrained_model_name: str = "speechbrain/spkrec-ecapa-voxceleb"
     sampling_rate: int = 16000
     embedding_dim: int = 192
-    wavlm_layers: Optional[list[int]] = None
+    wavlm_layers: Optional[Union[list[int], str]] = None
     wavlm_layer_weights: Optional[list[float]] = None
     wavlm_layer_combine: str = "weighted_sum"
     wavlm_pooling: str = "mean_std"
@@ -306,8 +306,18 @@ class SpeakerEncoderConfig:
             and self.pretrained_model_name == "speechbrain/spkrec-ecapa-voxceleb"
         ):
             self.pretrained_model_name = "microsoft/wavlm-large"
-        if self.wavlm_layers is not None and len(self.wavlm_layers) == 0:
+        all_layers = self.wavlm_layers == "*" or self.wavlm_layers == ["*"]
+        if (
+            self.wavlm_layers is not None
+            and not all_layers
+            and len(self.wavlm_layers) == 0
+        ):
             raise ValueError("speaker_encoder_config.wavlm_layers cannot be empty.")
+        if all_layers and self.wavlm_layer_weights is not None:
+            raise ValueError(
+                "speaker_encoder_config.wavlm_layer_weights cannot be used with "
+                "wavlm_layers='*'."
+            )
         if self.wavlm_layer_weights is not None and self.wavlm_layers is None:
             raise ValueError(
                 "speaker_encoder_config.wavlm_layer_weights requires wavlm_layers."

@@ -23,6 +23,8 @@ decoder:
 #   pretrained_model_name: microsoft/wavlm-large
 #   embedding_dim: 128
 #   wavlm_layers: [1, 2]
+#   # Use "*" to combine every WavLM hidden state.
+#   # wavlm_layers: "*"
 #   wavlm_layer_combine: weighted_sum
 #   wavlm_pooling: mean_std
 speaker_encoder_config: null
