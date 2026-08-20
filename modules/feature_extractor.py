@@ -1,22 +1,15 @@
-import sys
 import json
 import torch
 import einops
 from torch import nn
-from einops import rearrange
 from typing import Tuple, List
+import torchaudio.functional as F
+from transformers import WavLMModel
 from .configs import MelSpectrogramConfig, WavLMConfig
 from torchaudio.transforms import MelSpectrogram
 from .output_dataclasses import FeatureExtractorOutput
 
-try:
-    from transformers import WavLMModel
-except ImportError:
-    WavLMModel = None
 
-
-# TODO fix implementation for bigvgan
-# from meldataset import get_mel_spectrogram as get_mel_spectrogram_bigvgan
 class AttrDict(dict):
     def __init__(self, *args, **kwargs):
         super(AttrDict, self).__init__(*args, **kwargs)
@@ -42,10 +35,6 @@ class FeatureExtractor(nn.Module):
         self.n_mels = config.n_mels
         self.padding = config.padding
         self.normalize = config.normalize
-        self.use_bigvgan_mel = config.use_bigvgan_mel
-
-        if self.use_bigvgan_mel:
-            raise NotImplementedError("BigVGAN mel not implemented yet")
 
         self.mel_transform = MelSpectrogram(
             sample_rate=self.sampling_rate,
@@ -82,7 +71,6 @@ class FeatureExtractor(nn.Module):
             )
         sr = unique_sampling_rates.pop()
         if sr != self.sampling_rate:
-            import torchaudio.functional as F
 
             audios = [F.resample(audio, sr, self.sampling_rate) for audio in audios]
         dtype = audios[0].dtype
@@ -198,8 +186,6 @@ class WavLMFeatureExtractor(nn.Module):
             )
         sr = unique_sampling_rates.pop()
         if sr != self.sampling_rate:
-            import torchaudio.functional as F
-
             audios = [F.resample(audio, sr, self.sampling_rate) for audio in audios]
 
         dtype = audios[0].dtype

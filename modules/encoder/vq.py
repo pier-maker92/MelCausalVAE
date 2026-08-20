@@ -37,6 +37,7 @@ def _batch_vq_stats(
         codes_used_frac=codes_used_frac.detach(),
     )
 
+
 class VectorQuantizer(nn.Module):
     def __init__(
         self,
@@ -51,7 +52,9 @@ class VectorQuantizer(nn.Module):
         self.pitch_loss = None
         if pitch_loss_config is not None:
             if acoustic_dim is None:
-                raise ValueError("acoustic_dim is required when pitch_loss_config is set.")
+                raise ValueError(
+                    "acoustic_dim is required when pitch_loss_config is set."
+                )
             self.pitch_loss = PitchLoss(
                 pitch_loss_config,
                 semantic_dim=dim,
@@ -65,10 +68,14 @@ class VectorQuantizer(nn.Module):
             self.quantizer = BinarySphericalQuantizer(codebook_size=self.num_embeddings)
         elif self.vq_type == "vq":
             from .std_vq import StandardVectorQuantizer
+
             vq_dim = getattr(config, "vq_dim")
-            self.quantizer = StandardVectorQuantizer(dim=vq_dim, codebook_size=self.num_embeddings)
+            self.quantizer = StandardVectorQuantizer(
+                dim=vq_dim, codebook_size=self.num_embeddings
+            )
         elif self.vq_type == "vq_ema":
             from .vq_ema import EMAVectorQuantizer
+
             vq_dim = getattr(config, "vq_dim")
             self.quantizer = EMAVectorQuantizer(
                 dim=vq_dim,
@@ -80,8 +87,6 @@ class VectorQuantizer(nn.Module):
             )
         else:
             raise ValueError(f"Unknown vq_type: {self.vq_type}")
-        
-        self.recon_weight = getattr(config, "recon_weight", None)
 
         self.proj_in = nn.Sequential(
             nn.Linear(self.dim, self.quantizer.dim, bias=False),
@@ -108,14 +113,14 @@ class VectorQuantizer(nn.Module):
             VQVAEOutput
         """
         B, T, D = z.shape
-        
+
         if D != self.dim:
             raise ValueError(
                 f"VectorQuantizer expected {self.dim} dimensions, received {D}."
             )
 
         z_proj = self.proj_in(z)
-        
+
         if padding_mask is None:
             valid = torch.ones(B, T, dtype=torch.bool, device=z.device)
         else:
@@ -142,11 +147,11 @@ class VectorQuantizer(nn.Module):
 
         # Straight-Through Estimator (STE)
         z_q_proj_st = z_proj + (z_q_proj - z_proj).detach()
-        
+
         z_q = self.proj_out(z_q_proj_st)
 
         z_residual = z - z_q.detach()
-        
+
         # Compute stats using all valid positions
         stats = _batch_vq_stats(indices_bt, valid, self.num_embeddings, z)
 
@@ -163,15 +168,13 @@ class VectorQuantizer(nn.Module):
                 )
             else:
                 total_loss = self.config.commitment_weight * commitment_loss
-        
-        if self.recon_weight is not None:
-            recon_loss = F.mse_loss(z_q[valid], z[valid])
-            total_loss = total_loss + self.recon_weight * recon_loss
 
         pitch_losses = {}
         if self.pitch_loss is not None and pitch_targets is not None:
             if acoustic is None:
-                raise ValueError("acoustic is required when pitch targets are provided.")
+                raise ValueError(
+                    "acoustic is required when pitch targets are provided."
+                )
             pitch_losses = self.pitch_loss(
                 semantic_quantized=z_q,
                 acoustic=acoustic,

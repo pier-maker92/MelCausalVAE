@@ -1,9 +1,8 @@
-import os
-import json
-from dataclasses import fields
-from typing import Dict, Any
-
 from .VAE import VAE
+from typing import Dict, Any
+from dataclasses import fields
+from .configs import WavLMConfig
+
 from .configs import (
     VAEConfig,
     VAEStandardConfig,
@@ -133,14 +132,9 @@ def build_model(cfg_dict: Dict[str, Any]) -> VAE:
         **_filter_dataclass_kwargs(EncoderConfig, encoder_cfg),
     )
 
-    mel_spec_cfg["use_bigvgan_mel"] = cfg_dict.get(
-        "use_bigvgan_mel", mel_spec_cfg.get("use_bigvgan_mel", False)
-    )
     mel_spec_config = MelSpectrogramConfig(
         **_filter_dataclass_kwargs(MelSpectrogramConfig, mel_spec_cfg)
     )
-
-    from .configs import WavLMConfig
 
     wavlm_dict = cfg_dict.get("wavlm_config", None)
     wavlm_config = (

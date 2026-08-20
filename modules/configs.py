@@ -114,13 +114,12 @@ class NoiseConfig(RegularizationConfig, DeprecatedConfigMixin):
     def __post_init__(self):
         self.check_deprecated()
 
+
 @dataclass
 class VQConfig:
     num_embeddings: int
-    add_residual:bool
-    add_residual_p:float
-    drop_acoustic_p:float
-    vq_type: str # "bsq" or "fsq" or "vq" or "vq_ema"
+    drop_acoustic_p: float
+    vq_type: str  # "bsq" or "fsq" or "vq" or "vq_ema"
     vq_dim: Optional[int] = None
     commitment_weight: float = 0.25
     ema_decay: float = 0.99
@@ -130,24 +129,11 @@ class VQConfig:
     # BSQ-only: per-bit entropy regularization to prevent codebook collapse.
     entropy_loss_weight: float = 0.0
     entropy_temperature: float = 1.0
-    dim_to_quantize: Optional[int] = None
-    recon_weight: Optional[float] = None
 
     def __post_init__(self):
         if self.vq_type not in {"bsq", "fsq", "vq", "vq_ema"}:
             raise ValueError("vq_type must be one of: bsq, fsq, vq, vq_ema.")
-        if not 0.0 <= self.add_residual_p <= 1.0:
-            raise ValueError("add_residual_p must be in [0, 1].")
-        if self.entropy_loss_weight < 0.0:
-            raise ValueError("entropy_loss_weight must be >= 0.")
-        if self.entropy_temperature <= 0.0:
-            raise ValueError("entropy_temperature must be > 0.")
-        if not 0.0 < self.ema_decay < 1.0:
-            raise ValueError("ema_decay must be in (0, 1).")
-        if self.ema_eps <= 0.0:
-            raise ValueError("ema_eps must be > 0.")
-        if self.reset_every_forward <= 0:
-            raise ValueError("reset_every_forward must be > 0.")
+
 
 @dataclass
 class SemanticDistillationConfig:
@@ -403,11 +389,6 @@ class VAEConfig:
         acoustic_dim = self.encoder_config.acoustic_dim
         if semantic_dim <= 0 or acoustic_dim <= 0:
             raise ValueError("semantic_dim and acoustic_dim must both be > 0.")
-        if semantic_dim + acoustic_dim != self.latent_dim:
-            raise ValueError(
-                "semantic_dim + acoustic_dim must match latent_dim "
-                f"({semantic_dim} + {acoustic_dim} != {self.latent_dim})."
-            )
 
     def to_dict(self):
         """Convert config to dict for W&B logging compatibility"""

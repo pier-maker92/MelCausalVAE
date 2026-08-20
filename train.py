@@ -804,7 +804,7 @@ def main(cfg: DictConfig):
     set_seed(training_cfg.get("seed", 42))
 
     # Create AudioDataset
-    dataset_name = training_cfg.get("dataset_name")
+    dataset_name = training_cfg.pop("dataset_name", None)
     dataset = get_dataset(dataset_name)
     enable_perturbed_audio = bool(training_cfg.pop("enable_perturbed_audio", False))
     perturbed_pitch_shift_max_semitones = float(
