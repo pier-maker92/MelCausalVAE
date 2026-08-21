@@ -12,7 +12,7 @@ training:
   
   num_train_epochs: 10
   dataset_name: libritts-r
-  output_dir: checkpoints/exps/dicodec-f0
+  output_dir: checkpoints/exps/rorqual-layer18
   per_device_train_batch_size: 8
   per_device_eval_batch_size: 2
 
@@ -27,7 +27,7 @@ training:
 
   report_to: wandb
   wandb_project: dicodec
-  wandb_run_name: dicodec-f0
+  wandb_run_name: rorqual-layer18
 
   fp16: false
   bf16: true
@@ -61,44 +61,30 @@ encoder:
   tf_heads: 8
   tf_layers: 4
   n_residual_blocks: 3
+  logvar_layer: false
   target_std: 1.0
   kl_loss_warmup_ratio: 0.1
   kl_loss_weight: 1e-3
-  # dual branch specs
-  semantic_dim: 8
-  acoustic_dim: 16
-  # acoustic vae / ae
-  acoustic_logvar: true
   use_reparameterization_trick: true
+  use_std_sweep: false
+  semantic_downsample_factor: 1
 
   vq_config:
     vq_type: vq_ema
-    num_embeddings: 512
+    num_embeddings: 128
+    vq_dim: 4   # o 8/16
     commitment_weight: 0.25
     ema_decay: 0.99
     ema_eps: 1.0e-5
     reset_dead_codes: true
     reset_every_forward: 10
-    drop_acoustic_p: 0.2
+    add_residual: true
+    add_residual_p: 0.8
 
   dropout_regularizer_config: null
   kl_chunk_regularizer_config: null
   noise_regularizer_config: null
   semantic_distillation_config: null
-  pitch_loss_config:
-    fmin: 50.0
-    fmax: 550.0
-    torchcrepe_model: tiny
-    torchcrepe_decoder: weighted_argmax
-    torchcrepe_batch_size: 64
-    torchcrepe_hop_length: null
-    periodicity_threshold: 0.5
-    acoustic_loss_weight: 1.0
-    semantic_adv_loss_weight: 0.1
-    voiced_loss_weight: 0.1
-    contour_loss_weight: 0.0
-    grl_lambda: 1.0
-    grl_warmup_steps: 10000
 
 decoder:
   dit_dim: 768
@@ -113,14 +99,14 @@ decoder:
   kernel_size: 17
   causal_convolution: false
   normalize_context_vector: true
-  speaker_cond_dim: 1024
+  speaker_cond_dim: 512
   local_speaker_conditioning: false
 
 speaker_encoder_config:
   encoder_type: wavlm
   pretrained_model_name: "microsoft/wavlm-large"
   sampling_rate: 16000
-  embedding_dim: 1024
-  wavlm_layers: ["*"]
+  embedding_dim: 512
+  wavlm_layers: [2, 3]
   wavlm_layer_combine: weighted_sum
   wavlm_pooling: mean_std
