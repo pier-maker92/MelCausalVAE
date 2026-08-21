@@ -132,6 +132,7 @@ class VAEtrainer(Trainer):
                     "semantic_f0_adv_loss",
                     "pitch_voiced_loss",
                     "pitch_contour_loss",
+                    "acoustic_semantic_adv_loss",
                 ]
             )
         self.add_callback(AddGranularLossesToTrainerState(granular_losses))
@@ -312,6 +313,9 @@ class VAEtrainer(Trainer):
             semantic_f0_adv_loss = getattr(output, "semantic_f0_adv_loss", None)
             pitch_voiced_loss = getattr(output, "pitch_voiced_loss", None)
             pitch_contour_loss = getattr(output, "pitch_contour_loss", None)
+            acoustic_semantic_adv_loss = getattr(
+                output, "acoustic_semantic_adv_loss", None
+            )
 
             # Accumulate granular losses
             flat_metrics = {
@@ -324,6 +328,7 @@ class VAEtrainer(Trainer):
                 "semantic_f0_adv_loss": semantic_f0_adv_loss,
                 "pitch_voiced_loss": pitch_voiced_loss,
                 "pitch_contour_loss": pitch_contour_loss,
+                "acoustic_semantic_adv_loss": acoustic_semantic_adv_loss,
             }
             if vq_stats is not None:
                 flat_metrics["vq_perplexity"] = vq_stats.perplexity

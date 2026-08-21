@@ -22,6 +22,7 @@ class VQVAEOutput(ModelOutput):
     semantic_f0_adv_loss: Optional[torch.FloatTensor] = None
     pitch_voiced_loss: Optional[torch.FloatTensor] = None
     pitch_contour_loss: Optional[torch.FloatTensor] = None
+    acoustic_semantic_adv_loss: Optional[torch.FloatTensor] = None
 
 
 @dataclass
@@ -43,6 +44,7 @@ class EncoderOutput(ModelOutput):
     semantic_f0_adv_loss: Optional[torch.FloatTensor] = None
     pitch_voiced_loss: Optional[torch.FloatTensor] = None
     pitch_contour_loss: Optional[torch.FloatTensor] = None
+    acoustic_semantic_adv_loss: Optional[torch.FloatTensor] = None
 
 
 @dataclass
@@ -62,6 +64,7 @@ class VAEOutput(ModelOutput):
     semantic_f0_adv_loss: Optional[torch.FloatTensor] = None
     pitch_voiced_loss: Optional[torch.FloatTensor] = None
     pitch_contour_loss: Optional[torch.FloatTensor] = None
+    acoustic_semantic_adv_loss: Optional[torch.FloatTensor] = None
 
 
 @dataclass

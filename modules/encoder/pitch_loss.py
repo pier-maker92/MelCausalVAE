@@ -26,6 +26,9 @@ class PitchLoss(nn.Module):
         self.config = config
         self.acoustic_f0_head = self._make_pitch_head(acoustic_dim)
         self.semantic_f0_head = self._make_pitch_head(semantic_dim)
+        self.acoustic_to_semantic_head = self._make_semantic_head(
+            acoustic_dim, semantic_dim
+        )
 
     @staticmethod
     def _make_pitch_head(input_dim: int):
@@ -36,6 +39,17 @@ class PitchLoss(nn.Module):
             nn.Linear(hidden_dim, 2),
         )
 
+    @staticmethod
+    def _make_semantic_head(input_dim: int, output_dim: int):
+        hidden_dim = max(64, min(512, input_dim * 2))
+        return nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, output_dim),
+        )
+
     def forward(
         self,
         semantic_quantized: torch.Tensor,
@@ -44,65 +58,77 @@ class PitchLoss(nn.Module):
         padding_mask: Optional[torch.BoolTensor],
         step: Optional[int] = None,
     ):
-        if pitch_targets is None:
-            zero = semantic_quantized.new_zeros(())
-            return {
-                "loss": zero,
-                "acoustic_f0_loss": None,
-                "semantic_f0_adv_loss": None,
-                "pitch_voiced_loss": None,
-                "pitch_contour_loss": None,
-            }
-
-        log_f0, voiced = self._align_pitch_targets(
-            pitch_targets,
-            acoustic.shape[1],
-            device=acoustic.device,
-            dtype=acoustic.dtype,
-        )
         if padding_mask is None:
             valid = torch.ones(
                 acoustic.shape[:2], device=acoustic.device, dtype=torch.bool
             )
         else:
             valid = ~padding_mask
-        voiced_valid = valid & voiced
 
-        acoustic_pred = self.acoustic_f0_head(acoustic)
-        acoustic_log_f0 = acoustic_pred[..., 0]
-        acoustic_voiced_logits = acoustic_pred[..., 1]
-
-        acoustic_f0_loss = self._masked_smooth_l1(
-            acoustic_log_f0, log_f0, voiced_valid
-        )
-        pitch_voiced_loss = self._masked_bce(
-            acoustic_voiced_logits, voiced.to(acoustic_voiced_logits.dtype), valid
-        )
-        pitch_contour_loss = self._masked_contour_l1(
-            acoustic_log_f0, log_f0, voiced, valid
+        acoustic_semantic_adv_loss = self._acoustic_semantic_adv_loss(
+            acoustic=acoustic,
+            semantic_target=semantic_quantized.detach(),
+            valid=valid,
+            step=step,
         )
 
-        semantic_reversed = grad_reverse(
-            semantic_quantized, self._pitch_grl_lambda(step)
-        )
-        semantic_pred = self.semantic_f0_head(semantic_reversed)
-        semantic_log_f0 = semantic_pred[..., 0]
-        semantic_voiced_logits = semantic_pred[..., 1]
-        semantic_f0_loss = self._masked_smooth_l1(
-            semantic_log_f0, log_f0, voiced_valid
-        )
-        semantic_voiced_loss = self._masked_bce(
-            semantic_voiced_logits, voiced.to(semantic_voiced_logits.dtype), valid
-        )
-        semantic_f0_adv_loss = (
-            semantic_f0_loss + self.config.voiced_loss_weight * semantic_voiced_loss
-        )
+        zero = semantic_quantized.new_zeros(())
+        acoustic_f0_loss = None
+        semantic_f0_adv_loss = None
+        pitch_voiced_loss = None
+        pitch_contour_loss = None
+        pitch_loss = zero
+
+        if pitch_targets is not None:
+            log_f0, voiced = self._align_pitch_targets(
+                pitch_targets,
+                acoustic.shape[1],
+                device=acoustic.device,
+                dtype=acoustic.dtype,
+            )
+            voiced_valid = valid & voiced
+
+            acoustic_pred = self.acoustic_f0_head(acoustic)
+            acoustic_log_f0 = acoustic_pred[..., 0]
+            acoustic_voiced_logits = acoustic_pred[..., 1]
+
+            acoustic_f0_loss = self._masked_smooth_l1(
+                acoustic_log_f0, log_f0, voiced_valid
+            )
+            pitch_voiced_loss = self._masked_bce(
+                acoustic_voiced_logits, voiced.to(acoustic_voiced_logits.dtype), valid
+            )
+            pitch_contour_loss = self._masked_contour_l1(
+                acoustic_log_f0, log_f0, voiced, valid
+            )
+
+            semantic_reversed = grad_reverse(
+                semantic_quantized, self._pitch_grl_lambda(step)
+            )
+            semantic_pred = self.semantic_f0_head(semantic_reversed)
+            semantic_log_f0 = semantic_pred[..., 0]
+            semantic_voiced_logits = semantic_pred[..., 1]
+            semantic_f0_loss = self._masked_smooth_l1(
+                semantic_log_f0, log_f0, voiced_valid
+            )
+            semantic_voiced_loss = self._masked_bce(
+                semantic_voiced_logits, voiced.to(semantic_voiced_logits.dtype), valid
+            )
+            semantic_f0_adv_loss = (
+                semantic_f0_loss + self.config.voiced_loss_weight * semantic_voiced_loss
+            )
+
+            pitch_loss = (
+                self.config.acoustic_loss_weight * acoustic_f0_loss
+                + self.config.semantic_adv_loss_weight * semantic_f0_adv_loss
+                + self.config.voiced_loss_weight * pitch_voiced_loss
+                + self.config.contour_loss_weight * pitch_contour_loss
+            )
 
         loss = (
-            self.config.acoustic_loss_weight * acoustic_f0_loss
-            + self.config.semantic_adv_loss_weight * semantic_f0_adv_loss
-            + self.config.voiced_loss_weight * pitch_voiced_loss
-            + self.config.contour_loss_weight * pitch_contour_loss
+            pitch_loss
+            + self.config.acoustic_semantic_adv_loss_weight
+            * acoustic_semantic_adv_loss
         )
         return {
             "loss": loss,
@@ -110,6 +136,7 @@ class PitchLoss(nn.Module):
             "semantic_f0_adv_loss": semantic_f0_adv_loss,
             "pitch_voiced_loss": pitch_voiced_loss,
             "pitch_contour_loss": pitch_contour_loss,
+            "acoustic_semantic_adv_loss": acoustic_semantic_adv_loss,
         }
 
     def _pitch_grl_lambda(self, step: Optional[int]):
@@ -118,6 +145,29 @@ class PitchLoss(nn.Module):
         return self.config.grl_lambda * min(
             1.0, float(step) / float(self.config.grl_warmup_steps)
         )
+
+    def _acoustic_semantic_grl_lambda(self, step: Optional[int]):
+        if self.config.acoustic_semantic_grl_warmup_steps == 0 or step is None:
+            return self.config.acoustic_semantic_grl_lambda
+        return self.config.acoustic_semantic_grl_lambda * min(
+            1.0,
+            float(step) / float(self.config.acoustic_semantic_grl_warmup_steps),
+        )
+
+    def _acoustic_semantic_adv_loss(
+        self,
+        acoustic: torch.Tensor,
+        semantic_target: torch.Tensor,
+        valid: torch.BoolTensor,
+        step: Optional[int],
+    ):
+        if self.config.acoustic_semantic_adv_loss_weight == 0.0:
+            return acoustic.new_zeros(())
+        acoustic_reversed = grad_reverse(
+            acoustic, self._acoustic_semantic_grl_lambda(step)
+        )
+        semantic_pred = self.acoustic_to_semantic_head(acoustic_reversed)
+        return self._masked_smooth_l1(semantic_pred, semantic_target, valid)
 
     def _align_pitch_targets(
         self,

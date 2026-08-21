@@ -155,8 +155,11 @@ class PitchLossConfig:
     semantic_adv_loss_weight: float = 0.1
     voiced_loss_weight: float = 0.1
     contour_loss_weight: float = 0.0
+    acoustic_semantic_adv_loss_weight: float = 0.0
     grl_lambda: float = 1.0
     grl_warmup_steps: int = 0
+    acoustic_semantic_grl_lambda: float = 1.0
+    acoustic_semantic_grl_warmup_steps: int = 0
 
     def __post_init__(self):
         if self.fmin <= 0.0 or self.fmax <= self.fmin:
@@ -177,6 +180,12 @@ class PitchLossConfig:
             raise ValueError("grl_lambda must be >= 0.")
         if self.grl_warmup_steps < 0:
             raise ValueError("grl_warmup_steps must be >= 0.")
+        if self.acoustic_semantic_adv_loss_weight < 0.0:
+            raise ValueError("acoustic_semantic_adv_loss_weight must be >= 0.")
+        if self.acoustic_semantic_grl_lambda < 0.0:
+            raise ValueError("acoustic_semantic_grl_lambda must be >= 0.")
+        if self.acoustic_semantic_grl_warmup_steps < 0:
+            raise ValueError("acoustic_semantic_grl_warmup_steps must be >= 0.")
 
 
 @dataclass

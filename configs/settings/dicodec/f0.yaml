@@ -97,8 +97,11 @@ encoder:
     semantic_adv_loss_weight: 0.1
     voiced_loss_weight: 0.1
     contour_loss_weight: 0.0
+    acoustic_semantic_adv_loss_weight: 0.1
     grl_lambda: 1.0
     grl_warmup_steps: 10000
+    acoustic_semantic_grl_lambda: 1.0
+    acoustic_semantic_grl_warmup_steps: 10000
 
 decoder:
   dit_dim: 768

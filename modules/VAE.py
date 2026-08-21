@@ -387,6 +387,7 @@ class VAE(torch.nn.Module):
             "semantic_f0_adv_loss",
             "pitch_voiced_loss",
             "pitch_contour_loss",
+            "acoustic_semantic_adv_loss",
         ):
             value = getattr(encoder_output, key, None)
             if value is not None:

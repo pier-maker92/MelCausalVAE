@@ -218,6 +218,9 @@ class Encoder(SigmaVAEEncoder):
             out["semantic_f0_adv_loss"] = vq_output.semantic_f0_adv_loss
             out["pitch_voiced_loss"] = vq_output.pitch_voiced_loss
             out["pitch_contour_loss"] = vq_output.pitch_contour_loss
+            out["acoustic_semantic_adv_loss"] = (
+                vq_output.acoustic_semantic_adv_loss
+            )
 
         return EncoderOutput(**out)
 

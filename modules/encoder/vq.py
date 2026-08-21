@@ -194,6 +194,9 @@ class VectorQuantizer(nn.Module):
             semantic_f0_adv_loss=pitch_losses.get("semantic_f0_adv_loss"),
             pitch_voiced_loss=pitch_losses.get("pitch_voiced_loss"),
             pitch_contour_loss=pitch_losses.get("pitch_contour_loss"),
+            acoustic_semantic_adv_loss=pitch_losses.get(
+                "acoustic_semantic_adv_loss"
+            ),
         )
 
     @property
