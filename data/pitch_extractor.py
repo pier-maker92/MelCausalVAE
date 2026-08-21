@@ -1,3 +1,4 @@
+import math
 from typing import Any, Optional
 
 import torch
@@ -59,6 +60,9 @@ class PitchExtractor:
         )
         voiced = periodicity >= cfg.periodicity_threshold
         log_f0 = torch.log(f0.clamp_min(1.0))
+        log_fmin = math.log(cfg.fmin)
+        log_fmax = math.log(cfg.fmax)
+        log_f0 = (log_f0 - log_fmin) / (log_fmax - log_fmin)
 
         return {
             "log_f0": log_f0.to(device=device, dtype=dtype),
