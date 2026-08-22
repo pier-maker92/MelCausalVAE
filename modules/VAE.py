@@ -690,6 +690,17 @@ class VAE(torch.nn.Module):
                 z = quantized
             else:
                 z = residual
+
+            acoustic = getattr(encoder_output, "mu", None)
+            proj_out = getattr(self.encoder, "proj_out", None)
+            if (
+                acoustic is not None
+                and proj_out is not None
+                and z.shape[-1] + acoustic.shape[-1] == proj_out.in_features
+            ):
+                if not kwargs.get("tail", False):
+                    acoustic = torch.zeros_like(acoustic)
+                z = proj_out(torch.cat([z, acoustic], dim=-1))
         else:
             z = encoder_output.z
         z = z.clone()

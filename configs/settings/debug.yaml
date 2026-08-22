@@ -7,14 +7,14 @@ sample_rate: 24000
 
 training:
   enable_perturbed_audio: false
-  perturbed_pitch_shift_max_semitones: 8.0
+  perturbed_pitch_shift_max_semitones: 0.0
 
   
   num_train_epochs: 10
   dataset_name: libritts-r
-  output_dir: checkpoints/exps/narval-wavlm23
-  per_device_train_batch_size: 1
-  per_device_eval_batch_size: 2
+  output_dir: checkpoints/exps/dicodec-f0-debug
+  per_device_train_batch_size: 4
+  per_device_eval_batch_size: 1
 
   learning_rate: 1e-4
   encoder_lr: 3e-4
@@ -25,17 +25,17 @@ training:
   encoder_min_lr: 1.0e-4
   decoder_min_lr: 5.0e-5
 
-  report_to: wandb
+  report_to: none
   wandb_project: dicodec
-  wandb_run_name: narval-wavlm23
+  wandb_run_name: dicodec-f0-debug
 
   fp16: false
   bf16: true
 
-  save_steps: 1000
-  logging_steps: 10
+  save_steps: 10
+  logging_steps: 1
   eval_strategy: "steps"
-  eval_steps: 1000
+  eval_steps: 10
   save_total_limit: 3
   load_best_model_at_end: false
   metric_for_best_model: "avg_WER"
@@ -48,43 +48,65 @@ training:
   dataloader_num_workers: 8
   dataloader_prefetch_factor: 1
   dataloader_persistent_workers: true
-  eval_num_samples: 100
+  eval_num_samples: 4
 
 wavlm_config:
   pretrained_model_name: "microsoft/wavlm-large"
-  layer: 23
+  layer: 18
   sampling_rate: 16000
   normalize: true
 
 encoder:
-  d_model: 1024
+  d_model: 512
   tf_heads: 8
   tf_layers: 4
   n_residual_blocks: 3
-  logvar_layer: false
   target_std: 1.0
   kl_loss_warmup_ratio: 0.1
   kl_loss_weight: 1e-3
-  use_reparameterization_trick: false
-  use_std_sweep: false
-  semantic_downsample_factor: 1
+  # dual branch specs
+  semantic_dim: 8
+  acoustic_dim: 16
+  # acoustic vae / ae
+  acoustic_logvar: true
+  use_reparameterization_trick: true
 
-  vq_config: 
-    num_embeddings: 128
-    add_residual: true
-    add_residual_p: 0.5
-    vq_type: "bsq"
+  vq_config:
+    vq_type: vq_ema
+    num_embeddings: 512
     commitment_weight: 0.25
+    ema_decay: 0.99
+    ema_eps: 1.0e-5
+    reset_dead_codes: true
+    reset_every_forward: 10
+    drop_acoustic_p: 0.2
 
   dropout_regularizer_config: null
   kl_chunk_regularizer_config: null
   noise_regularizer_config: null
   semantic_distillation_config: null
+  pitch_loss_config:
+    fmin: 50.0
+    fmax: 550.0
+    torchcrepe_model: tiny
+    torchcrepe_decoder: weighted_argmax
+    torchcrepe_batch_size: 64
+    torchcrepe_hop_length: null
+    periodicity_threshold: 0.5
+    acoustic_loss_weight: 1.0
+    semantic_adv_loss_weight: 0.1
+    voiced_loss_weight: 0.1
+    contour_loss_weight: 0.0
+    acoustic_semantic_adv_loss_weight: 0.1
+    grl_lambda: 1.0
+    grl_warmup_steps: 10000
+    acoustic_semantic_grl_lambda: 1.0
+    acoustic_semantic_grl_warmup_steps: 10000
 
 decoder:
   dit_dim: 768
-  dit_depth: 6
-  dit_heads: 12
+  dit_depth: 4
+  dit_heads: 4
   dit_dropout_rate: 0.1
   use_conv_layer: true
   uncond_prob: 0.15
@@ -94,14 +116,14 @@ decoder:
   kernel_size: 17
   causal_convolution: false
   normalize_context_vector: true
-  speaker_cond_dim: 512
-  local_speaker_conditioning: true
+  speaker_cond_dim: 1024
+  local_speaker_conditioning: false
 
 speaker_encoder_config:
   encoder_type: wavlm
   pretrained_model_name: "microsoft/wavlm-large"
   sampling_rate: 16000
-  embedding_dim: 512
-  wavlm_layers: [1, 2]
+  embedding_dim: 1024
+  wavlm_layers: ["*"]
   wavlm_layer_combine: weighted_sum
   wavlm_pooling: mean_std

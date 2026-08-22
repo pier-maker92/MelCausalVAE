@@ -16,20 +16,31 @@ logger = logging.getLogger(__name__)
 
 
 class UTMOSPredictor:
-    """Standalone UTMOS predictor using utmos."""
+    """Standalone UTMOS predictor using cached SpeechMOS torch hub model."""
 
     def __init__(self, device: torch.device):
         logger.info("Initializing UTMOS model")
-        import utmos
-
-        self.model = utmos.Score()
         self.device = device
+        self.sample_rate = 16000
+        self.model = torch.hub.load(
+            "tarepan/SpeechMOS:v1.2.0",
+            "utmos22_strong",
+            trust_repo=True,
+        )
+        self.model.to(device)
+        self.model.eval()
         logger.info("UTMOS model loaded successfully.")
 
     @torch.no_grad()
     def predict(self, wav_path: str) -> Optional[float]:
-        mos = self.model.calculate_wav_file(str(wav_path))
-        return float(mos)
+        wav, sr = torchaudio.load(wav_path)
+        if wav.shape[0] > 1:
+            wav = wav.mean(dim=0, keepdim=True)
+        if sr != self.sample_rate:
+            wav = torchaudio.functional.resample(wav, sr, self.sample_rate)
+
+        scores = self.model(wav.to(self.device), self.sample_rate)
+        return float(scores.squeeze().detach().cpu().item())
 
 
 class WhisperASR:
