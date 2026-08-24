@@ -224,7 +224,7 @@ class VAEWithStandardDecoder(nn.Module):
             or encoder_output.tail is not None
         ):
             context_vector = torch.zeros_like(encoder_output.z)
-            qd = self.encoder._qd
+            qd = getattr(self.encoder, "_qd", self.config.encoder_config.vq_config.dim_to_quantize if self.config.encoder_config.vq_config else None)
             if kwargs.get("quantized", True) and encoder_output.quantized is not None:
                 context_vector[..., :qd] += encoder_output.quantized
             if kwargs.get("residual", True) and encoder_output.residual is not None:
