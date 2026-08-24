@@ -21,13 +21,23 @@ encoder:
   # --- VQ ---
   vq_config:
     num_embeddings: null
+    dim_to_quantize: null
+    # residual
     add_residual: false
     add_residual_p: 0.0
-    vq_dim: 128
-    entropy_loss_weight: 0.0
-    dim_to_quantize: null
-    recon_weight: null
     drop_acoustic_p: 0.0
+    # vq standard - ema
+    vq_dim: 128
+    recon_weight: null
+    reset_dead_codes: true
+    reset_every_forward: 10
+    ema_decay: 0.95
+    ema_eps: 1.0e-6
+    # bsq
+    entropy_loss_weight: 0.0
+    entropy_temperature: 1.0
+    
+    
 
     
 

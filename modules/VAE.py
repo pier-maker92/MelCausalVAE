@@ -644,25 +644,7 @@ class VAE(torch.nn.Module):
         if kwargs.get("zero_speaker", False) and speaker_embedding is not None:
             speaker_embedding = torch.zeros_like(speaker_embedding)
 
-        use_quantized = kwargs.get("quantized", False)
-        use_residual = kwargs.get("residual", False)
-        if use_quantized or use_residual:
-            quantized = getattr(encoder_output, "quantized", None)
-            residual = getattr(encoder_output, "residual", None)
-            if use_quantized and quantized is None:
-                raise ValueError("Quantized inference requires an encoder quantizer.")
-            if use_residual and residual is None:
-                raise ValueError("Residual inference requires an encoder quantizer.")
-
-            if use_quantized and use_residual:
-                z = quantized + residual
-            elif use_quantized:
-                z = quantized
-            else:
-                z = residual
-        else:
-            z = encoder_output.z
-        z = z.clone()
+        z = encoder_output.z
 
         chunk_size = kwargs.get("chunk_size", None)
         chunk = kwargs.get("chunk", None)

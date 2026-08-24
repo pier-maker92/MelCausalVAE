@@ -74,7 +74,8 @@ class Encoder(SigmaVAEEncoder):
             self.logvar = nn.Linear(d_model, latent_dim)
 
         if config.vq_config:
-            self.vq = VectorQuantizer(config.vq_config, dim=getattr(config.vq_config, "dim_to_quantize", latent_dim))
+            self._qd = getattr(config.vq_config, "dim_to_quantize", latent_dim)
+            self.vq = VectorQuantizer(config.vq_config, dim=self._qd)
 
         if config.dropout_regularizer_config:
             self.dropout_regularizer = DropoutRegularizer(
@@ -227,6 +228,7 @@ class Encoder(SigmaVAEEncoder):
             out["vq_loss"] = vq_output.loss
             out["quantized"] = vq_output.quantized
             out["residual"] = vq_output.residual
+            out["tail"] = acoustic
             out["indices"] = vq_output.indices
 
         return EncoderOutput(**out)

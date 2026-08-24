@@ -2,18 +2,18 @@
 # 15-mel LibriTTS-R baseline with frozen WavLM speaker conditioning and per-layer FiLM.
 compress_factor: 4
 mel_dim: 100
-latent_dim: 64
+latent_dim: 16
 sample_rate: 24000
 
 training:
   enable_perturbed_audio: false
-  perturbed_pitch_shift_max_semitones: 8.0
+  perturbed_pitch_shift_max_semitones: 0.0
 
   
   num_train_epochs: 10
   dataset_name: libritts-r
-  output_dir: checkpoints/exps/narval-wavlm23
-  per_device_train_batch_size: 1
+  output_dir: checkpoints/exps/debug
+  per_device_train_batch_size: 4
   per_device_eval_batch_size: 2
 
   learning_rate: 1e-4
@@ -25,17 +25,17 @@ training:
   encoder_min_lr: 1.0e-4
   decoder_min_lr: 5.0e-5
 
-  report_to: wandb
+  report_to: none
   wandb_project: dicodec
-  wandb_run_name: narval-wavlm23
+  wandb_run_name: debug
 
   fp16: false
   bf16: true
 
-  save_steps: 1000
+  save_steps: 100
   logging_steps: 10
   eval_strategy: "steps"
-  eval_steps: 1000
+  eval_steps: 100
   save_total_limit: 3
   load_best_model_at_end: false
   metric_for_best_model: "avg_WER"
@@ -44,39 +44,51 @@ training:
   vq_collapse_threshold: 0.5
   vq_collapse_patience: 5
 
-  gradient_accumulation_steps: 2
+  gradient_accumulation_steps: 1
   dataloader_num_workers: 8
   dataloader_prefetch_factor: 1
   dataloader_persistent_workers: true
-  eval_num_samples: 100
+  eval_num_samples: 2
 
 wavlm_config:
   pretrained_model_name: "microsoft/wavlm-large"
-  layer: 23
+  layer: 18
   sampling_rate: 16000
   normalize: true
 
 encoder:
-  d_model: 1024
+  d_model: 128
   tf_heads: 8
   tf_layers: 4
   n_residual_blocks: 3
   logvar_layer: false
   target_std: 1.0
   kl_loss_warmup_ratio: 0.1
-  kl_loss_weight: 1e-3
+  kl_loss_weight: 1e-5
   use_reparameterization_trick: false
-  use_std_sweep: false
+  use_std_sweep: true
   semantic_downsample_factor: 1
+  freeze_encoder_before_latent_heads: false
 
   vq_config: 
     num_embeddings: 128
-    add_residual: true
-    add_residual_p: 0.5
-    vq_type: "bsq"
-    commitment_weight: 0.25
+    vq_dim: 128
+    dim_to_quantize: "25%"
+    recon_weight: null
+    vq_type: bsq
+    drop_acoustic_p: 0.3
+    reset_dead_codes: true
+    reset_every_forward: 10
+    entropy_loss_weight: 0.1
+    entropy_temperature: 1.0
 
-  dropout_regularizer_config: null
+  dropout_regularizer_config:
+    chunk_size: 1
+    strategy: "linear"
+    dropout_start: 0.0
+    dropout_end: 0.8
+    dropout_hierarchical: false
+
   kl_chunk_regularizer_config: null
   noise_regularizer_config: null
   semantic_distillation_config: null
@@ -94,14 +106,14 @@ decoder:
   kernel_size: 17
   causal_convolution: false
   normalize_context_vector: true
-  speaker_cond_dim: 512
-  local_speaker_conditioning: true
+  speaker_cond_dim: 1024
+  local_speaker_conditioning: false
 
 speaker_encoder_config:
   encoder_type: wavlm
   pretrained_model_name: "microsoft/wavlm-large"
   sampling_rate: 16000
-  embedding_dim: 512
-  wavlm_layers: [1, 2]
+  embedding_dim: 1024
+  wavlm_layers: [1, 2, 3, 4, 5, 6]
   wavlm_layer_combine: weighted_sum
   wavlm_pooling: mean_std

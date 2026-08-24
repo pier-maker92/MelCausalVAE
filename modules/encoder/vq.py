@@ -148,6 +148,18 @@ class VectorQuantizer(nn.Module):
                 )
             else:
                 total_loss = self.config.commitment_weight * commitment_loss
+
+        if self.vq_type == "bsq" and z_proj_valid is not None:
+            entropy_weight = getattr(self.config, "entropy_loss_weight", 0.0)
+            if entropy_weight > 0.0:
+                temp = getattr(self.config, "entropy_temperature", 1.0)
+                # Probabilità marginale di bit = 1
+                p = torch.sigmoid(z_proj_valid / temp)
+                p_avg = p.mean(dim=0)
+                # Vogliamo massimizzare l'entropia, quindi minimizziamo l'entropia negativa
+                entropy = -p_avg * torch.log(p_avg + 1e-7) - (1 - p_avg) * torch.log(1 - p_avg + 1e-7)
+                entropy_loss = -entropy.mean()
+                total_loss = total_loss + entropy_weight * entropy_loss
         
         if self.recon_weight is not None:
             recon_loss = F.mse_loss(z_q[valid], z[valid])

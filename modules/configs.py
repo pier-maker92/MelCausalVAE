@@ -1,4 +1,4 @@
-from typing import Optional, List
+from typing import Optional, List, Union
 from dataclasses import dataclass, field, asdict
 import json
 import warnings
@@ -123,14 +123,14 @@ class VQConfig:
     vq_type: str # "bsq" or "fsq" or "vq" or "vq_ema"
     vq_dim: Optional[int] = None
     commitment_weight: float = 0.25
-    ema_decay: float = 0.99
+    ema_decay: float = 0.95
     ema_eps: float = 1e-5
     reset_dead_codes: bool = False
     reset_every_forward: int = 10
     # BSQ-only: per-bit entropy regularization to prevent codebook collapse.
     entropy_loss_weight: float = 0.0
     entropy_temperature: float = 1.0
-    dim_to_quantize: Optional[int] = None
+    dim_to_quantize: Optional[Union[int, str]] = None
     recon_weight: Optional[float] = None
 
     def __post_init__(self):
@@ -335,6 +335,13 @@ class VAEConfig:
             spk_dim = self.latent_dim * 2
             self.decoder_config.speaker_cond_dim = spk_dim
 
+        if self.encoder_config.vq_config is not None:
+            vq = self.encoder_config.vq_config
+            if isinstance(vq.dim_to_quantize, str) and vq.dim_to_quantize.endswith("%"):
+                pct = float(vq.dim_to_quantize.strip("%")) / 100.0
+                vq.dim_to_quantize = max(1, int(self.latent_dim * pct))
+                print(f"[VQConfig] dim_to_quantize parsed from string: {vq.dim_to_quantize} (based on latent_dim {self.latent_dim})")
+
     @property
     def hidden_size(self) -> int:
         """Return hidden dimension for DeepSpeed compatibility"""
@@ -391,6 +398,13 @@ class VAEStandardConfig:
         self.decoder_config.mel_dim = self.mel_dim
         self.decoder_config.audio_latent_dim = self.latent_dim
         self.decoder_config.compress_factor = self.compress_factor
+
+        if self.encoder_config.vq_config is not None:
+            vq = self.encoder_config.vq_config
+            if isinstance(vq.dim_to_quantize, str) and vq.dim_to_quantize.endswith("%"):
+                pct = float(vq.dim_to_quantize.strip("%")) / 100.0
+                vq.dim_to_quantize = max(1, int(self.latent_dim * pct))
+                print(f"[VQConfig] dim_to_quantize parsed from string: {vq.dim_to_quantize} (based on latent_dim {self.latent_dim})")
 
     @property
     def hidden_size(self) -> int:
