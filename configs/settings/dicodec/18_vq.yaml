@@ -2,7 +2,7 @@
 # 15-mel LibriTTS-R baseline with frozen WavLM speaker conditioning and per-layer FiLM.
 compress_factor: 4
 mel_dim: 100
-latent_dim: 64
+latent_dim: 16
 sample_rate: 24000
 
 training:
@@ -12,8 +12,8 @@ training:
   
   num_train_epochs: 10
   dataset_name: libritts-r
-  output_dir: checkpoints/exps/rorqual-dicodec-18
-  per_device_train_batch_size: 16
+  output_dir: checkpoints/exps/rorqual-dicodec-18-exp
+  per_device_train_batch_size: 24
   per_device_eval_batch_size: 2
 
   learning_rate: 1e-4
@@ -27,7 +27,7 @@ training:
 
   report_to: wandb
   wandb_project: dicodec
-  wandb_run_name: rorqual-dicodec-18
+  wandb_run_name: rorqual-dicodec-18-exp
 
   fp16: false
   bf16: true
@@ -57,7 +57,7 @@ wavlm_config:
   normalize: true
 
 encoder:
-  d_model: 1024
+  d_model: 512
   tf_heads: 8
   tf_layers: 4
   n_residual_blocks: 3
@@ -70,7 +70,13 @@ encoder:
   semantic_downsample_factor: 1
   freeze_encoder_before_latent_heads: false
 
-  vq_config: null
+  vq_config: 
+    num_embeddings: 128
+    vq_dim: 128
+    dim_to_quantize: 8
+    recon_weight: 1.0
+    vq_type: vq
+    drop_acoustic_p: 0.3
 
   dropout_regularizer_config:
     chunk_size: 1

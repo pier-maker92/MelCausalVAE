@@ -12,7 +12,7 @@ training:
   
   num_train_epochs: 10
   dataset_name: libritts-r
-  output_dir: checkpoints/exps/rorqual-dicodec-18
+  output_dir: checkpoints/exps/rorqual-dicodec-18-baseline
   per_device_train_batch_size: 16
   per_device_eval_batch_size: 2
 
@@ -27,7 +27,7 @@ training:
 
   report_to: wandb
   wandb_project: dicodec
-  wandb_run_name: rorqual-dicodec-18
+  wandb_run_name: rorqual-dicodec-18-baseline
 
   fp16: false
   bf16: true
@@ -72,12 +72,7 @@ encoder:
 
   vq_config: null
 
-  dropout_regularizer_config:
-    chunk_size: 1
-    strategy: "linear"
-    dropout_start: 0.0
-    dropout_end: 0.8
-    dropout_hierarchical: false
+  dropout_regularizer_config: null
 
   kl_chunk_regularizer_config: null
   noise_regularizer_config: null
