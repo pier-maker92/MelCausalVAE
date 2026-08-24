@@ -644,7 +644,17 @@ class VAE(torch.nn.Module):
         if kwargs.get("zero_speaker", False) and speaker_embedding is not None:
             speaker_embedding = torch.zeros_like(speaker_embedding)
 
-        z = encoder_output.z
+        z = torch.zeros_like(encoder_output.z)
+        quantized = torch.zeros_like(z)
+        acoustic = torch.zeros_like(z)
+        if kwargs.get("quantized", False):
+            quantized = torch.cat([encoder_output.quantized, torch.zeros_like(encoder_output.tail)], dim=-1)
+        if kwargs.get("tail", False):
+            acoustic = torch.cat([torch.zeros_like(encoder_output.quantized), encoder_output.tail], dim=-1)
+        z = quantized + acoustic
+        if torch.equal(z, torch.zeros_like(z)):
+            z = encoder_output.z
+        
 
         chunk_size = kwargs.get("chunk_size", None)
         chunk = kwargs.get("chunk", None)
