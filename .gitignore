@@ -101,6 +101,8 @@ Thumbs.db
 *.parquet
 !lab/data/e2tts_librispeech_pc_test_clean.json
 !lab/data/wavlm_libri_align_features_*.parquet
+!audio_assets/
+!audio_assets/*.wav
 ablations/
 audios/pier.wav
 audios/fra.wav
