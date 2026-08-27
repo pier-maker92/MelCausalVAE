@@ -1,47 +1,46 @@
 # Dicodec
 
-A Variational Autoencoder (Dicodec) for audio mel spectrograms, featuring a causal Convformer encoder and a DiT-based Conditional Flow Matching (CFM) decoder.
+## Overview
 
-## Structure Overview
+Dicodec is a disentangled audio codec that can process either WavLM features or Mel spectrograms as input. Its architecture is designed to explicitly isolate different components of the audio signal through a multi-branch approach:
 
-- `modules/`: Core model components.
-  - `Dicodec.py`: Main model wrapper.
-  - `encoder/`: Causal Convformer architecture.
-  - `decoder/`: DiT-based CFM decoder.
-  - `configs.py`: Dataclass-based configurations.
-- `configs/`: Hydra configuration system.
-  - `defaults/`: Base configurations for encoder, decoder, and training.
-  - `settings/`: Experiment-specific overrides.
-- `data/`: Dataset loaders (LibriTTS, MLS, etc.).
-- `train.py`: Main training script using Hugging Face Trainer and Hydra.
+- **Global Branch:** Dedicated to extracting and modeling the global timbre (speaker identity).
+- **Local Branch:** Focuses on modeling the semantics and prosody of the speech.
+
+By disentangling these elements, Dicodec allows you to easily isolate and manipulate specific audio components (e.g., separating the speaker's voice from the spoken content and intonation).
 
 ## Installation
 
+To set up the environment and install the required dependencies using `uv`, run:
+
 ```bash
-pip install -r requirements.txt
+uv pip install -e .
+uv pip install -e ".[training,eval]"
 ```
+
 
 ## Training
 
-The project uses [Hydra](https://hydra.cc/) for configuration management.
+Dicodec uses [Hydra](https://hydra.cc/) for robust configuration management. The base configurations are located in `configs/defaults/`, while experiment-specific overrides are stored in `configs/settings/`.
 
-### Single GPU
+### Running an Experiment (Single GPU)
+To start a training run with a specific setting file, use:
 ```bash
-python train.py experiment=your_experiment_name
+python train.py settings=your_experiment_name
 ```
 
 ### Multi-GPU (Accelerate)
 ```bash
-accelerate launch train.py experiment=your_experiment_name
+accelerate launch train.py settings=your_experiment_name
 ```
 
 ### DeepSpeed
 ```bash
-accelerate launch --config_file configs/deepspeed/ds_config.yaml train.py experiment=your_experiment_name
+accelerate launch --config_file configs/deepspeed/ds_config.yaml train.py settings=your_experiment_name
 ```
 
-Overrides can be applied directly via CLI:
+### Managing Configurations via CLI
+Hydra allows you to override any configuration parameter directly from the command line. For example:
 ```bash
-python train.py training.learning_rate=1e-4 training.per_device_train_batch_size=8
+python train.py settings=your_experiment_name training.learning_rate=1e-4 training.per_device_train_batch_size=8
 ```
-
