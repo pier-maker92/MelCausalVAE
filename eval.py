@@ -12,11 +12,11 @@ import torchaudio
 from tqdm import tqdm
 from transformers import set_seed
 import torchaudio.transforms as T
-from modules.builder import build_model
+from dicodec.modules.builder import build_model
 
-from data.audio_dataset import EvalDataCollator
-from data.audio_dataset import TestDatasetWrapper
-from data.librispeech import LibriSpeechDataset
+from dicodec.data.audio_dataset import EvalDataCollator
+from dicodec.data.audio_dataset import TestDatasetWrapper
+from dicodec.data.librispeech import LibriSpeechDataset
 
 from evaluation.scripts.dwer import DWER
 from evaluation.scripts.utmos import UTMOS

@@ -3,7 +3,7 @@ import torch
 import argparse
 import torchaudio
 import torchaudio.transforms as T
-from modules.builder import load_pretrained_model
+from dicodec.modules.builder import load_pretrained_model
 
 
 def load_wav_mono_resampled(path: str, target_sr: int) -> torch.Tensor:

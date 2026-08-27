@@ -1,5 +1,5 @@
 [project]
-name = "melcausalvae"
+name = "dicodec"
 version = "0.1.0"
 description = "Speech AE"
 readme = "README.md"
@@ -44,5 +44,5 @@ eval = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["modules*", "data*"]
+include = ["dicodec*"]
 exclude = ["configs*", "evaluation*"]
