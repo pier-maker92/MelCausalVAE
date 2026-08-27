@@ -20,7 +20,6 @@ class SigmaVAEEncoderConfig:
     kl_loss_warmup_steps: Optional[int] = None
     kl_loss_warmup_ratio: Optional[float] = None
     use_softplus: bool
-    use_slt: bool
     use_reparameterization_trick: bool
     use_std_sweep: bool
 

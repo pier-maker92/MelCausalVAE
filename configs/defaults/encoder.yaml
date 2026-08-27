@@ -14,7 +14,6 @@ encoder:
   target_std: null
   kl_loss_warmup_steps: null
   kl_loss_warmup_ratio: null
-  use_slt: false
   use_softplus: false
   use_reparameterization_trick: false
   use_std_sweep: false

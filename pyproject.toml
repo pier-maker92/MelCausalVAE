@@ -19,6 +19,7 @@ dependencies = [
     "torchdiffeq",
     "beartype",
     "torchcodec==0.7",
+    "tqdm",
 
     "vocos==0.1.0",
 ]
