@@ -5,6 +5,7 @@ from ..configs import VQConfig
 import torch.nn.functional as F
 from .fsq import FiniteScalarQuantizer
 from .bsq import BinarySphericalQuantizer
+from .focal import FocalDecoder, FocalEncoder
 from ..output_dataclasses import VQVAEOutput, VQStats
 
 
@@ -70,14 +71,33 @@ class VectorQuantizer(nn.Module):
             raise ValueError(f"Unknown vq_type: {self.vq_type}")
         
         self.recon_weight = getattr(config, "recon_weight", None)
+        self.focal_encoder = None
+        self.focal_decoder = None
 
-        self.proj_in = nn.Sequential(
-            nn.Linear(self.dim, self.quantizer.dim, bias=False),
-            nn.LayerNorm(self.quantizer.dim),
-        )
-        self.proj_out = nn.Sequential(
-            nn.Linear(self.quantizer.dim, self.dim, bias=True),
-        )
+        if config.focal_encoder_config is not None:
+            self.focal_encoder = FocalEncoder(
+                input_dim=self.dim,
+                output_dim=self.quantizer.dim,
+                config=config.focal_encoder_config,
+            )
+            self.proj_in = nn.Identity()
+        else:
+            self.proj_in = nn.Sequential(
+                nn.Linear(self.dim, self.quantizer.dim, bias=False),
+                nn.LayerNorm(self.quantizer.dim),
+            )
+
+        if config.focal_decoder_config is not None:
+            self.focal_decoder = FocalDecoder(
+                input_dim=self.quantizer.dim,
+                output_dim=self.dim,
+                config=config.focal_decoder_config,
+            )
+            self.proj_out = nn.Identity()
+        else:
+            self.proj_out = nn.Sequential(
+                nn.Linear(self.quantizer.dim, self.dim, bias=True),
+            )
 
     def forward(
         self,
@@ -99,7 +119,7 @@ class VectorQuantizer(nn.Module):
                 f"VectorQuantizer expected {self.dim} dimensions, received {D}."
             )
 
-        z_proj = self.proj_in(z)
+        z_proj = self._encode(z)
         
         if padding_mask is None:
             valid = torch.ones(B, T, dtype=torch.bool, device=z.device)
@@ -128,7 +148,7 @@ class VectorQuantizer(nn.Module):
         # Straight-Through Estimator (STE)
         z_q_proj_st = z_proj + (z_q_proj - z_proj).detach()
         
-        z_q = self.proj_out(z_q_proj_st)
+        z_q = self._decode(z_q_proj_st)
 
         z_residual = z - z_q.detach()
         
@@ -172,6 +192,16 @@ class VectorQuantizer(nn.Module):
             stats=stats,
             loss=total_loss,
         )
+
+    def _encode(self, z: torch.Tensor) -> torch.Tensor:
+        if self.focal_encoder is not None:
+            return self.focal_encoder(z)
+        return self.proj_in(z)
+
+    def _decode(self, z_q_proj: torch.Tensor) -> torch.Tensor:
+        if self.focal_decoder is not None:
+            return self.focal_decoder(z_q_proj)
+        return self.proj_out(z_q_proj)
 
     @property
     def dtype(self):

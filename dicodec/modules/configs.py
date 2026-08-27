@@ -65,6 +65,46 @@ class NoiseConfig(RegularizationConfig):
 
 
 @dataclass(kw_only=True)
+class FocalQuantizerConfig:
+    hidden_dim: Optional[int] = None
+    num_layers: int = 2
+    ffn_dim: Optional[int] = None
+    focal_window: int = 7
+    focal_level: int = 2
+    focal_factor: int = 2
+    dropout: float = 0.0
+    use_post_norm: bool = False
+    use_layerscale: bool = False
+    layerscale_init: float = 1e-4
+    tanhscale_init: float = 0.5
+    normalize_modulator: bool = False
+    causal: bool = False
+    window_size: int = 128
+
+    def __post_init__(self):
+        if self.num_layers <= 0:
+            raise ValueError("focal_quantizer_config.num_layers must be > 0.")
+        if self.hidden_dim is not None and self.hidden_dim <= 0:
+            raise ValueError("focal_quantizer_config.hidden_dim must be > 0.")
+        if self.ffn_dim is not None and self.ffn_dim <= 0:
+            raise ValueError("focal_quantizer_config.ffn_dim must be > 0.")
+        if self.focal_window <= 0:
+            raise ValueError("focal_quantizer_config.focal_window must be > 0.")
+        if self.focal_level <= 0:
+            raise ValueError("focal_quantizer_config.focal_level must be > 0.")
+        if self.focal_factor <= 0:
+            raise ValueError("focal_quantizer_config.focal_factor must be > 0.")
+        if not 0.0 <= self.dropout < 1.0:
+            raise ValueError("focal_quantizer_config.dropout must be in [0, 1).")
+        if self.layerscale_init <= 0.0:
+            raise ValueError("focal_quantizer_config.layerscale_init must be > 0.")
+        if self.tanhscale_init <= 0.0:
+            raise ValueError("focal_quantizer_config.tanhscale_init must be > 0.")
+        if self.window_size <= 0:
+            raise ValueError("focal_quantizer_config.window_size must be > 0.")
+
+
+@dataclass(kw_only=True)
 class VQConfig:
     num_embeddings: int
     add_residual:bool
@@ -82,6 +122,8 @@ class VQConfig:
     entropy_temperature: float
     dim_to_quantize: Optional[Union[int, str]] = None
     recon_weight: Optional[float] = None
+    focal_encoder_config: Optional[FocalQuantizerConfig] = None
+    focal_decoder_config: Optional[FocalQuantizerConfig] = None
 
     def __post_init__(self):
         if self.vq_type not in {"bsq", "fsq", "vq", "vq_ema"}:

@@ -417,9 +417,7 @@ class Dicodec(torch.nn.Module):
         centroids = self.kmeans_codebook["centroids"].to(device=z.device, dtype=z.dtype)
 
         if padding_mask is not None:
-            valid_mask = (~padding_mask).squeeze()
-            if valid_mask.dim() == 1:
-                valid_mask = valid_mask.unsqueeze(-1)
+            valid_mask = ~padding_mask
             X = z_sem[valid_mask]
         else:
             X = z_sem.view(-1, z_sem.shape[-1])
