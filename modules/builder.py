@@ -23,7 +23,7 @@ def _filter_dataclass_kwargs(config_cls, values: Dict[str, Any]) -> Dict[str, An
     return {key: value for key, value in values.items() if key in allowed}
 
 
-def build_model(cfg_dict: Dict[str, Any]) -> Dicodec:
+def build_model(cfg_dict: Dict[str, Any], attribute_only: bool = False) -> Dicodec:
     """Builds a Dicodec model from a configuration dictionary."""
     # Handle both hydra config (encoder) and checkpoint config (encoder_config)
     encoder_cfg = cfg_dict.get("encoder_config", cfg_dict.get("encoder", {})).copy()
@@ -130,16 +130,17 @@ def build_model(cfg_dict: Dict[str, Any]) -> Dicodec:
         config=dicodec_config,
         train_only_vq=training_cfg.get("train_only_vq", False),
         train_only_vq_and_decoder=training_cfg.get("train_only_vq_and_decoder", False),
+        attribute_only=attribute_only,
     )
 
 
-def load_pretrained_model(checkpoint_dir: str):
+def load_pretrained_model(checkpoint_dir: str, attribute_only: bool = False):
 
     config_path = os.path.join(checkpoint_dir, "config.json")
     with open(config_path, "r") as f:
         cfg_dict = json.load(f)
 
-    model = build_model(cfg_dict)
+    model = build_model(cfg_dict, attribute_only=attribute_only)
 
     checkpoint_path = os.path.join(checkpoint_dir, "model.safetensors")
     if os.path.exists(checkpoint_path):

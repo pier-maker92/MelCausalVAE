@@ -11,7 +11,6 @@ from .feature_extractor import FeatureExtractor, WavLMFeatureExtractor
 from .speaker_encoder import WavLMSpeakerEncoder
 from .output_dataclasses import DicodecOutput, DecoderOutput, FeatureExtractorOutput
 from .lp_filter import LowPassFilter
-import matplotlib.pyplot as plt
 from .output_dataclasses import AttributesOutput
 from vocos import Vocos
 
@@ -24,6 +23,7 @@ class Dicodec(torch.nn.Module):
     def __init__(self, config: DicodecConfig, **kwargs):
         super().__init__()
         self.config = config
+        attribute_only = kwargs.get("attribute_only", False)
         self.feature_extractor = FeatureExtractor(config.mel_spectrogram_config)
 
         self.wavlm, self.wavlm_extractor, self.speaker_encoder = None, None, None
@@ -48,21 +48,23 @@ class Dicodec(torch.nn.Module):
                 )
 
         self.encoder = Encoder(config.encoder_config)
-        self.decoder = DiT(config.decoder_config)
+        self.decoder = None if attribute_only else DiT(config.decoder_config)
         self.lowpass_filter = LowPassFilter(
             cutoff_hz=config.lowpass_filter_config.cutoff_hz,
             sample_rate=config.lowpass_filter_config.sample_rate,
             order=config.lowpass_filter_config.order,
         )
 
-        # Initialize Vocoder
-        self.vocoder = Vocos.from_pretrained("charactr/vocos-mel-24khz")
-        self.vocoder.eval()
-        for param in self.vocoder.parameters():
-            param.requires_grad = False
+        self.vocoder = None
+        if not attribute_only:
+            self.vocoder = Vocos.from_pretrained("charactr/vocos-mel-24khz")
+            self.vocoder.eval()
+            for param in self.vocoder.parameters():
+                param.requires_grad = False
 
         count_parameters_by_module(self.encoder, "Encoder")
-        count_parameters_by_module(self.decoder, "Decoder")
+        if self.decoder is not None:
+            count_parameters_by_module(self.decoder, "Decoder")
 
     def _freeze_wavlm(self):
         if self.wavlm is None:
@@ -221,6 +223,8 @@ class Dicodec(torch.nn.Module):
             z_res_centered = z_res_centered * valid_mask
 
         if plot:
+            import matplotlib.pyplot as plt
+
             res_scale = 1.0
             z_reconstructed = z_pros + res_scale * z_res_centered + z_mean
             plt.figure(figsize=(14, 6))
