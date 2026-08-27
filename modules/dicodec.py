@@ -23,7 +23,6 @@ class Dicodec(torch.nn.Module):
     def __init__(self, config: DicodecConfig, **kwargs):
         super().__init__()
         self.config = config
-        attribute_only = kwargs.get("attribute_only", False)
         self.feature_extractor = FeatureExtractor(config.mel_spectrogram_config)
 
         self.wavlm, self.wavlm_extractor, self.speaker_encoder = None, None, None
@@ -48,23 +47,38 @@ class Dicodec(torch.nn.Module):
                 )
 
         self.encoder = Encoder(config.encoder_config)
-        self.decoder = None if attribute_only else DiT(config.decoder_config)
+        self.decoder = DiT(config.decoder_config)
         self.lowpass_filter = LowPassFilter(
             cutoff_hz=config.lowpass_filter_config.cutoff_hz,
             sample_rate=config.lowpass_filter_config.sample_rate,
             order=config.lowpass_filter_config.order,
         )
 
-        self.vocoder = None
-        if not attribute_only:
-            self.vocoder = Vocos.from_pretrained("charactr/vocos-mel-24khz")
-            self.vocoder.eval()
-            for param in self.vocoder.parameters():
-                param.requires_grad = False
+        self.vocoder = Vocos.from_pretrained("charactr/vocos-mel-24khz")
+        self.vocoder.eval()
+        for param in self.vocoder.parameters():
+            param.requires_grad = False
 
         count_parameters_by_module(self.encoder, "Encoder")
-        if self.decoder is not None:
-            count_parameters_by_module(self.decoder, "Decoder")
+        count_parameters_by_module(self.decoder, "Decoder")
+
+    def get_feature_extractor(self):
+        return self.feature_extractor
+
+    def get_wavlm_extractor(self):
+        return self.wavlm_extractor
+
+    def get_speaker_encoder(self):
+        return self.speaker_encoder
+
+    def get_encoder(self):
+        return self.encoder
+
+    def get_decoder(self):
+        return self.decoder
+
+    def get_vocoder(self):
+        return self.vocoder
 
     def _freeze_wavlm(self):
         if self.wavlm is None:
