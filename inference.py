@@ -1,66 +1,9 @@
 import os
-
-# --- WORKAROUND FOR FAIRSEQ/HYDRA ON PYTHON 3.11 ---
-import dataclasses
-
-_orig_get_field = dataclasses._get_field
-
-
-def _patched_get_field(cls, a_name, a_type, *args, **kwargs):
-    try:
-        return _orig_get_field(cls, a_name, a_type, *args, **kwargs)
-    except ValueError as e:
-        if "mutable default" in str(e):
-            default = getattr(cls, a_name, dataclasses.MISSING)
-            actual_default = (
-                default.default if isinstance(default, dataclasses.Field) else default
-            )
-            if actual_default is not dataclasses.MISSING:
-                default_cls = actual_default.__class__
-                orig_hash = getattr(default_cls, "__hash__", None)
-                try:
-                    default_cls.__hash__ = lambda self: id(self)
-                except TypeError:
-                    pass
-
-                try:
-                    return _orig_get_field(cls, a_name, a_type, *args, **kwargs)
-                finally:
-                    try:
-                        if orig_hash is None:
-                            default_cls.__hash__ = None
-                        else:
-                            default_cls.__hash__ = orig_hash
-                    except TypeError:
-                        pass
-        raise
-
-
-dataclasses._get_field = _patched_get_field
-# ---------------------------------------------------
-
-import json
 import torch
 import argparse
 import torchaudio
-from vocos import Vocos
 import torchaudio.transforms as T
-from modules.builder import build_model
-
-
-def load_kmeans_codebook(path: str) -> dict:
-    if os.path.isdir(path):
-        path = os.path.join(path, "encoder_kmeans.pt")
-    if not os.path.isfile(path):
-        raise FileNotFoundError(f"K-means checkpoint not found: {path}")
-    codebook = torch.load(path, map_location="cpu")
-    if "centroids" not in codebook:
-        raise ValueError(f"K-means checkpoint has no centroids: {path}")
-    if "latent_selection" not in codebook and "feature_dims" not in codebook:
-        raise ValueError(
-            "K-means checkpoint must contain latent_selection or legacy feature_dims."
-        )
-    return codebook
+from modules.builder import load_pretrained_model
 
 
 def load_wav_mono_resampled(path: str, target_sr: int) -> torch.Tensor:
@@ -86,15 +29,7 @@ def main(args):
         )
 
     print(f"Loading model from {checkpoint_dir}...")
-    config_path = os.path.join(checkpoint_dir, "config.json")
-    with open(config_path, "r") as f:
-        cfg_dict = json.load(f)
-
-    model = build_model(cfg_dict)
-
-    checkpoint_path = os.path.join(checkpoint_dir, "model.safetensors")
-    model.from_pretrained(checkpoint_path)
-    model.eval()
+    model = load_pretrained_model(checkpoint_dir)
     model.to(device)
     assert not model.training, "Model must be in eval mode"
     assert not model.encoder.training, (
@@ -102,17 +37,13 @@ def main(args):
         "dropout regularizer are only disabled when training=False"
     )
 
-    # Initialize Vocoder
-    print("Initializing Vocoder...")
-    vocoder = Vocos.from_pretrained("charactr/vocos-mel-24khz").to(device)
-
     audio_path = args.audio_path
     print(f"Processing audio: {audio_path}")
 
     with torch.inference_mode():
         wav = load_wav_mono_resampled(audio_path, model.config.sample_rate).to(device)
 
-        # Prepare inputs as expected by VAE encode_decode: list of (audio_tensor, sr)
+        # Prepare inputs as expected by Dicodec encode_decode: list of (audio_tensor, sr)
         audios_srs = [(wav, model.config.sample_rate)]
 
         params = {
@@ -134,17 +65,6 @@ def main(args):
                     "encoder."
                 )
             params["speaker_embedding"] = speaker_embedding
-        if args.quantized or args.residual or args.tail:
-            params["quantized"] = False
-            params["residual"] = False
-            params["tail"] = False
-
-        if args.quantized:
-            params["quantized"] = True
-        if args.residual:
-            params["residual"] = True
-        if args.tail:
-            params["tail"] = True
 
         if getattr(args, "zero_speaker", False):
             params["zero_speaker"] = True
@@ -152,37 +72,8 @@ def main(args):
         if getattr(args, "guide_only_speaker", False):
             params["guide_only_speaker"] = True
 
-        if getattr(args, "chunk_size", None) is not None:
-            params["chunk_size"] = args.chunk_size
-        if getattr(args, "chunk", None) is not None:
-            params["chunk"] = args.chunk
-        if getattr(args, "exclude_chunk", None) is not None:
-            params["exclude_chunk"] = args.exclude_chunk
-        if getattr(args, "exclude_start_chunk", None) is not None:
-            params["exclude_start_chunk"] = args.exclude_start_chunk
-        if getattr(args, "exclude_end_chunk", None) is not None:
-            params["exclude_end_chunk"] = args.exclude_end_chunk
-
-        if getattr(args, "kmeans_path", None) is not None:
-            kmeans_codebook = load_kmeans_codebook(args.kmeans_path)
-            params["kmeans_codebook"] = kmeans_codebook
-            params["kmeans_chunk_size"] = args.kmeans_chunk_size
-            latent_selection = kmeans_codebook.get("latent_selection")
-            print(
-                "Using K-means codebook:",
-                args.kmeans_path,
-                "latent_selection=",
-                latent_selection,
-            )
-
         out = model.encode_decode(**params)
-
-        reconstructed_mel = out["decoder_output"].audio_features
-        padding_mask = out["decoder_output"].padding_mask
-        audio = vocoder.decode(reconstructed_mel.permute(0, 2, 1))
-
-        # normalize audio
-        audio = audio / audio.abs().max()
+        audio = out["audio_waveform"]
         output_path = args.output_path
         if output_path is None:
             output_path = os.path.join(
@@ -198,7 +89,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "-c", "--checkpoint_dir", type=str, default="checkpoints/vq-refactored"
     )
-    parser.add_argument("-i", "--audio_path", type=str, default="ablations/male.wav")
+    parser.add_argument("-i", "--audio_path", type=str, default="audio_assets/male.wav")
     parser.add_argument(
         "--target_audio",
         type=str,
@@ -209,52 +100,14 @@ if __name__ == "__main__":
     parser.add_argument("--num_steps", type=int, default=16)
     parser.add_argument("--temperature", type=float, default=0.3)
     parser.add_argument("--guidance_scale", type=float, default=1.3)
-    parser.add_argument("-q", "--quantized", action="store_true")
     parser.add_argument(
         "-qq", "--zero_speaker", action="store_true", help="Zero out speaker embedding"
     )
-    parser.add_argument("-r", "--residual", action="store_true")
-    parser.add_argument("-t", "--tail", action="store_true")
     parser.add_argument(
         "--guide_only_speaker",
         action="store_true",
         help="Apply guidance scale only to speaker embedding",
     )
-    parser.add_argument(
-        "--chunk_size",
-        type=int,
-        default=None,
-        help="Chunk size for the bottleneck tail",
-    )
-    parser.add_argument(
-        "--chunk",
-        type=int,
-        default=None,
-        help="Number of chunks to use, starting from the bottom of the bottleneck",
-    )
-    parser.add_argument(
-        "--exclude_chunk",
-        type=int,
-        default=None,
-        help="Number of chunks to exclude, starting from the bottom of the bottleneck",
-    )
-    parser.add_argument(
-        "--exclude_start_chunk", type=int, default=None, help="Start chunk to exclude"
-    )
-    parser.add_argument(
-        "--exclude_end_chunk", type=int, default=None, help="End chunk to exclude"
-    )
-    parser.add_argument(
-        "--kmeans_path",
-        type=str,
-        default=None,
-        help="Path to encoder_kmeans.pt or to a directory containing it.",
-    )
-    parser.add_argument(
-        "--kmeans_chunk_size",
-        type=int,
-        default=16384,
-        help="Number of valid latent frames per nearest-centroid distance chunk.",
-    )
+
     args = parser.parse_args()
     main(args)

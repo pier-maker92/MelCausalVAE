@@ -3,7 +3,6 @@ import torch
 import torch.nn as nn
 from typing import Optional
 import torch.nn.functional as F
-from .vq import VectorQuantizer
 from ..configs import EncoderConfig, VQConfig
 from ..output_dataclasses import EncoderOutput
 from .sigmavae import SigmaVAEEncoder
@@ -73,10 +72,6 @@ class Encoder(SigmaVAEEncoder):
         if config.logvar_layer:
             self.logvar = nn.Linear(d_model, latent_dim)
 
-        if config.vq_config:
-            self._qd = getattr(config.vq_config, "dim_to_quantize", latent_dim)
-            self.vq = VectorQuantizer(config.vq_config, dim=self._qd)
-
         if config.dropout_regularizer_config:
             self.dropout_regularizer = DropoutRegularizer(
                 config=config.dropout_regularizer_config
@@ -97,35 +92,10 @@ class Encoder(SigmaVAEEncoder):
                 config=config.noise_regularizer_config,
             )
 
-        self.semantic_downsample_factor = getattr(
-            config, "semantic_downsample_factor", 1
-        )
-        if self.semantic_downsample_factor > 1:
-            raise NotImplementedError("Semantic downsampling is not implemented yet.")
-            
-
-        if config.freeze_encoder_before_latent_heads:
-            self._freeze_encoder_before_latent_heads()
-
         self.config = config
         self.use_reparameterization_trick = getattr(
             config, "use_reparameterization_trick"
         )
-
-    def _freeze_encoder_before_latent_heads(self):
-        for param in self.parameters():
-            param.requires_grad = False
-        for param in self.mu.parameters():
-            param.requires_grad = False
-        if hasattr(self, "logvar"):
-            for param in self.logvar.parameters():
-                param.requires_grad = False
-        if hasattr(self, "vq"):
-            for param in self.vq.parameters():
-                param.requires_grad = True
-
-    def _apply_instance_norm(self, mu, padding_mask):
-        raise DeprecationWarning("Instance norm is deprecated.")
 
     def forward(
         self,
@@ -163,37 +133,7 @@ class Encoder(SigmaVAEEncoder):
             mu = self.dropout_regularizer(mu)
         if hasattr(self, "noise_regularizer"):
             mu = self.noise_regularizer(mu)
-        
-        # vq
-        vq_output = None
-        quantized = None
-        if hasattr(self, "vq"):
-            vq_output = self.vq(mu[...,:self.config.vq_config.dim_to_quantize], padding_mask)
-            quantized = vq_output.quantized
-            # residual ? 
-            if self.config.vq_config.add_residual:
-                if self.training:
-                    residual_mask = (
-                        torch.rand(mu.shape[0], device=mu.device)
-                        < self.config.vq_config.add_residual_p
-                    ).to(mu.dtype).view(-1, 1, 1)
-                    quantized = quantized + vq_output.residual * residual_mask
-                else:
-                    quantized = quantized + vq_output.residual
 
-            # acoustic ? 
-            if self.config.vq_config.drop_acoustic_p > 0.0 and self.training:
-                drop_mask = (
-                    torch.rand(mu.shape[0], device=mu.device)
-                    < self.config.vq_config.drop_acoustic_p
-                ).to(mu.dtype).view(-1, 1, 1)
-            else: 
-                drop_mask = torch.ones((mu.shape[0], 1, 1), device=mu.device, dtype=mu.dtype)
-
-            # get latent
-            acoustic = mu[...,self.config.vq_config.dim_to_quantize:] * drop_mask
-            mu = torch.cat([quantized, acoustic], dim=-1)
-        
         if self.use_reparameterization_trick and self.training:
             z = self.reparameterize(mu, logvar, std=1.0)
         else:
@@ -220,16 +160,7 @@ class Encoder(SigmaVAEEncoder):
             "kl_loss": kl_loss,
             "mu": mu,
             "padding_mask": padding_mask,
-            "speaker_embedding": None,
         }
-
-        if hasattr(self, "vq"):
-            out["vq_stats"] = vq_output.stats
-            out["vq_loss"] = vq_output.loss
-            out["quantized"] = vq_output.quantized
-            out["residual"] = vq_output.residual
-            out["tail"] = acoustic
-            out["indices"] = vq_output.indices
 
         return EncoderOutput(**out)
 

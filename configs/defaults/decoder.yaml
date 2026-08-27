@@ -1,28 +1,37 @@
 # @package _global_
 decoder:
-  dit_dim: 512
-  dit_depth: 6
-  dit_heads: 8
+  audio_latent_dim: null
+  dit_dim: null
+  dit_depth: null
+  dit_heads: null
   dit_dropout_rate: 0.0
   use_conv_layer: false
+  expansion_factor: null
+  mel_dim: null
   sigma: 1.0e-5
   uncond_prob: 0.0
   is_causal: false
   upsample: repeat
   use_window_attention: false
   window_attention_seconds: 3.0
+  kernel_size: null
+  causal_convolution: false
   use_group_bidirectional: false
   speaker_cond_dim: null
-  local_speaker_conditioning: true
+  local_speaker_conditioning: false
+  normalize_context_vector: false
 
-# Set this to enable frozen ECAPA conditioning. Its embedding_dim must match
-# decoder.speaker_cond_dim.
-# For WavLM speaker conditioning, set:
+# Set this to enable frozen WavLM speaker conditioning. Its embedding_dim must
+# match decoder.speaker_cond_dim.
 # speaker_encoder_config:
 #   encoder_type: wavlm
 #   pretrained_model_name: microsoft/wavlm-large
+#   sampling_rate: 16000
 #   embedding_dim: 128
 #   wavlm_layers: [1, 2]
+#   wavlm_layer_weights: null
 #   wavlm_layer_combine: weighted_sum
 #   wavlm_pooling: mean_std
-speaker_encoder_config: null
+#   wavlm_normalize_features: true
+#   wavlm_freeze: true
+#   wavlm_attention_channels: 128

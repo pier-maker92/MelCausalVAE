@@ -235,5 +235,7 @@ class Transformer(nn.Module):
         if self.nlayers == 0:
             return x
         seq_len = x.shape[1]
-        mask = nn.Transformer.generate_square_subsequent_mask(seq_len, device=x.device)
+        mask = nn.Transformer.generate_square_subsequent_mask(seq_len, device=x.device).bool()
+        if pad_mask is not None:
+            pad_mask = pad_mask.bool()
         return self.enc(x, mask=mask, src_key_padding_mask=pad_mask, is_causal=True)

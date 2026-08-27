@@ -1,23 +1,20 @@
 import os
 import json
+import torch
 from dataclasses import fields
 from typing import Dict, Any
 
-from .VAE import VAE
+from .dicodec import Dicodec
 from .configs import (
-    VAEConfig,
-    VAEStandardConfig,
+    DicodecConfig,
     EncoderConfig,
     DiTConfig,
-    StandardDecoderConfig,
-    DiscriminatorConfig,
     MelSpectrogramConfig,
-    VQConfig,
     DropoutConfig,
     KLChunkRegularizer,
-    SemanticDistillationConfig,
     NoiseConfig,
     SpeakerEncoderConfig,
+    LowPassFilterConfig,
 )
 
 
@@ -26,49 +23,24 @@ def _filter_dataclass_kwargs(config_cls, values: Dict[str, Any]) -> Dict[str, An
     return {key: value for key, value in values.items() if key in allowed}
 
 
-def _load_vq_config(encoder_cfg: Dict[str, Any]):
-    """Load VQ/BSQ config from encoder config without broad normalization hacks."""
-    vq_dict = encoder_cfg.pop("vq_config", None)
-    bsq_dict = encoder_cfg.pop("bsq_config", None)
-
-    if vq_dict is not None:
-        vq_dict = dict(vq_dict)
-        if "vq_dim" not in vq_dict and "dim_to_quantize" in vq_dict:
-            vq_dict["vq_dim"] = vq_dict.pop("dim_to_quantize")
-        if vq_dict.pop("use_ema_codebook", False):
-            vq_dict["vq_type"] = "vq_ema"
-        vq_dict.setdefault("vq_type", "vq")
-        vq_dict = _filter_dataclass_kwargs(VQConfig, vq_dict)
-        return VQConfig(**vq_dict)
-
-    if bsq_dict is not None:
-        bsq_dict = dict(bsq_dict)
-        num_embeddings = bsq_dict["codebook_size"]
-        return VQConfig(
-            num_embeddings=num_embeddings,
-            add_residual=False,
-            add_residual_p=0.0,
-            vq_type="bsq",
-        )
-
-    return None
-
-
-def build_model(cfg_dict: Dict[str, Any]) -> VAE:
-    """Builds a VAE model from a configuration dictionary."""
+def build_model(cfg_dict: Dict[str, Any]) -> Dicodec:
+    """Builds a Dicodec model from a configuration dictionary."""
     # Handle both hydra config (encoder) and checkpoint config (encoder_config)
     encoder_cfg = cfg_dict.get("encoder_config", cfg_dict.get("encoder", {})).copy()
     decoder_cfg = cfg_dict.get("decoder_config", cfg_dict.get("decoder", {})).copy()
     mel_spec_cfg = cfg_dict.get("mel_spectrogram_config", {}).copy()
 
+    encoder_cfg.setdefault("use_reparameterization_trick", False)
+    encoder_cfg.setdefault("use_std_sweep", False)
+
     decoder_cfg.setdefault("mel_dim", cfg_dict.get("mel_dim"))
     decoder_cfg.setdefault("audio_latent_dim", cfg_dict.get("latent_dim"))
     decoder_cfg.setdefault("expansion_factor", cfg_dict.get("compress_factor"))
     decoder_cfg.setdefault("upsample", cfg_dict.get("upsample"))
+    decoder_cfg.setdefault("local_speaker_conditioning", True)
+    decoder_cfg.setdefault("normalize_context_vector", False)
 
     decoder_config = DiTConfig(**_filter_dataclass_kwargs(DiTConfig, decoder_cfg))
-
-    vq_config = _load_vq_config(encoder_cfg)
 
     dropout_dict = encoder_cfg.pop("dropout_regularizer_config", None)
     dropout_config = (
@@ -91,50 +63,57 @@ def build_model(cfg_dict: Dict[str, Any]) -> VAE:
         else None
     )
 
-    distill_dict = encoder_cfg.pop("semantic_distillation_config", None)
-    distill_config = (
-        SemanticDistillationConfig(
-            **_filter_dataclass_kwargs(SemanticDistillationConfig, distill_dict)
-        )
-        if distill_dict
-        else None
-    )
-
     encoder_config = EncoderConfig(
-        vq_config=vq_config,
         dropout_regularizer_config=dropout_config,
         kl_chunk_regularizer_config=kl_config,
         noise_regularizer_config=noise_config,
-        semantic_distillation_config=distill_config,
         **_filter_dataclass_kwargs(EncoderConfig, encoder_cfg),
     )
 
-    mel_spec_cfg["use_bigvgan_mel"] = cfg_dict.get(
-        "use_bigvgan_mel", mel_spec_cfg.get("use_bigvgan_mel", False)
-    )
+
     mel_spec_config = MelSpectrogramConfig(
         **_filter_dataclass_kwargs(MelSpectrogramConfig, mel_spec_cfg)
     )
 
-    from .configs import WavLMConfig
+    from .configs import WavLMConfig, WavLMModuleConfig
 
-    wavlm_dict = cfg_dict.get("wavlm_config", None)
-    wavlm_config = (
-        WavLMConfig(**_filter_dataclass_kwargs(WavLMConfig, wavlm_dict))
-        if wavlm_dict
-        else None
-    )
-
-    speaker_encoder_dict = cfg_dict.get("speaker_encoder_config", None)
-    speaker_encoder_config = (
-        SpeakerEncoderConfig(
-            **_filter_dataclass_kwargs(SpeakerEncoderConfig, speaker_encoder_dict)
+    wavlm_module_dict = cfg_dict.get("wavlm_module_config", None)
+    
+    if wavlm_module_dict:
+        feature_extractor_dict = wavlm_module_dict.get("feature_extractor_config", None)
+        feature_extractor_config = (
+            WavLMConfig(**_filter_dataclass_kwargs(WavLMConfig, feature_extractor_dict))
+            if feature_extractor_dict else None
         )
-        if speaker_encoder_dict
-        else None
+        speaker_encoder_dict = wavlm_module_dict.get("speaker_encoder_config", None)
+        speaker_encoder_config = (
+            SpeakerEncoderConfig(**_filter_dataclass_kwargs(SpeakerEncoderConfig, speaker_encoder_dict))
+            if speaker_encoder_dict else None
+        )
+        wavlm_module_config = WavLMModuleConfig(
+            pretrained_model_name=wavlm_module_dict.get("pretrained_model_name"),
+            feature_extractor_config=feature_extractor_config,
+            speaker_encoder_config=speaker_encoder_config
+        )
+    else:
+        wavlm_module_config = None
+
+    lowpass_filter_dict = cfg_dict.get(
+        "lowpass_filter_config", cfg_dict.get("lowpass_filter", None)
+    )
+    if lowpass_filter_dict and "kernel_size" in lowpass_filter_dict:
+        lowpass_filter_dict = lowpass_filter_dict.copy()
+        lowpass_filter_dict.setdefault("order", lowpass_filter_dict["kernel_size"] - 1)
+        lowpass_filter_dict.pop("kernel_size", None)
+    lowpass_filter_config = (
+        LowPassFilterConfig(
+            **_filter_dataclass_kwargs(LowPassFilterConfig, lowpass_filter_dict)
+        )
+        if lowpass_filter_dict
+        else LowPassFilterConfig()
     )
 
-    vae_config = VAEConfig(
+    dicodec_config = DicodecConfig(
         mel_dim=cfg_dict.get("mel_dim"),
         latent_dim=cfg_dict.get("latent_dim"),
         sample_rate=cfg_dict.get("sample_rate"),
@@ -142,114 +121,40 @@ def build_model(cfg_dict: Dict[str, Any]) -> VAE:
         encoder_config=encoder_config,
         decoder_config=decoder_config,
         mel_spectrogram_config=mel_spec_config,
-        wavlm_config=wavlm_config,
-        speaker_encoder_config=speaker_encoder_config,
+        wavlm_module_config=wavlm_module_config,
+        lowpass_filter_config=lowpass_filter_config,
     )
 
     training_cfg = cfg_dict.get("training", {}) or {}
-    return VAE(
-        config=vae_config,
+    return Dicodec(
+        config=dicodec_config,
         train_only_vq=training_cfg.get("train_only_vq", False),
         train_only_vq_and_decoder=training_cfg.get("train_only_vq_and_decoder", False),
     )
 
 
-def build_standard_model(cfg_dict: Dict[str, Any]):
-    """Builds a VAEWithStandardDecoder from a configuration dictionary."""
-    from .VAE_standard import VAEWithStandardDecoder
+def load_pretrained_model(checkpoint_dir: str):
 
-    encoder_cfg = cfg_dict.get("encoder_config", cfg_dict.get("encoder", {})).copy()
-    decoder_cfg = cfg_dict.get("decoder_config", cfg_dict.get("decoder", {})).copy()
-    mel_spec_cfg = cfg_dict.get("mel_spectrogram_config", {}).copy()
+    config_path = os.path.join(checkpoint_dir, "config.json")
+    with open(config_path, "r") as f:
+        cfg_dict = json.load(f)
 
-    # Pop discriminator sub-keys from decoder config
-    discrim_keys = (
-        "recon_loss_weight",
-        "adv_loss_weight",
-        "fm_loss_weight",
-        "discrim_lr",
-    )
-    discrim_kwargs = {k: decoder_cfg.pop(k) for k in discrim_keys if k in decoder_cfg}
-    discrim_cfg = DiscriminatorConfig(**discrim_kwargs)
+    model = build_model(cfg_dict)
 
-    # Remove keys not in StandardDecoderConfig
-    for k in (
-        "decoder_type",
-        "dit_dim",
-        "dit_depth",
-        "dit_heads",
-        "dit_dropout_rate",
-        "use_conv_layer",
-        "sigma",
-        "uncond_prob",
-        "is_causal",
-        "use_window_attention",
-        "window_attention_seconds",
-        "use_group_bidirectional",
-        "speaker_cond_dim",
-        "local_speaker_conditioning",
-        "kernel_size",
-        "causal_convolution",
-        "upsample",
-        "expansion_factor",
-        "mel_dim",
-        "audio_latent_dim",
-        "compress_factor",
-    ):
-        decoder_cfg.pop(k, None)
+    checkpoint_path = os.path.join(checkpoint_dir, "model.safetensors")
+    if os.path.exists(checkpoint_path):
+        model.from_pretrained(checkpoint_path)
+    else:
+        # try without model.safetensors in case checkpoint_dir itself is the file
+        model.from_pretrained(checkpoint_dir)
 
-    decoder_config = StandardDecoderConfig(
-        audio_latent_dim=cfg_dict.get("latent_dim"),
-        mel_dim=cfg_dict.get("mel_dim"),
-        compress_factor=cfg_dict.get("compress_factor"),
-        **decoder_cfg,
-    )
+    model.eval()
 
-    vq_config = _load_vq_config(encoder_cfg)
+    kmeans_path = os.path.join(checkpoint_dir, "kmeans.pt")
+    if os.path.exists(kmeans_path):
+        print(f"Found kmeans codebook at {kmeans_path}, attaching to model...")
+        model.kmeans_codebook = torch.load(kmeans_path, map_location="cpu")
+    else:
+        model.kmeans_codebook = None
 
-    dropout_dict = encoder_cfg.pop("dropout_regularizer_config", None)
-    dropout_config = DropoutConfig(**dropout_dict) if dropout_dict else None
-
-    kl_dict = encoder_cfg.pop("kl_chunk_regularizer_config", None)
-    kl_config = KLChunkRegularizer(**kl_dict) if kl_dict else None
-
-    noise_dict = encoder_cfg.pop("noise_regularizer_config", None)
-    noise_config = NoiseConfig(**noise_dict) if noise_dict else None
-
-    distill_dict = encoder_cfg.pop("semantic_distillation_config", None)
-    distill_config = (
-        SemanticDistillationConfig(**distill_dict) if distill_dict else None
-    )
-
-    encoder_config = EncoderConfig(
-        vq_config=vq_config,
-        dropout_regularizer_config=dropout_config,
-        kl_chunk_regularizer_config=kl_config,
-        noise_regularizer_config=noise_config,
-        semantic_distillation_config=distill_config,
-        **encoder_cfg,
-    )
-
-    mel_spec_cfg["use_bigvgan_mel"] = cfg_dict.get(
-        "use_bigvgan_mel", mel_spec_cfg.get("use_bigvgan_mel", False)
-    )
-    mel_spec_config = MelSpectrogramConfig(**mel_spec_cfg)
-
-    from .configs import WavLMConfig
-
-    wavlm_dict = cfg_dict.get("wavlm_config", None)
-    wavlm_config = WavLMConfig(**wavlm_dict) if wavlm_dict else None
-
-    vae_config = VAEStandardConfig(
-        mel_dim=cfg_dict.get("mel_dim"),
-        latent_dim=cfg_dict.get("latent_dim"),
-        sample_rate=cfg_dict.get("sample_rate"),
-        compress_factor=cfg_dict.get("compress_factor"),
-        encoder_config=encoder_config,
-        decoder_config=decoder_config,
-        discriminator_config=discrim_cfg,
-        mel_spectrogram_config=mel_spec_config,
-        wavlm_config=wavlm_config,
-    )
-
-    return VAEWithStandardDecoder(config=vae_config)
+    return model

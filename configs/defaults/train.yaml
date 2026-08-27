@@ -1,8 +1,8 @@
 # @package _global_
 training:
-  output_dir: outputs/ConvformerMelVae
-  num_train_epochs: 10
-  per_device_train_batch_size: 8
+  output_dir: null
+  num_train_epochs: null
+  per_device_train_batch_size: null
   gradient_accumulation_steps: 1
   
   # Learning Rates
@@ -10,6 +10,8 @@ training:
   encoder_lr: null
   decoder_lr: null
   min_learning_rate: 0.0
+  encoder_min_lr: null
+  decoder_min_lr: null
   
   # Scheduler
   lr_scheduler_type: "constant"
@@ -29,7 +31,7 @@ training:
   # Hardware / Data
   bf16: true
   fp16: false
-  dataloader_num_workers: 4
+  dataloader_num_workers: 0
   dataloader_prefetch_factor: 1
   dataloader_persistent_workers: true
   dataloader_pin_memory: false
@@ -38,19 +40,13 @@ training:
   
   # WandB / Logging
   report_to: none
-  wandb_project: convformer-mel-vae-warmup
+  wandb_project: null
   wandb_run_name: null
+  wandb_id: null
   
-  # Dataset / VAE specifics
+  # Dataset / Dicodec specifics
   resume_from_checkpoint: null
   from_pretrained: null
   dataset_name: null
-  enable_perturbed_audio: false
-  perturbed_pitch_shift_max_semitones: 8.0
-  generate_and_log_samples: false
-  eval_num_samples: 100
+  eval_num_samples: null
   run_id: null
-
-  # vq
-  train_only_vq: false
-  train_only_vq_and_decoder: false

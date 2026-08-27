@@ -42,11 +42,11 @@ class DiT(torch.nn.Module):
         )
         if self.window_size is not None:
             print(
-                f"VAE window_attention: {config.window_attention_seconds}s = {self.window_size} mel frames"
+                f"Dicodec window_attention: {config.window_attention_seconds}s = {self.window_size} mel frames"
             )
         if self.use_group_bidirectional:
             print(
-                f"VAE group_bidirectional: enabled (group_size will be set to expansion_factor)"
+                f"Dicodec group_bidirectional: enabled (group_size will be set to expansion_factor)"
             )
 
         # context vector upsampling layers

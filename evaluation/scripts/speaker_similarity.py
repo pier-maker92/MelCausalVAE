@@ -95,7 +95,6 @@ if __name__ == "__main__":
     hyp_sig = torch.randn(2, 2 * sample_rate)
     ref_sig = torch.randn(2, 2 * sample_rate)
 
-    # spk_sim = SpkSimECAPATDNN("speechbrain/spkrec-ecapa-voxceleb", sample_rate)
     # spk_sim.append(ids, hyp_sig, ref_sig)
     # print(spk_sim.summarize("average"))
 

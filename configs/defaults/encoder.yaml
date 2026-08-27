@@ -1,53 +1,27 @@
 # @package _global_
 encoder:
-  d_model: 512
-  tf_heads: 8
-  tf_layers: 4
+  latent_dim: null
+  mel_dim: null
+  d_model: null
+  compress_factor_C: null
+  tf_heads: null
+  tf_layers: null
   drop_p: 0.1
   n_residual_blocks: 3
-  freeze_encoder_before_latent_heads: false
   
   logvar_layer: true
-  kl_loss_weight: 1.0e-3
+  kl_loss_weight: 1.0e-5
   target_std: null
-  kl_loss_warmup_steps: 1000
+  kl_loss_warmup_steps: null
   kl_loss_warmup_ratio: null
   use_slt: false
   use_softplus: false
   use_reparameterization_trick: false
-  use_instance_norm: false
-  semantic_downsample_factor: 1
+  use_std_sweep: false
 
-  # --- VQ ---
-  vq_config:
-    num_embeddings: null
-    dim_to_quantize: null
-    # residual
-    add_residual: false
-    add_residual_p: 0.0
-    drop_acoustic_p: 0.0
-    # vq standard - ema
-    vq_dim: 128
-    recon_weight: null
-    reset_dead_codes: true
-    reset_every_forward: 10
-    ema_decay: 0.95
-    ema_eps: 1.0e-6
-    # bsq
-    entropy_loss_weight: 0.0
-    entropy_temperature: 1.0
-    
-    
+  vq_config: null
 
-    
-
+  # Optional Regularizers
   dropout_regularizer_config: null
-    # chunk_size: 2
-    # dropout_start: 0.0
-    # dropout_end: 0.8
-    # dropout_hierarchical: false
-
   kl_chunk_regularizer_config: null
-    # chunk_size: 2
-    # kl_weight_start: 1.0e-10
-    # kl_weight_end: 1.0e-2
+  noise_regularizer_config: null

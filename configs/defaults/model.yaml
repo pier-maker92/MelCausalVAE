@@ -1,0 +1,12 @@
+# @package _global_
+mel_dim: null
+latent_dim: null
+sample_rate: null
+compress_factor: null
+mel_spectrogram_config:
+  sampling_rate: null
+  n_fft: 1024
+  hop_length: 256
+  n_mels: 100
+  padding: center
+  normalize: true

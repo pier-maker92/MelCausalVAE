@@ -1,1 +1,1 @@
-"""Neural network modules for MelCausalVAE"""
+"""Neural network modules for Dicodec"""

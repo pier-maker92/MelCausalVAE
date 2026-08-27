@@ -1,22 +1,14 @@
-import sys
 import json
 import torch
 import einops
 from torch import nn
-from einops import rearrange
 from typing import Tuple, List
+import torchaudio.functional as F
 from .configs import MelSpectrogramConfig, WavLMConfig
 from torchaudio.transforms import MelSpectrogram
 from .output_dataclasses import FeatureExtractorOutput
 
-try:
-    from transformers import WavLMModel
-except ImportError:
-    WavLMModel = None
 
-
-# TODO fix implementation for bigvgan
-# from meldataset import get_mel_spectrogram as get_mel_spectrogram_bigvgan
 class AttrDict(dict):
     def __init__(self, *args, **kwargs):
         super(AttrDict, self).__init__(*args, **kwargs)
@@ -42,10 +34,6 @@ class FeatureExtractor(nn.Module):
         self.n_mels = config.n_mels
         self.padding = config.padding
         self.normalize = config.normalize
-        self.use_bigvgan_mel = config.use_bigvgan_mel
-
-        if self.use_bigvgan_mel:
-            raise NotImplementedError("BigVGAN mel not implemented yet")
 
         self.mel_transform = MelSpectrogram(
             sample_rate=self.sampling_rate,
@@ -82,8 +70,6 @@ class FeatureExtractor(nn.Module):
             )
         sr = unique_sampling_rates.pop()
         if sr != self.sampling_rate:
-            import torchaudio.functional as F
-
             audios = [F.resample(audio, sr, self.sampling_rate) for audio in audios]
         dtype = audios[0].dtype
         device = audios[0].device
@@ -158,25 +144,32 @@ class WavLMFeatureExtractor(nn.Module):
     def __init__(
         self,
         config: WavLMConfig,
+        wavlm: nn.Module,
         **kwargs,
     ):
         super().__init__()
-        if WavLMModel is None:
-            raise ImportError(
-                "transformers is not installed. Please install it using `pip install transformers` to use WavLMFeatureExtractor."
-            )
-
         self.sampling_rate = config.sampling_rate
         self.layer = config.layer
         self.normalize = config.normalize
 
-        self.wavlm = WavLMModel.from_pretrained(config.pretrained_model_name)
+        object.__setattr__(self, "_wavlm", wavlm)
         self.wavlm.eval()
         for param in self.wavlm.parameters():
-            param.requires_grad = False
+            param.requires_grad_(False)
 
         self.register_buffer("std", torch.tensor(1.0))
         self.register_buffer("mean", torch.tensor(0.0))
+
+    @property
+    def wavlm(self) -> nn.Module:
+        return self._wavlm
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        self.wavlm.eval()
+        for param in self.wavlm.parameters():
+            param.requires_grad_(False)
+        return self
 
     @torch.no_grad()
     def _update_std_mean_with_momentum(
@@ -187,20 +180,32 @@ class WavLMFeatureExtractor(nn.Module):
             self.std.copy_(self.std * 0.99 + valid_features.std() * 0.01)
             self.mean.copy_(self.mean * 0.99 + valid_features.mean() * 0.01)
 
-    def forward(self, audios_srs: List[Tuple[torch.FloatTensor, int]], **kwargs):
-        audios, sampling_rates = zip(*audios_srs)
-        unique_sampling_rates = set(sampling_rates)
-        if len(unique_sampling_rates) > 1:
-            raise ValueError(
-                "All audios must have the same sampling rate. "
-                f"Found {len(unique_sampling_rates)} unique sampling rates: "
-                f"{unique_sampling_rates}."
-            )
-        sr = unique_sampling_rates.pop()
-        if sr != self.sampling_rate:
-            import torchaudio.functional as F
+    def forward(
+        self,
+        audios_srs: List[Tuple[torch.FloatTensor, int]] | None = None,
+        audio_16khz: List[torch.FloatTensor] | None = None,
+        **kwargs,
+    ):
+        if audio_16khz is not None:
+            audios = tuple(audio_16khz)
+        elif audios_srs is not None:
+            audios, sampling_rates = zip(*audios_srs)
+            unique_sampling_rates = set(sampling_rates)
+            if len(unique_sampling_rates) > 1:
+                raise ValueError(
+                    "All audios must have the same sampling rate. "
+                    f"Found {len(unique_sampling_rates)} unique sampling rates: "
+                    f"{unique_sampling_rates}."
+                )
+            sr = unique_sampling_rates.pop()
+            if sr != self.sampling_rate:
+                import torchaudio.functional as F
 
-            audios = [F.resample(audio, sr, self.sampling_rate) for audio in audios]
+                audios = [F.resample(audio, sr, self.sampling_rate) for audio in audios]
+        else:
+            raise ValueError(
+                "WavLMFeatureExtractor requires audios_srs or audio_16khz."
+            )
 
         dtype = audios[0].dtype
         device = audios[0].device
@@ -229,7 +234,10 @@ class WavLMFeatureExtractor(nn.Module):
             )
 
         if self.wavlm.device != device:
-            self.wavlm = self.wavlm.to(device)
+            self.wavlm.to(device)
+        self.wavlm.eval()
+        for param in self.wavlm.parameters():
+            param.requires_grad_(False)
 
         with torch.no_grad():
             outputs = self.wavlm(

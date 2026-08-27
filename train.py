@@ -2,87 +2,13 @@ import os
 import math
 import wandb
 import torch
-
-# --- WORKAROUND FOR FAIRSEQ/HYDRA ON PYTHON 3.11 ---
-import dataclasses
-
-_orig_get_field = dataclasses._get_field
-
-
-def _patched_get_field(cls, a_name, a_type, *args, **kwargs):
-    try:
-        return _orig_get_field(cls, a_name, a_type, *args, **kwargs)
-    except ValueError as e:
-        if "mutable default" in str(e):
-            default = getattr(cls, a_name, dataclasses.MISSING)
-            actual_default = (
-                default.default if isinstance(default, dataclasses.Field) else default
-            )
-            if actual_default is not dataclasses.MISSING:
-                default_cls = actual_default.__class__
-                orig_hash = getattr(default_cls, "__hash__", None)
-                try:
-                    default_cls.__hash__ = lambda self: id(self)
-                except TypeError:
-                    pass
-
-                try:
-                    return _orig_get_field(cls, a_name, a_type, *args, **kwargs)
-                finally:
-                    try:
-                        if orig_hash is None:
-                            default_cls.__hash__ = None
-                        else:
-                            default_cls.__hash__ = orig_hash
-                    except TypeError:
-                        pass
-        raise
-
-
-dataclasses._get_field = _patched_get_field
-# ---------------------------------------------------
-
-# --- WORKAROUND FOR PYTORCH 2.6 WEIGHTS_ONLY ---
-_orig_torch_load = torch.load
-
-
-def _patched_torch_load(*args, **kwargs):
-    kwargs["weights_only"] = False
-    return _orig_torch_load(*args, **kwargs)
-
-
-torch.load = _patched_torch_load
-# -----------------------------------------------
-
 import hydra
-
-# --- WORKAROUND FOR FAIRSEQ HYDRA EXPERIMENTAL IMPORT ---
-import hydra.experimental
-
-hydra.experimental.initialize = hydra.initialize
-hydra.experimental.initialize_config_module = hydra.initialize_config_module
-hydra.experimental.initialize_config_dir = hydra.initialize_config_dir
-hydra.experimental.compose = hydra.compose
-
-import hydra.experimental.initialize as _hydra_exp_init
-
-_hydra_exp_init.initialize = hydra.initialize
-_hydra_exp_init.initialize_config_module = hydra.initialize_config_module
-_hydra_exp_init.initialize_config_dir = hydra.initialize_config_dir
-
-import hydra.experimental.compose as _hydra_exp_compose
-
-_hydra_exp_compose.compose = hydra.compose
-# --------------------------------------------------------
-
 import logging
 import datetime
-from vocos import Vocos
 from typing import Dict, List
-import matplotlib.pyplot as plt
 from omegaconf import DictConfig, OmegaConf
 from accelerate import InitProcessGroupKwargs
-from data.audio_dataset import TestDatasetWrapper
+from data.audio_dataset import TrainDatasetWrapper, TestDatasetWrapper
 from transformers import (
     Trainer,
     TrainingArguments,
@@ -90,13 +16,13 @@ from transformers import (
     TrainerControl,
     TrainerState,
     set_seed,
-    EarlyStoppingCallback,
 )
+
 
 # data
 import torch.distributed as dist
 from accelerate import Accelerator
-from evaluate import run_evaluation
+from eval import run_evaluation
 from modules.builder import build_model
 from data.audio_dataset import DataCollator
 from data.audio_dataset import TrainDatasetWrapper
@@ -139,7 +65,7 @@ class KLWarmupRatioCallback(TrainerCallback):
         control: TrainerControl,
         **kwargs,
     ):
-        model = kwargs.get("model", None)
+        model = kwargs.get("model")
         if model is not None and hasattr(model, "module"):
             model = model.module
         if model is None or not hasattr(model, "encoder"):
@@ -157,27 +83,23 @@ class KLWarmupRatioCallback(TrainerCallback):
         return control
 
 
-class VAEtrainer(Trainer):
+class Dicodectrainer(Trainer):
     def __init__(self, dataset_name: str = "dataset", **kwargs):
-        self.generate_and_log_samples = kwargs.pop("generate_and_log_samples", False)
-        self.min_learning_rate = kwargs.pop("min_learning_rate", 0.0)
-        eval_num_samples = kwargs.pop("eval_num_samples", 100)
+        self.min_learning_rate = kwargs.pop("min_learning_rate")
+        eval_num_samples = kwargs.pop("eval_num_samples")
         self.eval_num_samples = (
             eval_num_samples if eval_num_samples is not None else float("inf")
         )
-        self.run_id = kwargs.pop("run_id", "default_run")
-        self.encoder_lr = kwargs.pop("encoder_lr", None)
-        self.decoder_lr = kwargs.pop("decoder_lr", None)
-        self.encoder_min_lr = kwargs.pop("encoder_min_lr", None)
-        self.decoder_min_lr = kwargs.pop("decoder_min_lr", None)
-        self.encoder_warmup_ratio = kwargs.pop("encoder_warmup_ratio", None)
-        self.decoder_warmup_ratio = kwargs.pop("decoder_warmup_ratio", None)
-        self.vq_collapse_threshold = kwargs.pop("vq_collapse_threshold", 0.5)
-        self.vq_collapse_patience = kwargs.pop("vq_collapse_patience", None)
+        self.run_id = kwargs.pop("run_id")
+        self.encoder_lr = kwargs.pop("encoder_lr")
+        self.decoder_lr = kwargs.pop("decoder_lr")
+        self.encoder_min_lr = kwargs.pop("encoder_min_lr")
+        self.decoder_min_lr = kwargs.pop("decoder_min_lr")
+        self.encoder_warmup_ratio = kwargs.pop("encoder_warmup_ratio")
+        self.decoder_warmup_ratio = kwargs.pop("decoder_warmup_ratio")
+
         super().__init__(**kwargs)
         self.dataset_name = dataset_name
-        self._vocoder = None
-        self._vocoder_type = None
         # Register granular losses
         granular_losses = [
             "audio_loss",
@@ -185,28 +107,7 @@ class VAEtrainer(Trainer):
             "mu_mean",
             "mu_var",
         ]
-        if (
-            getattr(self.model.encoder.config, "vq_config", None) is not None
-            or getattr(self.model.encoder.config, "bsq_config", None) is not None
-        ):
-            granular_losses.extend(
-                [
-                    "vq_loss",
-                    "vq_perplexity",
-                    "vq_codes_used",
-                    "vq_codes_used_frac",
-                ]
-            )
-        if (
-            getattr(self.model.encoder.config, "semantic_distillation_config", None)
-            is not None
-        ):
-            granular_losses.extend(
-                [
-                    "distill_cosine_loss",
-                    "distill_ortho_loss",
-                ]
-            )
+
         self.add_callback(AddGranularLossesToTrainerState(granular_losses))
         self.add_callback(KLWarmupRatioCallback())
 
@@ -353,7 +254,7 @@ class VAEtrainer(Trainer):
         if not self.args.should_save:
             return
 
-        # Save VAEConfig alongside the model
+        # Save DicodecConfig alongside the model
         if output_dir is None:
             output_dir = self.args.output_dir
 
@@ -368,30 +269,15 @@ class VAEtrainer(Trainer):
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         if hasattr(self.control, "granular_losses") and model.training:
-            audios_srs = inputs["output_audios_srs"]
-            feature_audios_srs = inputs.get("perturbed_audio_srs", audios_srs)
+            audios_srs = inputs["audio_input_srs"]
             output = model(
                 audios_srs=audios_srs,
-                feature_audios_srs=feature_audios_srs,
+                audio_16khz=inputs["16k_audio"],
                 training_step=self.state.global_step,
-                phoneme_alignments=inputs.get("phoneme_alignments", None),
             )
             audio_loss = output.audio_loss
             kl_loss = output.kl_loss
-            vq_loss = getattr(output, "vq_loss", None)
-            vq_stats = getattr(output, "vq_stats", None)
-            loss = audio_loss + kl_loss + (vq_loss if vq_loss is not None else 0.0)
-
-            distill_cosine_loss = getattr(output, "distill_cosine_loss", None)
-            distill_ortho_loss = getattr(output, "distill_ortho_loss", None)
-            actual_model = model.module if hasattr(model, "module") else model
-            sem_cfg = getattr(
-                actual_model.encoder.config, "semantic_distillation_config", None
-            )
-            if distill_cosine_loss is not None and sem_cfg is not None:
-                loss += distill_cosine_loss * sem_cfg.cosine_loss_weight
-            if distill_ortho_loss is not None and sem_cfg is not None:
-                loss += distill_ortho_loss * sem_cfg.ortho_loss_weight
+            loss = audio_loss + kl_loss
 
             # Accumulate granular losses
             flat_metrics = {
@@ -399,14 +285,7 @@ class VAEtrainer(Trainer):
                 "kl_loss": kl_loss,
                 "mu_mean": getattr(output, "mu_mean", None),
                 "mu_var": getattr(output, "mu_var", None),
-                "vq_loss": vq_loss,
-                "distill_cosine_loss": distill_cosine_loss,
-                "distill_ortho_loss": distill_ortho_loss,
             }
-            if vq_stats is not None:
-                flat_metrics["vq_perplexity"] = vq_stats.perplexity
-                flat_metrics["vq_codes_used"] = vq_stats.codes_used
-                flat_metrics["vq_codes_used_frac"] = vq_stats.codes_used_frac
 
             for key in self.control.granular_losses:
                 if flat_metrics.get(key) is not None:
@@ -473,9 +352,6 @@ class VAEtrainer(Trainer):
                     grad_norm if isinstance(grad_norm, float) else grad_norm.item()
                 )
 
-            if "vq_codes_used_frac" in logs:
-                self.state.latest_vq_codes_used_frac = logs["vq_codes_used_frac"]
-
             self._total_loss_scalar += tr_loss_scalar
             self._globalstep_last_logged = self.state.global_step
             self.store_flos()
@@ -497,40 +373,8 @@ class VAEtrainer(Trainer):
             if getattr(self.args, "save_strategy", None) == "best":
                 self.control.should_save = is_new_best_metric
 
-            # Check for collapse
-            vq_frac = getattr(self.state, "latest_vq_codes_used_frac", 1.0)
-            if vq_frac < self.vq_collapse_threshold:
-                if not hasattr(self.state, "vq_collapse_counter"):
-                    self.state.vq_collapse_counter = 0
-                self.state.vq_collapse_counter += 1
-
-                if self.args.process_index == 0:
-                    logger.warning(
-                        f"VQ Collapse detected (fraction {vq_frac} < {self.vq_collapse_threshold}). "
-                        f"Patience: {self.state.vq_collapse_counter}/{self.vq_collapse_patience or 'Infinity'}"
-                    )
-
-                if (
-                    self.vq_collapse_patience is not None
-                    and self.state.vq_collapse_counter >= self.vq_collapse_patience
-                ):
-                    if self.args.process_index == 0:
-                        logger.error(
-                            f"Training stopped due to VQ collapse after {self.vq_collapse_patience} evaluations."
-                        )
-                    self.control.should_training_stop = True
-            else:
-                self.state.vq_collapse_counter = 0
-
         if self.control.should_save:
-            vq_frac = getattr(self.state, "latest_vq_codes_used_frac", 1.0)
-            if vq_frac < self.vq_collapse_threshold:
-                if self.args.process_index == 0:
-                    logger.warning(
-                        f"Skipping save! vq_codes_used_frac ({vq_frac}) is below threshold ({self.vq_collapse_threshold})."
-                    )
-            else:
-                self._save_checkpoint(model, trial)
+            self._save_checkpoint(model, trial)
 
             self.control = self.callback_handler.on_save(
                 self.args, self.state, self.control
@@ -551,21 +395,13 @@ class VAEtrainer(Trainer):
         # 2. Run detailed metrics (UTMOS, WER, CER) on 100 samples
         # Only run on main process to avoid redundant computation and file conflicts
         if self.args.process_index == 0:
-            if self.generate_and_log_samples:
-                self._generate_and_log_samples()
 
             eval_dataloader = self.get_eval_dataloader(
                 eval_dataset or self.eval_dataset
             )
 
-            # We need the vocoder for evaluate.py
-            # Reusing the loading logic from _generate_and_log_samples or assuming it's available
-            vocoder, vocoder_type = self._get_vocoder()
-
             eval_metrics = run_evaluation(
                 model=self.model,
-                vocoder=vocoder,
-                vocoder_type=vocoder_type,
                 eval_dataloader=eval_dataloader,
                 device=self.args.device,
                 step=self.state.global_step,
@@ -587,271 +423,77 @@ class VAEtrainer(Trainer):
 
         return metrics
 
-    def _get_vocoder(self):
-        """Helper to get vocoder and its type with caching."""
-        if self._vocoder is not None:
-            return self._vocoder, self._vocoder_type
 
-        if getattr(self.model.config.mel_spectrogram_config, "use_bigvgan_mel", False):
-            import sys
-            import os
+def get_dataset(training_cfg):
+    dataset_name = training_cfg.pop("dataset_name")
+    if dataset_name == "mls":
+        from data.mls import MLSDataset
 
-            # Try to find bigvgan in the current workspace first
-            current_dir = os.path.dirname(os.path.abspath(__file__))
-            bigvgan_path = os.path.join(
-                current_dir, "bigvgan/bigvgan_v2_24khz_100band_256x"
-            )
+        dataset = MLSDataset()
+    elif dataset_name == "librispeech":
+        from data.librispeech import LibriSpeechDataset
 
-            # Fallback to the hardcoded path if it doesn't exist locally
-            if not os.path.exists(bigvgan_path):
-                bigvgan_path = "/home/piermel/links/scratch/MelCausalVAE/bigvgan/bigvgan_v2_24khz_100band_256x"
+        dataset = LibriSpeechDataset()
+    elif dataset_name == "libritts-r":
+        from data.libri_tts_r import LibriTTSR
 
-            if bigvgan_path not in sys.path:
-                sys.path.append(bigvgan_path)
-            import bigvgan
+        dataset = LibriTTSR()
+    else:
+        raise ValueError(f"Dataset {dataset_name} not supported")
+    train_dataset = TrainDatasetWrapper(dataset, "train")
+    test_dataset = TestDatasetWrapper(dataset, "test")
+    return dataset_name, train_dataset, test_dataset
 
-            vocoder = bigvgan.BigVGAN.from_pretrained(
-                bigvgan_path, use_cuda_kernel=False
-            )
-            vocoder_type = "bigvgan"
-        else:
-            vocoder = Vocos.from_pretrained("charactr/vocos-mel-24khz")
-            vocoder_type = "vocos"
 
-        vocoder.to(self.args.device)
-        vocoder.eval()
-        self._vocoder = vocoder
-        self._vocoder_type = vocoder_type
-        return vocoder, vocoder_type
+def maybe_init_wandb(training_cfg, accelerator):
+    wandb_project = training_cfg.pop("wandb_project")
+    wandb_run_name = training_cfg.pop("wandb_run_name")
+    wandb_id = training_cfg.pop("wandb_id")
+    if training_cfg["report_to"] == "wandb" and accelerator.is_main_process:
+        import wandb
 
-    def _generate_and_log_samples(self):
-        """
-        Generate mel spectrogram reconstructions and log to wandb.
-        """
-        logger.info(f"Generating reconstruction samples...")
-        vocoder, vocoder_type = self._get_vocoder()
-
-        # Get some samples from the eval dataset using its dataloader
-        eval_dataloader = self.get_eval_dataloader(self.eval_dataset)
-
-        need_aligner = getattr(self.model.config.encoder_config, "use_aligner", False)
-        max_batches = (
-            len(eval_dataloader) if hasattr(eval_dataloader, "__len__") else 10_000
+        wandb.init(
+            project=wandb_project,
+            name=wandb_run_name,
+            id=wandb_id,
+            resume="allow" if wandb_id else None,
         )
+        import logging
 
-        audios_srs = None
-        phoneme_alignments = None
-        for i, batch in enumerate(eval_dataloader):
-            if i >= max_batches:
-                break
-            if "output_audios_srs" not in batch:
-                continue
-            pas = batch.get("phoneme_alignments")
-            if need_aligner and (pas is None or any(p is None for p in pas)):
-                continue
-            audios_srs = batch["output_audios_srs"]
-            audios_srs = [
-                (audio.to(self.args.device).to(self.model.dtype), sr)
-                for audio, sr in audios_srs
-            ]
-            phoneme_alignments = pas
-            break
+        logger = logging.getLogger(__name__)
+        logger.info(f"Initialized W&B on main process (id: {wandb_id})")
+    return wandb_run_name
 
-        if audios_srs is None:
-            logger.warning(
-                "Skipping reconstruction logging: no eval batch with "
-                f"output audio{' and non-null phoneme_alignments' if need_aligner else ''}"
-            )
-            return
 
-        # Generate reconstructions
-        with torch.no_grad():
-            results = self.model.encode_decode(
-                audios_srs=audios_srs,
-                num_steps=16,
-                temperature=0.2,
-                guidance_scale=1.3,
-                phoneme_alignments=phoneme_alignments,
-            )
-        # Create visualizations
-        images = []
-        # Resolve device id safely for distributed/non-distributed
-        if dist.is_available() and dist.is_initialized():
-            device_id = dist.get_rank()
-        else:
-            device_id = 0
+def get_config(training_cfg):
+    training_cfg["learning_rate"] = float(training_cfg.get("learning_rate", 1e-4))
 
-        tb_writer = None
-        for cb in self.callback_handler.callbacks:
-            if cb.__class__.__name__ == "TensorBoardCallback":
-                tb_writer = getattr(cb, "tb_writer", None)
-                break
+    min_learning_rate = float(training_cfg.pop("min_learning_rate"))
+    eval_num_samples = training_cfg.pop("eval_num_samples")
+    from_pretrained = training_cfg.pop("from_pretrained")
 
-        audios = []
-        audio_paths = []
-        segmentation_plots = []
-        for idx in range(len(audios_srs)):
-            fig = self._create_mel_comparison_plot(
-                original=results["feature_extractor_output"].audio_features[idx],
-                reconstructed=results["decoder_output"].audio_features[idx],
-                original_padding_mask=results["feature_extractor_output"].padding_mask[
-                    idx
-                ],
-                reconstructed_padding_mask=results["decoder_output"].padding_mask[idx],
-                sample_idx=idx,
-                device_id=device_id,
-            )
+    def parse_float_opt(key):
+        val = training_cfg.pop(key)
+        return float(val) if val is not None else None
 
-            if wandb.run is not None:
-                # Convert matplotlib figure to wandb Image
-                images.append(
-                    wandb.Image(
-                        fig,
-                        caption=f"Sample {idx} - Step {self.state.global_step} - Device {device_id}",
-                    )
-                )
+    encoder_lr = parse_float_opt("encoder_lr")
+    decoder_lr = parse_float_opt("decoder_lr")
+    encoder_min_lr = parse_float_opt("encoder_min_lr")
+    decoder_min_lr = parse_float_opt("decoder_min_lr")
+    encoder_warmup_ratio = parse_float_opt("encoder_warmup_ratio")
+    decoder_warmup_ratio = parse_float_opt("decoder_warmup_ratio")
 
-            if tb_writer is not None:
-                tb_writer.add_figure(
-                    f"reconstructions/sample_{idx}_device_{device_id}",
-                    fig,
-                    global_step=self.state.global_step,
-                )
-
-            plt.close(fig)
-
-            # Decode reconstructed mel to audio
-            mel = results["decoder_output"].audio_features[idx]  # [T, F]
-            pad_mask = results["decoder_output"].padding_mask[idx]  # [T] True = padded
-            T = min(mel.shape[0], pad_mask.shape[0])
-            mel = mel[:T]
-            pad_mask = pad_mask[:T]
-            valid_mel = mel[~pad_mask]
-
-            # Shape for Vocos/BigVGAN: [B, F, T]
-            features = (
-                valid_mel.unsqueeze(0).permute(0, 2, 1).float().to(self.args.device)
-            )
-
-            if vocoder_type == "bigvgan":
-                # BigVGAN expects exp(mel)
-                # features = torch.exp(features.float())
-                waveform = vocoder(features)
-            else:
-                waveform = vocoder.decode(features)  # [1, samples]
-
-            waveform = waveform.float().squeeze().detach().cpu()
-            # normalize waveform to -1 to 1
-            waveform = waveform / (waveform.abs().max() + 1e-8)
-            sr = audios_srs[idx][1]
-
-            if wandb.run is not None:
-                # Log as wandb audio as well
-                audios.append(
-                    wandb.Audio(
-                        waveform.numpy(),
-                        sample_rate=sr,
-                        caption=f"Sample {idx} - Step {self.state.global_step} - Device {device_id}",
-                    )
-                )
-
-            if tb_writer is not None:
-                tb_writer.add_audio(
-                    f"reconstructions_audio/sample_{idx}_device_{device_id}",
-                    waveform.unsqueeze(0),
-                    global_step=self.state.global_step,
-                    sample_rate=sr,
-                )
-
-        # Log to wandb as a table for better visualization
-        # Log to wandb as simple lists (reverting to what worked before but with correct data)
-        if wandb.run is not None:
-            wandb.log(
-                {
-                    "reconstructions": images,
-                    "reconstructions_audio": audios,
-                },
-                step=self.state.global_step,
-            )
-
-            logger.info(
-                f"Successfully logged {len(images)} reconstruction samples to wandb"
-            )
-
-        if tb_writer is not None:
-            logger.info(f"Successfully logged reconstruction samples to TensorBoard")
-
-    def _create_mel_comparison_plot(
-        self,
-        original: torch.Tensor,
-        reconstructed: torch.Tensor,
-        original_padding_mask: torch.Tensor,
-        reconstructed_padding_mask: torch.Tensor,
-        sample_idx: int,
-        device_id: int,
-    ):
-        """
-        Create a side-by-side comparison plot of original and reconstructed mel spectrograms.
-
-        Args:
-            original: Original mel spectrogram [T, F]
-            reconstructed: Reconstructed mel spectrogram [T, F]
-            original_padding_mask: True where original mel is padded [T_orig]
-            reconstructed_padding_mask: True where reconstructed mel is padded [T_recon]
-            sample_idx: Index of the sample
-
-        Returns:
-            matplotlib figure
-        """
-        # Move to CPU and convert to numpy
-        original = original.float().detach().cpu().numpy()
-        reconstructed = reconstructed.float().detach().cpu().numpy()
-        om = original_padding_mask.detach().cpu().numpy().astype(bool)
-        rm = reconstructed_padding_mask.detach().cpu().numpy().astype(bool)
-
-        # Each spectrogram uses its own mask (lengths may differ after pooling / decoder).
-        To, Fo = original.shape[0], original.shape[1]
-        Tr, Fr = reconstructed.shape[0], reconstructed.shape[1]
-        om = om[:To]
-        rm = rm[:Tr]
-        original = original[~om]
-        reconstructed = reconstructed[~rm]
-
-        # Create figure with 2 subplots
-        fig, axes = plt.subplots(2, 1, figsize=(12, 8))
-
-        # Plot original
-        im1 = axes[0].imshow(
-            original.T,
-            aspect="auto",
-            origin="lower",
-            interpolation="nearest",
-            cmap="viridis",
-        )
-        axes[0].set_title(
-            f"Original Mel Spectrogram - Sample {sample_idx} - Device {device_id}"
-        )
-        axes[0].set_xlabel("Time")
-        axes[0].set_ylabel("Mel Frequency")
-        plt.colorbar(im1, ax=axes[0])
-
-        # Plot reconstructed
-        im2 = axes[1].imshow(
-            reconstructed.T,
-            aspect="auto",
-            origin="lower",
-            interpolation="nearest",
-            cmap="viridis",
-        )
-        axes[1].set_title(
-            f"Reconstructed Mel Spectrogram - Sample {sample_idx} - Device {device_id}"
-        )
-        axes[1].set_xlabel("Time")
-        axes[1].set_ylabel("Mel Frequency")
-        plt.colorbar(im2, ax=axes[1])
-
-        plt.tight_layout()
-        return fig
+    return (
+        min_learning_rate,
+        eval_num_samples,
+        from_pretrained,
+        encoder_lr,
+        decoder_lr,
+        encoder_min_lr,
+        decoder_min_lr,
+        encoder_warmup_ratio,
+        decoder_warmup_ratio,
+    )
 
 
 @hydra.main(version_base=None, config_path="configs", config_name="main")
@@ -859,7 +501,7 @@ def main(cfg: DictConfig):
     # Convert OmegaConf DictConfig to standard python dict
     cfg_dict = OmegaConf.to_container(cfg, resolve=True)
 
-    training_cfg = cfg_dict.get("training", {})
+    training_cfg = cfg_dict["training"]
 
     # Increase timeout to 2 hours for lengthy evaluation on Rank 0
     kwargs = InitProcessGroupKwargs(timeout=datetime.timedelta(seconds=7200))
@@ -868,136 +510,43 @@ def main(cfg: DictConfig):
     logger.info(f"Mixed precision: {accelerator.state.mixed_precision}")
 
     # Set seed for reproducibility
-    set_seed(training_cfg.get("seed", 42))
+    set_seed(training_cfg["seed"])
 
-    # Create AudioDataset
-    dataset_name = training_cfg.pop("dataset_name", None)
-    if dataset_name == "mls":
-        from data.mls import MLSDataset
+    dataset_name, train_dataset, test_dataset = get_dataset(training_cfg)
+    wandb_run_name = maybe_init_wandb(training_cfg, accelerator)
 
-        dataset = MLSDataset()
-    elif dataset_name == "libritts":
-        from data.libri_tts import LibriTTS
-
-        dataset = LibriTTS()
-    elif dataset_name in ["librispeech_aligned", "librispeech-aligned"]:
-        from data.librispeech_align import LibriSpeechAlignDataset
-
-        dataset = LibriSpeechAlignDataset()
-    elif dataset_name in ["libritts-r", "libritts_r"]:
-        from data.libri_tts_r import LibriTTSR
-
-        dataset = LibriTTSR()
-    else:
-        raise ValueError(f"Dataset {dataset_name} not supported")
-    enable_perturbed_audio = bool(training_cfg.pop("enable_perturbed_audio", False))
-    perturbed_pitch_shift_max_semitones = float(
-        training_cfg.pop("perturbed_pitch_shift_max_semitones", 8.0)
-    )
-
-    train_dataset = TrainDatasetWrapper(
-        dataset,
-        "train",
-        enable_perturbed_audio=enable_perturbed_audio,
-        perturbed_pitch_shift_max_semitones=perturbed_pitch_shift_max_semitones,
-    )
-    test_dataset = TestDatasetWrapper(
-        dataset,
-        "test",
-        enable_perturbed_audio=enable_perturbed_audio,
-        perturbed_pitch_shift_max_semitones=perturbed_pitch_shift_max_semitones,
-    )
-    # handle wandb - only initialize on main process
-    wandb_project = training_cfg.pop("wandb_project", None)
-    wandb_run_name = training_cfg.pop("wandb_run_name", None)
-    wandb_id = training_cfg.pop("wandb_id", None)
-    if training_cfg.get("report_to", "none") == "wandb" and accelerator.is_main_process:
-        wandb.init(
-            project=wandb_project,
-            name=wandb_run_name,
-            id=wandb_id,
-            resume="allow" if wandb_id else None,
-        )
-        logger.info(f"Initialized W&B on main process (id: {wandb_id})")
-
-    logger.info("Creating VAE model...")
+    logger.info("Creating Dicodec model...")
     model = build_model(cfg_dict)
-    if getattr(model.config.mel_spectrogram_config, "use_bigvgan_mel", False):
-        logger.info("Using BigVGAN-compatible mel spectrogram")
 
-    training_cfg["learning_rate"] = float(training_cfg.get("learning_rate"))
-    min_learning_rate = float(training_cfg.pop("min_learning_rate", 0.0))
-    early_stopping_patience = training_cfg.pop("early_stopping_patience", None)
-    generate_and_log_samples = training_cfg.pop("generate_and_log_samples", True)
-    eval_num_samples = training_cfg.pop("eval_num_samples", 100)
-    vq_collapse_threshold = float(training_cfg.pop("vq_collapse_threshold", 0.5))
-    vq_collapse_patience = training_cfg.pop("vq_collapse_patience", None)
-    if vq_collapse_patience is not None:
-        vq_collapse_patience = int(vq_collapse_patience)
+
+    (
+        min_learning_rate,
+        eval_num_samples,
+        from_pretrained,
+        encoder_lr,
+        decoder_lr,
+        encoder_min_lr,
+        decoder_min_lr,
+        encoder_warmup_ratio,
+        decoder_warmup_ratio,
+    ) = get_config(training_cfg)
 
     # Check for DeepSpeed config in training_cfg
     if "deepspeed" in training_cfg and training_cfg["deepspeed"]:
         logger.info(f"Using DeepSpeed config: {training_cfg['deepspeed']}")
 
-    from_pretrained = training_cfg.pop("from_pretrained", None)
     if from_pretrained:
         model.from_pretrained(from_pretrained)
         logger.info(f"Loaded pretrained model from {from_pretrained}")
 
-    freeze_encoder = training_cfg.pop("freeze_encoder", False)
-    if freeze_encoder:
-        for param in model.encoder.parameters():
-            param.requires_grad = False
-        if hasattr(model.encoder, "vq_pre_proj"):
-            for param in model.encoder.vq_pre_proj.parameters():
-                param.requires_grad = True
-        logger.info("Encoder frozen (vq_pre_proj kept trainable).")
-
-    freeze_decoder = training_cfg.pop("freeze_decoder", False)
-    if freeze_decoder:
-        for param in model.decoder.parameters():
-            param.requires_grad = False
-        logger.info("Decoder frozen.")
-
-    if "lr_scheduler_type" not in training_cfg:
-        training_cfg["lr_scheduler_type"] = "constant"
-
-    # Extract optional differential learning rates and warmup ratios
-    encoder_lr = training_cfg.pop("encoder_lr", None)
-    decoder_lr = training_cfg.pop("decoder_lr", None)
-    encoder_min_lr = training_cfg.pop("encoder_min_lr", None)
-    decoder_min_lr = training_cfg.pop("decoder_min_lr", None)
-    encoder_warmup_ratio = training_cfg.pop("encoder_warmup_ratio", None)
-    decoder_warmup_ratio = training_cfg.pop("decoder_warmup_ratio", None)
-
-    if encoder_lr is not None:
-        encoder_lr = float(encoder_lr)
-    if decoder_lr is not None:
-        decoder_lr = float(decoder_lr)
-    if encoder_min_lr is not None:
-        encoder_min_lr = float(encoder_min_lr)
-    if decoder_min_lr is not None:
-        decoder_min_lr = float(decoder_min_lr)
-    if encoder_warmup_ratio is not None:
-        encoder_warmup_ratio = float(encoder_warmup_ratio)
-    if decoder_warmup_ratio is not None:
-        decoder_warmup_ratio = float(decoder_warmup_ratio)
-
     # Create unique run ID for evaluation outputs
     # If run_id is provided via command line (run_job.sh), use it.
-    run_id = training_cfg.pop("run_id", None)
+    run_id = training_cfg.pop("run_id")
     if run_id is None:
         date_dir = datetime.datetime.now().strftime("%d-%B-%Y")
         time_dir = datetime.datetime.now().strftime("%H:%M:%S")
         run_name = wandb_run_name or "run"
         run_id = f"{date_dir}/{time_dir}/{run_name}"
-
-    train_only_vq = training_cfg.pop("train_only_vq", False)
-    train_only_vq_and_decoder = training_cfg.pop("train_only_vq_and_decoder", False)
-    if train_only_vq_and_decoder:
-        logger.info("Training only VQ + decoder parameters (encoder frozen).")
-    elif train_only_vq:
-        logger.info("Training only VQ parameters (encoder and decoder frozen).")
 
     # Setup training arguments
     training_args = TrainingArguments(
@@ -1007,11 +556,9 @@ def main(cfg: DictConfig):
     )
     logger.info(f"TrainingArgs bf16 enabled: {training_args.bf16}")
 
-    
-
     # Create trainer
     data_collator = DataCollator()
-    trainer = VAEtrainer(
+    trainer = Dicodectrainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
@@ -1019,7 +566,6 @@ def main(cfg: DictConfig):
         data_collator=data_collator,
         min_learning_rate=min_learning_rate,
         dataset_name=dataset_name or "librispeech",
-        generate_and_log_samples=generate_and_log_samples,
         eval_num_samples=eval_num_samples,
         run_id=run_id,
         encoder_lr=encoder_lr,
@@ -1028,16 +574,7 @@ def main(cfg: DictConfig):
         decoder_min_lr=decoder_min_lr,
         encoder_warmup_ratio=encoder_warmup_ratio,
         decoder_warmup_ratio=decoder_warmup_ratio,
-        vq_collapse_threshold=vq_collapse_threshold,
-        vq_collapse_patience=vq_collapse_patience,
     )
-
-    # Add Early Stopping if enabled
-    if training_args.load_best_model_at_end and early_stopping_patience is not None:
-        trainer.add_callback(
-            EarlyStoppingCallback(early_stopping_patience=early_stopping_patience)
-        )
-        logger.info(f"Enabled Early Stopping with patience {early_stopping_patience}")
 
     # Start training
     logger.info("Starting training...")

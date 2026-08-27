@@ -26,30 +26,36 @@ class EncoderOutput(ModelOutput):
     kl_loss: Optional[torch.FloatTensor] = None
     padding_mask: Optional[torch.BoolTensor] = None
     mu: Optional[torch.FloatTensor] = None
-    vq_stats: Optional[VQStats] = None
-    vq_loss: Optional[torch.FloatTensor] = None
-    mu_pre_vq: Optional[torch.FloatTensor] = None
-    quantized: Optional[torch.FloatTensor] = None
-    residual: Optional[torch.FloatTensor] = None
-    tail: Optional[torch.FloatTensor] = None
-    indices: Optional[torch.LongTensor] = None
-    ortho_loss: Optional[torch.FloatTensor] = None
-    speaker_embedding: Optional[torch.FloatTensor] = None
 
 
 @dataclass
-class VAEOutput(ModelOutput):
+class DicodecOutput(ModelOutput):
     audio_loss: Optional[torch.FloatTensor] = None
     kl_loss: Optional[torch.FloatTensor] = None
     mu_mean: Optional[torch.FloatTensor] = None
     mu_var: Optional[torch.FloatTensor] = None
-    vq_loss: Optional[torch.FloatTensor] = None
-    vq_stats: Optional[VQStats] = None
-    quantized: Optional[torch.FloatTensor] = None
-    residual: Optional[torch.FloatTensor] = None
-    tail: Optional[torch.FloatTensor] = None
-    distill_cosine_loss: Optional[torch.FloatTensor] = None
-    distill_ortho_loss: Optional[torch.FloatTensor] = None
+
+
+@dataclass
+class PCAOutput(ModelOutput):
+    z_mean: Optional[torch.FloatTensor] = None
+    z_pca: Optional[torch.FloatTensor] = None
+    z_residuo: Optional[torch.FloatTensor] = None
+
+
+@dataclass
+class AttributesOutput(ModelOutput):
+    z_sem: Optional[torch.FloatTensor] = None
+    z_pros: Optional[torch.FloatTensor] = None
+    z_mean: Optional[torch.FloatTensor] = None
+    z_lp: Optional[torch.FloatTensor] = None
+    z_hp: Optional[torch.FloatTensor] = None
+
+
+@dataclass
+class LowPassFilterOutput(ModelOutput):
+    z_lp: Optional[torch.FloatTensor] = None
+    z_hp: Optional[torch.FloatTensor] = None
 
 
 @dataclass
@@ -62,22 +68,4 @@ class DecoderOutput(ModelOutput):
 @dataclass
 class FeatureExtractorOutput(ModelOutput):
     audio_features: Optional[torch.FloatTensor] = None
-    padding_mask: Optional[torch.BoolTensor] = None
-
-
-@dataclass
-class VAEStandardOutput(ModelOutput):
-    """Output of VAEWithStandardDecoder.forward() — carries both losses and raw tensors."""
-
-    audio_loss: Optional[torch.FloatTensor] = None
-    kl_loss: Optional[torch.FloatTensor] = None
-    mu_mean: Optional[torch.FloatTensor] = None
-    mu_var: Optional[torch.FloatTensor] = None
-    vq_loss: Optional[torch.FloatTensor] = None
-    vq_stats: Optional["VQStats"] = None
-    distill_cosine_loss: Optional[torch.FloatTensor] = None
-    distill_ortho_loss: Optional[torch.FloatTensor] = None
-    # Raw tensors needed by the GAN trainer
-    mel_pred: Optional[torch.FloatTensor] = None
-    mel_target: Optional[torch.FloatTensor] = None
     padding_mask: Optional[torch.BoolTensor] = None

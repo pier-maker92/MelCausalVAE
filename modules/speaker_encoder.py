@@ -6,11 +6,7 @@ import torch.nn.functional as F
 import torchaudio.functional as AF
 
 from .configs import SpeakerEncoderConfig
-
-try:
-    from transformers import WavLMModel
-except ImportError:
-    WavLMModel = None
+from transformers import WavLMModel
 
 
 class MaskedAttentiveStatsPool(nn.Module):
@@ -43,21 +39,19 @@ class MaskedAttentiveStatsPool(nn.Module):
 
 
 class WavLMSpeakerEncoder(nn.Module):
-    def __init__(self, config: SpeakerEncoderConfig):
+    def __init__(
+        self,
+        config: SpeakerEncoderConfig,
+        wavlm: nn.Module,
+    ):
         super().__init__()
-        if WavLMModel is None:
-            raise ImportError(
-                "transformers is not installed. Install it to use WavLM speaker "
-                "conditioning."
-            )
-
         self.config = config
         self.sampling_rate = config.sampling_rate
-        self.layers = list(config.wavlm_layers or [6])
+        self.layers = list(config.wavlm_layers)
         self.layer_combine = config.wavlm_layer_combine
         self.pooling = config.wavlm_pooling
         self.normalize_features = config.wavlm_normalize_features
-        self.freeze_wavlm = config.wavlm_freeze
+        self.freeze_wavlm = True
 
         if self.layer_combine not in {"mean", "weighted_sum", "concat"}:
             raise ValueError(
@@ -68,17 +62,16 @@ class WavLMSpeakerEncoder(nn.Module):
                 "wavlm_pooling must be one of: mean, mean_std, attentive_stats."
             )
 
-        self.wavlm = WavLMModel.from_pretrained(config.pretrained_model_name)
+        object.__setattr__(self, "_wavlm", wavlm)
         max_layer = self.wavlm.config.num_hidden_layers
         if min(self.layers) < 0 or max(self.layers) > max_layer:
             raise ValueError(
                 f"wavlm_layers must be in [0, {max_layer}] for "
-                f"{config.pretrained_model_name}."
+                "the configured WavLM model."
             )
-        if self.freeze_wavlm:
-            self.wavlm.eval()
-            for parameter in self.wavlm.parameters():
-                parameter.requires_grad = False
+        self.wavlm.eval()
+        for parameter in self.wavlm.parameters():
+            parameter.requires_grad_(False)
 
         hidden_size = self.wavlm.config.hidden_size
         if self.layer_combine == "weighted_sum":
@@ -123,10 +116,15 @@ class WavLMSpeakerEncoder(nn.Module):
         self.register_buffer("feature_mean", torch.tensor(0.0))
         self.register_buffer("feature_std", torch.tensor(1.0))
 
+    @property
+    def wavlm(self) -> nn.Module:
+        return self._wavlm
+
     def train(self, mode: bool = True):
         super().train(mode)
-        if self.freeze_wavlm:
-            self.wavlm.eval()
+        self.wavlm.eval()
+        for parameter in self.wavlm.parameters():
+            parameter.requires_grad_(False)
         return self
 
     def _prepare_audio(
@@ -148,9 +146,7 @@ class WavLMSpeakerEncoder(nn.Module):
         padded = torch.nn.utils.rnn.pad_sequence(
             waveforms, batch_first=True, padding_value=0.0
         )
-        padding_mask = torch.ones(
-            padded.shape, device=padded.device, dtype=torch.bool
-        )
+        padding_mask = torch.ones(padded.shape, device=padded.device, dtype=torch.bool)
         for index, length in enumerate(lengths):
             padding_mask[index, :length] = False
         return padded, padding_mask
@@ -187,14 +183,10 @@ class WavLMSpeakerEncoder(nn.Module):
         device = next(self.parameters()).device
         waveforms, padding_mask = self._prepare_audio(audios_srs, device)
 
-        if self.freeze_wavlm:
-            with torch.no_grad():
-                outputs = self.wavlm(
-                    waveforms.float(),
-                    attention_mask=(~padding_mask).long(),
-                    output_hidden_states=True,
-                )
-        else:
+        self.wavlm.eval()
+        for parameter in self.wavlm.parameters():
+            parameter.requires_grad_(False)
+        with torch.no_grad():
             outputs = self.wavlm(
                 waveforms.float(),
                 attention_mask=(~padding_mask).long(),

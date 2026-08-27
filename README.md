@@ -1,11 +1,11 @@
-# MelCausalVAE
+# Dicodec
 
-A Variational Autoencoder (VAE) for audio mel spectrograms, featuring a causal Convformer encoder and a DiT-based Conditional Flow Matching (CFM) decoder.
+A Variational Autoencoder (Dicodec) for audio mel spectrograms, featuring a causal Convformer encoder and a DiT-based Conditional Flow Matching (CFM) decoder.
 
 ## Structure Overview
 
 - `modules/`: Core model components.
-  - `VAE.py`: Main model wrapper.
+  - `Dicodec.py`: Main model wrapper.
   - `encoder/`: Causal Convformer architecture.
   - `decoder/`: DiT-based CFM decoder.
   - `configs.py`: Dataclass-based configurations.

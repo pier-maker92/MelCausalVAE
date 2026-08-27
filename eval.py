@@ -10,46 +10,17 @@ import logging
 import argparse
 import torchaudio
 from tqdm import tqdm
-from vocos import Vocos
 from transformers import set_seed
 import torchaudio.transforms as T
 from modules.builder import build_model
 
 from data.audio_dataset import EvalDataCollator
 from data.audio_dataset import TestDatasetWrapper
-from data.librispeech_align import LibriSpeechAlignDataset
+from data.librispeech import LibriSpeechDataset
 
 from evaluation.scripts.dwer import DWER
 from evaluation.scripts.utmos import UTMOS
 from evaluation.scripts.speaker_similarity import SpkSimWavLM
-
-
-def load_kmeans_codebook(path: str) -> tuple[dict, dict | None]:
-    if os.path.isdir(path):
-        summary_path = os.path.join(path, "summary.json")
-        path = os.path.join(path, "encoder_kmeans.pt")
-    else:
-        summary_path = os.path.join(os.path.dirname(path), "summary.json")
-
-    if not os.path.isfile(path):
-        raise FileNotFoundError(f"K-means checkpoint not found: {path}")
-
-    summary = None
-    if os.path.isfile(summary_path):
-        with open(summary_path, "r") as f:
-            summary = json.load(f)
-
-    codebook = torch.load(path, map_location="cpu")
-    if "centroids" not in codebook:
-        raise ValueError(f"K-means checkpoint has no centroids: {path}")
-    if "latent_selection" not in codebook and "feature_dims" not in codebook:
-        raise ValueError(
-            "K-means checkpoint must contain latent_selection or legacy feature_dims."
-        )
-
-    codebook["path"] = path
-    codebook["summary"] = summary
-    return codebook, summary
 
 
 def load_model(checkpoint, device):
@@ -71,15 +42,13 @@ def load_model(checkpoint, device):
         "Encoder must be in eval mode: reparameterization trick and "
         "dropout regularizer are only disabled when training=False"
     )
-    print("Initializing Vocoder...")
-    vocoder = Vocos.from_pretrained("charactr/vocos-mel-24khz").to(device)
-    return model, vocoder, model_name
+    return model, model_name
 
 
 def load_test_dataset(
     num_workers: int, batch_size: int, num_samples=None, max_audio_len=None
 ):
-    dataset = LibriSpeechAlignDataset()
+    dataset = LibriSpeechDataset()
     test_dataset = TestDatasetWrapper(dataset, "test", max_audio_len=max_audio_len)
     if num_samples is not None:
         test_dataset = torch.utils.data.Subset(test_dataset, range(num_samples))
@@ -93,51 +62,143 @@ def load_test_dataset(
     return dataloader
 
 
-def get_hypothesis(model, vocoder, audios_srs, args, device):
+def get_hypothesis(model, audios_srs, args, device, audio_16khz=None):
     params = {
         "audios_srs": audios_srs,
         "num_steps": args.num_steps,
         "temperature": args.temperature,
         "guidance_scale": args.guidance_scale,
     }
-    if args.quantized or args.residual or args.tail:
-        params["quantized"] = False
-        params["residual"] = False
-        params["tail"] = False
-
-    if args.quantized:
-        params["quantized"] = True
-    if args.residual:
-        params["residual"] = True
-    if args.tail:
-        params["tail"] = True
-
-    if getattr(args, "chunk_size", None) is not None:
-        params["chunk_size"] = args.chunk_size
-    if getattr(args, "chunk", None) is not None:
-        params["chunk"] = args.chunk
-    if getattr(args, "exclude_chunk", None) is not None:
-        params["exclude_chunk"] = args.exclude_chunk
-    if getattr(args, "exclude_start_chunk", None) is not None:
-        params["exclude_start_chunk"] = args.exclude_start_chunk
-    if getattr(args, "exclude_end_chunk", None) is not None:
-        params["exclude_end_chunk"] = args.exclude_end_chunk
-    if getattr(args, "kmeans_codebook", None) is not None:
-        params["kmeans_codebook"] = args.kmeans_codebook
-        params["kmeans_chunk_size"] = args.kmeans_chunk_size
+    if audio_16khz is not None:
+        params["audio_16khz"] = audio_16khz
 
     generator = torch.Generator(device=device).manual_seed(args.seed)
     params["generator"] = generator
 
     out = model.encode_decode(**params)
-    reconstructed_mel = out["decoder_output"].audio_features
     padding_mask = out["decoder_output"].padding_mask
-    audios = [
-        vocoder.decode(mel[~mask].unsqueeze(0).permute(0, 2, 1)).squeeze(0)
-        for mel, mask in zip(reconstructed_mel, padding_mask)
-        if not mask.all()
-    ]
+    audio_waveform = out["audio_waveform"]
+
+    audios = []
+    for audio, mask in zip(audio_waveform, padding_mask):
+        if not mask.all():
+            valid_frames = (~mask).sum().item()
+            hop_length = audio.shape[-1] // mask.shape[-1]
+            valid_audio_len = valid_frames * hop_length
+            audios.append(audio[..., :valid_audio_len].squeeze())
+
     return audios
+
+
+def run_evaluation(
+    model: torch.nn.Module,
+    eval_dataloader: torch.utils.data.DataLoader,
+    device: torch.device,
+    step: int,
+    dataset_name: str,
+    num_samples: int = 100,
+    run_id: str = "default_run",
+    quantized: bool = False,
+    residual: bool = False,
+    tail: bool = False,
+    chunk: int | None = None,
+    chunk_size: int | None = None,
+) -> dict[str, float]:
+    """
+    Perform evaluation during training using eval.py metric classes.
+    """
+    model.eval()
+    
+    DWER_computer = DWER("small", device=device)
+    UTMOS_reference = UTMOS(sample_rate=16000, device=device)
+    UTMOS_hypothesis = UTMOS(sample_rate=24000, device=device)
+
+    processed_count = 0
+    print(f"Starting evaluation on {num_samples} samples...")
+    
+    for batch in eval_dataloader:
+        if processed_count >= num_samples:
+            break
+            
+        references = [ref.to(device) for ref in batch["16k_audio"]]
+        audios_srs = [
+            (audio.to(device), sr) for audio, sr in batch["audio_input_srs"]
+        ]
+        
+        params = {
+            "audios_srs": audios_srs,
+            "num_steps": 16,
+            "temperature": 0.2,
+            "guidance_scale": 1.3,
+            "audio_16khz": references,
+        }
+        has_vq = getattr(model.config.encoder_config, "vq_config", None) is not None
+        if tail:
+            if not has_vq:
+                raise ValueError("The -t flag was passed, but the model's config does not have a vq_config.")
+            params["quantized"] = False
+            params["residual"] = False
+            params["tail"] = True
+        else:
+            if has_vq:
+                params["quantized"] = True
+                params["residual"] = False
+                params["tail"] = True
+            else:
+                params["quantized"] = False
+                params["residual"] = False
+                params["tail"] = False
+        if chunk is not None:
+            params["chunk"] = chunk
+        if chunk_size is not None:
+            params["chunk_size"] = chunk_size
+            
+        out = model.encode_decode(**params)
+        padding_mask = out["decoder_output"].padding_mask
+        audio_waveform = out["audio_waveform"]
+        
+        hypotheses = []
+        for audio, mask in zip(audio_waveform, padding_mask):
+            if not mask.all():
+                valid_frames = (~mask).sum().item()
+                hop_length = audio.shape[-1] // mask.shape[-1]
+                valid_audio_len = valid_frames * hop_length
+                hypotheses.append(audio[..., :valid_audio_len].squeeze())
+            else:
+                hypotheses.append(audio.squeeze())
+
+        remaining = num_samples - processed_count
+        references = references[:remaining]
+        hypotheses = hypotheses[:remaining]
+        ids = batch.get("ids", [str(i) for i in range(len(references))])[:remaining]
+        
+        UTMOS_reference.append(ids, references)
+        UTMOS_hypothesis.append(ids, hypotheses)
+        DWER_computer.append(
+            hyp_sr=24000,
+            ref_sr=16000,
+            ids=ids,
+            hyp_sig=hypotheses,
+            ref_sig=references,
+        )
+        processed_count += len(references)
+
+    utmos_ref = UTMOS_reference.summarize("average")
+    utmos_hyp = UTMOS_hypothesis.summarize("average")
+    dwer = DWER_computer.summarize("error_rate")
+    cer = DWER_computer.summarize("CER")
+    
+    DWER_computer.clear()
+    
+    summary_metrics = {
+        "avg_UTMOS": utmos_hyp,
+        "avg_UTMOS_ref": utmos_ref,
+        "avg_dWER": dwer,
+        "avg_dCER": cer,
+        "avg_dUTMOS": utmos_hyp - utmos_ref
+    }
+    print(f"Evaluation complete. Metrics: {summary_metrics}")
+    return summary_metrics
 
 
 def get_eval_id(args):
@@ -148,14 +209,6 @@ def get_eval_id(args):
         eval_id += f"_temp{args.temperature}"
     if args.guidance_scale is not None:
         eval_id += f"_guidance{args.guidance_scale}"
-    if args.quantized:
-        eval_id += "_quantized"
-    if args.residual:
-        eval_id += "_residual"
-    if args.tail:
-        eval_id += "_tail"
-    if getattr(args, "kmeans_path", None) is not None:
-        eval_id += "_kmeans"
     return eval_id
 
 
@@ -167,17 +220,7 @@ def main(args):
         raise RuntimeError(
             "No CUDA device is available. CPU inference is strongly discouraged."
         )
-    model, vocoder, model_name = load_model(args.checkpoint, device)
-    kmeans_summary = None
-    args.kmeans_codebook = None
-    if args.kmeans_path is not None:
-        args.kmeans_codebook, kmeans_summary = load_kmeans_codebook(args.kmeans_path)
-        print(
-            "Using K-means codebook:",
-            args.kmeans_codebook["path"],
-            "latent_selection=",
-            args.kmeans_codebook.get("latent_selection"),
-        )
+    model, model_name = load_model(args.checkpoint, device)
 
     # get models
     DWER_computer = DWER("small", device=device)  # FIXME
@@ -196,17 +239,17 @@ def main(args):
     with torch.inference_mode():
         for batch in tqdm(dataloader, desc="Processing batches", unit="batch"):
             # get references
-            references = [ref.to(device) for ref in batch["16k_audios"]]
+            references = [ref.to(device) for ref in batch["16k_audio"]]
             # get hypotheses
             audios_srs = [
-                (audio.to(device), sr) for audio, sr in batch["output_audios_srs"]
+                (audio.to(device), sr) for audio, sr in batch["audio_input_srs"]
             ]
             hypotheses = get_hypothesis(
                 model=model,
-                vocoder=vocoder,
                 audios_srs=audios_srs,
                 args=args,
                 device=device,
+                audio_16khz=[audio.to(device) for audio in batch["16k_audio"]],
             )
 
             UTMOS_reference.append(batch["ids"], references)
@@ -248,18 +291,6 @@ def main(args):
                         "num_samples": args.num_samples,
                         "num_steps": args.num_steps,
                         "temperature": args.temperature,
-                        "guidance_scale": args.guidance_scale,
-                        "quantized": args.quantized,
-                        "residual": args.residual,
-                        "tail": args.tail,
-                        "chunk_size": args.chunk_size,
-                        "chunk": args.chunk,
-                        "exclude_chunk": args.exclude_chunk,
-                        "exclude_start_chunk": args.exclude_start_chunk,
-                        "exclude_end_chunk": args.exclude_end_chunk,
-                        "kmeans_path": args.kmeans_path,
-                        "kmeans_chunk_size": args.kmeans_chunk_size,
-                        "kmeans_summary": kmeans_summary,
                     },
                 },
                 f,
@@ -310,45 +341,5 @@ if __name__ == "__main__":
     parser.add_argument("--temperature", type=float, default=0.3)
     parser.add_argument("--guidance_scale", type=float, default=1.3)
 
-    parser.add_argument("-q", "--quantized", action="store_true")
-    parser.add_argument("-r", "--residual", action="store_true")
-    parser.add_argument("-t", "--tail", action="store_true")
-
-    parser.add_argument(
-        "--chunk_size",
-        type=int,
-        default=None,
-        help="Chunk size for the bottleneck tail",
-    )
-    parser.add_argument(
-        "--chunk",
-        type=int,
-        default=None,
-        help="Number of chunks to use, starting from the bottom of the bottleneck",
-    )
-    parser.add_argument(
-        "--exclude_chunk",
-        type=int,
-        default=None,
-        help="Number of chunks to exclude, starting from the bottom of the bottleneck",
-    )
-    parser.add_argument(
-        "--exclude_start_chunk", type=int, default=None, help="Start chunk to exclude"
-    )
-    parser.add_argument(
-        "--exclude_end_chunk", type=int, default=None, help="End chunk to exclude"
-    )
-    parser.add_argument(
-        "--kmeans_path",
-        type=str,
-        default=None,
-        help="Path to a k-means folder containing encoder_kmeans.pt and summary.json.",
-    )
-    parser.add_argument(
-        "--kmeans_chunk_size",
-        type=int,
-        default=16384,
-        help="Number of valid latent frames per nearest-centroid distance chunk.",
-    )
     args = parser.parse_args()
     main(args)

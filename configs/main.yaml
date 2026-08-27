@@ -1,16 +1,10 @@
 defaults:
+  - defaults/model
   - defaults/train
   - defaults/encoder
   - defaults/decoder
   - _self_
   - settings: null
-
-# --- Global VAE Parameters ---
-mel_dim: 100
-latent_dim: 64
-sample_rate: 24000
-compress_factor: 8
-use_bigvgan_mel: false
 
 # The settings file is loaded last, so its values override
 # both _self_ (this file) and the defaults above.
