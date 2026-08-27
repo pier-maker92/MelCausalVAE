@@ -7,7 +7,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from datasets import concatenate_datasets, load_dataset
 
-from data.audio_dataset import SimpleAudioDataset
+from dicodec.data.audio_dataset import SimpleAudioDataset
 
 SLURM_TMPDIR = os.getenv("SLURM_TMPDIR")
 cache_dir = os.getenv("HF_DATASETS_CACHE")

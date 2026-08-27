@@ -24,7 +24,7 @@ from tqdm.auto import tqdm
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from modules.configs import (
+from dicodec.modules.configs import (
     DropoutConfig,
     EncoderConfig,
     KLChunkRegularizer,
@@ -33,9 +33,9 @@ from modules.configs import (
     NoiseConfig,
     WavLMConfig,
 )
-from modules.encoder.encoder import Encoder
-from modules.feature_extractor import FeatureExtractor, WavLMFeatureExtractor
-from modules.lp_filter import LowPassFilter
+from dicodec.modules.encoder.encoder import Encoder
+from dicodec.modules.feature_extractor import FeatureExtractor, WavLMFeatureExtractor
+from dicodec.modules.lp_filter import LowPassFilter
 
 
 INPUT_DIR = Path("/Volumes/Crucial X6/Research/Datasets/libritts-r/train-clean-100")

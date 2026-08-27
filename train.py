@@ -8,7 +8,7 @@ import datetime
 from typing import Dict, List
 from omegaconf import DictConfig, OmegaConf
 from accelerate import InitProcessGroupKwargs
-from data.audio_dataset import TrainDatasetWrapper, TestDatasetWrapper
+from dicodec.data.audio_dataset import TrainDatasetWrapper, TestDatasetWrapper
 from transformers import (
     Trainer,
     TrainingArguments,
@@ -23,9 +23,9 @@ from transformers import (
 import torch.distributed as dist
 from accelerate import Accelerator
 from eval import run_evaluation
-from modules.builder import build_model
-from data.audio_dataset import DataCollator
-from data.audio_dataset import TrainDatasetWrapper
+from dicodec.modules.builder import build_model
+from dicodec.data.audio_dataset import DataCollator
+from dicodec.data.audio_dataset import TrainDatasetWrapper
 
 # Set up logging
 logging.basicConfig(
@@ -427,15 +427,15 @@ class Dicodectrainer(Trainer):
 def get_dataset(training_cfg):
     dataset_name = training_cfg.pop("dataset_name")
     if dataset_name == "mls":
-        from data.mls import MLSDataset
+        from dicodec.data.mls import MLSDataset
 
         dataset = MLSDataset()
     elif dataset_name == "librispeech":
-        from data.librispeech import LibriSpeechDataset
+        from dicodec.data.librispeech import LibriSpeechDataset
 
         dataset = LibriSpeechDataset()
     elif dataset_name == "libritts-r":
-        from data.libri_tts_r import LibriTTSR
+        from dicodec.data.libri_tts_r import LibriTTSR
 
         dataset = LibriTTSR()
     else:
