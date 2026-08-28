@@ -104,6 +104,7 @@ class Dicodectrainer(Trainer):
         granular_losses = [
             "audio_loss",
             "kl_loss",
+            "vq_loss",
             "mu_mean",
             "mu_var",
         ]
@@ -277,12 +278,16 @@ class Dicodectrainer(Trainer):
             )
             audio_loss = output.audio_loss
             kl_loss = output.kl_loss
+            vq_loss = getattr(output, "vq_loss", None)
             loss = audio_loss + kl_loss
+            if vq_loss is not None:
+                loss = loss + vq_loss
 
             # Accumulate granular losses
             flat_metrics = {
                 "audio_loss": audio_loss,
                 "kl_loss": kl_loss,
+                "vq_loss": vq_loss,
                 "mu_mean": getattr(output, "mu_mean", None),
                 "mu_var": getattr(output, "mu_var", None),
             }

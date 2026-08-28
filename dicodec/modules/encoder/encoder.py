@@ -2,9 +2,10 @@ import math
 import torch
 import torch.nn as nn
 from typing import Optional
-import torch.nn.functional as F
-from ..configs import EncoderConfig, VQConfig
+from ..configs import EncoderConfig
 from ..output_dataclasses import EncoderOutput
+from ..lp_filter import LowPassFilter
+from ..quantizer.vq import VectorQuantizer
 from .sigmavae import SigmaVAEEncoder
 from .regularization import (
     DropoutRegularizer,
@@ -92,10 +93,88 @@ class Encoder(SigmaVAEEncoder):
                 config=config.noise_regularizer_config,
             )
 
+        if config.vq_config is not None:
+            if config.lowpass_filter_config is None:
+                raise ValueError(
+                    "encoder.lowpass_filter_config is required when encoder.vq_config is set."
+                )
+            lowpass_config = config.lowpass_filter_config
+            self.lowpass_filter = LowPassFilter(
+                cutoff_hz=lowpass_config.cutoff_hz,
+                sample_rate=lowpass_config.sample_rate,
+                order=lowpass_config.order,
+            )
+            self.quantizer = VectorQuantizer(config=config.vq_config, dim=latent_dim)
+            self.conv_pros = nn.Conv1d(
+                latent_dim,
+                latent_dim,
+                kernel_size=3,
+                padding=1,
+            )
+            self.conv_sem = nn.Conv1d(
+                latent_dim,
+                latent_dim,
+                kernel_size=3,
+                padding=1,
+            )
+            self.attribute_projection = nn.Linear(latent_dim * 2, latent_dim)
+
         self.config = config
         self.use_reparameterization_trick = getattr(
             config, "use_reparameterization_trick"
         )
+
+    def _encode_quantized_attributes(
+        self,
+        z: torch.FloatTensor,
+        padding_mask: Optional[torch.BoolTensor] = None,
+    ):
+        valid_mask = None
+        if padding_mask is not None:
+            if padding_mask.shape != z.shape[:2]:
+                raise ValueError(
+                    "padding_mask must have shape [batch, time], got "
+                    f"{tuple(padding_mask.shape)} for z shape {tuple(z.shape)}."
+                )
+            valid_mask = (
+                (~padding_mask).to(device=z.device, dtype=z.dtype).unsqueeze(-1)
+            )
+            valid_count = valid_mask.sum(dim=1, keepdim=True).clamp_min(1.0)
+        else:
+            valid_count = z.new_full((z.shape[0], 1, 1), z.shape[1])
+
+        if valid_mask is None:
+            z_mean = z.mean(dim=1, keepdim=True)
+        else:
+            z_mean = (z * valid_mask).sum(dim=1, keepdim=True) / valid_count
+
+        z_centered = z - z_mean
+        if valid_mask is not None:
+            z_centered = z_centered * valid_mask
+
+        z_lp = self.lowpass_filter(z_centered, valid_mask=valid_mask)
+        dot_product = torch.sum(z_centered * z_lp, dim=1, keepdim=True)
+        norm_sq = torch.sum(z_lp.square(), dim=1, keepdim=True)
+        z_pros = (dot_product / (norm_sq + 1e-8)) * z_lp
+        z_sem = z_centered - z_pros
+        if valid_mask is not None:
+            z_pros = z_pros * valid_mask
+            z_sem = z_sem * valid_mask
+
+        vq_output = self.quantizer(z_sem, padding_mask=padding_mask)
+        z_sem = vq_output.quantized
+
+        z_pros = self.conv_pros((z_pros + z_mean).transpose(1, 2)).transpose(1, 2)
+        z_sem = self.conv_sem(z_sem.transpose(1, 2)).transpose(1, 2)
+        if valid_mask is not None:
+            z_pros = z_pros * valid_mask
+            z_sem = z_sem * valid_mask
+
+        z = self.attribute_projection(torch.cat([z_sem, z_pros], dim=-1))
+        if valid_mask is not None:
+            z = z * valid_mask
+
+        return z, vq_output
 
     def forward(
         self,
@@ -139,6 +218,13 @@ class Encoder(SigmaVAEEncoder):
         else:
             z = mu
 
+        vq_output = None
+        if hasattr(self, "quantizer"):
+            z, vq_output = self._encode_quantized_attributes(
+                z,
+                padding_mask=padding_mask,
+            )
+
         # L2 penalty computation
         kl_weight = (
             self.get_kl_cosine_schedule(kwargs["step"])
@@ -158,6 +244,7 @@ class Encoder(SigmaVAEEncoder):
         out = {
             "z": z,
             "kl_loss": kl_loss,
+            "vq_loss": vq_output.loss if vq_output is not None else None,
             "mu": mu,
             "padding_mask": padding_mask,
         }

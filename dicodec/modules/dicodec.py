@@ -360,6 +360,7 @@ class Dicodec(torch.nn.Module):
         out = {
             "audio_loss": audio_loss,
             "kl_loss": encoder_output.kl_loss,
+            "vq_loss": encoder_output.vq_loss,
             "mu_mean": mu_mean,
             "mu_var": mu_var,
         }
@@ -440,7 +441,57 @@ class Dicodec(torch.nn.Module):
 
         # Reconstruct z with quantized semantic part
         z_reconstructed = z_sem_q + attrs.z_pros + attrs.z_mean
+        breakpoint()
         return z_reconstructed
+
+    @torch.no_grad()
+    def apply_external_quantizer(
+        self,
+        z,
+        padding_mask=None,
+        quantizer_name: Optional[str] = None,
+        residual: bool = False,
+    ):
+        quantizer = None
+        external_quantizers = getattr(self, "external_quantizers", {}) or {}
+        if quantizer_name is not None:
+            quantizer_str = str(quantizer_name).strip()
+            quantizer = external_quantizers.get(quantizer_str)
+            if quantizer is None:
+                for k, v in external_quantizers.items():
+                    if (
+                        k == quantizer_str
+                        or k == f"z_sem_vq_ema_{quantizer_str}"
+                        or k.endswith(f"_{quantizer_str}")
+                    ):
+                        quantizer = v
+                        break
+            if (
+                quantizer is None
+                and getattr(self, "external_quantizer", None) is not None
+            ):
+                ext_name = getattr(self, "external_quantizer_name", "")
+                if quantizer_str in ext_name or ext_name.endswith(f"_{quantizer_str}"):
+                    quantizer = self.external_quantizer
+            if quantizer is None:
+                available = ", ".join(sorted(external_quantizers)) or "<none>"
+                raise ValueError(
+                    f"Unknown external quantizer '{quantizer_name}'. Available: {available}"
+                )
+        else:
+            quantizer = getattr(self, "external_quantizer", None)
+
+        if quantizer is None:
+            raise ValueError(
+                "Quantized z_sem inference requested, but no external quantizer is attached to the model."
+            )
+        quantizer.eval()
+
+        quantizer = quantizer.to(device=z.device, dtype=z.dtype)
+        attrs = self.encode_attributes(z, padding_mask=padding_mask)
+        vq_out = quantizer(attrs.z_sem, padding_mask=padding_mask)
+        z_sem = attrs.z_sem - vq_out.quantized if residual else vq_out.quantized
+        return z_sem + attrs.z_pros + attrs.z_mean
 
     @torch.no_grad()
     def encode_decode(
@@ -475,9 +526,16 @@ class Dicodec(torch.nn.Module):
 
         z = encoder_output.z
 
-        # Apply kmeans if loaded
-        if hasattr(self, "kmeans_codebook") and self.kmeans_codebook is not None:
-            z = self.apply_kmeans(z, padding_mask=encoder_output.padding_mask)
+        # if kwargs.get("quantized", False) or kwargs.get("residual", False):
+        #     z = self.apply_external_quantizer(
+        #         z,
+        #         padding_mask=encoder_output.padding_mask,
+        #         quantizer_name=kwargs.get("quantizer_name"),
+        #         residual=kwargs.get("residual", False),
+        #     )
+        # # Apply kmeans if loaded
+        # elif hasattr(self, "kmeans_codebook") and self.kmeans_codebook is not None:
+        #     z = self.apply_kmeans(z, padding_mask=encoder_output.padding_mask)
 
         reconstructed_mel, reconstructed_padding_mask = self.sample(
             num_steps=num_steps,

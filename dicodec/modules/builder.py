@@ -1,6 +1,5 @@
 import os
 import json
-import torch
 from dataclasses import fields
 from typing import Dict, Any
 
@@ -15,6 +14,7 @@ from .configs import (
     NoiseConfig,
     SpeakerEncoderConfig,
     LowPassFilterConfig,
+    VQConfig,
 )
 
 
@@ -63,10 +63,18 @@ def build_model(cfg_dict: Dict[str, Any]) -> Dicodec:
         else None
     )
 
+    vq_dict = encoder_cfg.pop("vq_config", None)
+    vq_config = (
+        VQConfig(**_filter_dataclass_kwargs(VQConfig, vq_dict))
+        if vq_dict
+        else None
+    )
+
     encoder_config = EncoderConfig(
         dropout_regularizer_config=dropout_config,
         kl_chunk_regularizer_config=kl_config,
         noise_regularizer_config=noise_config,
+        vq_config=vq_config,
         **_filter_dataclass_kwargs(EncoderConfig, encoder_cfg),
     )
 
@@ -133,8 +141,7 @@ def build_model(cfg_dict: Dict[str, Any]) -> Dicodec:
     )
 
 
-def load_pretrained_model(checkpoint_dir: str):
-
+def load_pretrained_model(checkpoint_dir: str, **_ignored_kwargs):
     config_path = os.path.join(checkpoint_dir, "config.json")
     with open(config_path, "r") as f:
         cfg_dict = json.load(f)
@@ -149,30 +156,4 @@ def load_pretrained_model(checkpoint_dir: str):
         model.from_pretrained(checkpoint_dir)
 
     model.eval()
-
-    kmeans_path = os.path.join(checkpoint_dir, "kmeans.pt")
-    if os.path.exists(kmeans_path):
-        print(f"Found kmeans codebook at {kmeans_path}, attaching to model...")
-        model.kmeans_codebook = torch.load(kmeans_path, map_location="cpu")
-    else:
-        model.kmeans_codebook = None
-
-    kmeans_manifest_path = os.path.join(checkpoint_dir, "kmeans_manifest.json")
-    model.kmeans_codebooks = {}
-    if os.path.exists(kmeans_manifest_path):
-        with open(kmeans_manifest_path, "r") as f:
-            kmeans_manifest = json.load(f)
-        for name, entry in kmeans_manifest.get("codebooks", {}).items():
-            codebook_path = entry["path"]
-            if not os.path.isabs(codebook_path):
-                codebook_path = os.path.join(checkpoint_dir, codebook_path)
-            if os.path.exists(codebook_path):
-                model.kmeans_codebooks[name] = torch.load(
-                    codebook_path,
-                    map_location="cpu",
-                )
-        default_codebook = str(kmeans_manifest.get("default", ""))
-        if model.kmeans_codebook is None and default_codebook in model.kmeans_codebooks:
-            model.kmeans_codebook = model.kmeans_codebooks[default_codebook]
-
     return model

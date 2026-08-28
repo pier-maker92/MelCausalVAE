@@ -122,8 +122,6 @@ class VQConfig:
     entropy_temperature: float
     dim_to_quantize: Optional[Union[int, str]] = None
     recon_weight: Optional[float] = None
-    focal_encoder_config: Optional[FocalQuantizerConfig] = None
-    focal_decoder_config: Optional[FocalQuantizerConfig] = None
 
     def __post_init__(self):
         if self.vq_type not in {"bsq", "fsq", "vq", "vq_ema"}:
@@ -155,6 +153,8 @@ class EncoderConfig(SigmaVAEEncoderConfig):
     dropout_regularizer_config: Optional[DropoutConfig] = None
     kl_chunk_regularizer_config: Optional[KLChunkRegularizer] = None
     noise_regularizer_config: Optional[NoiseConfig] = None
+    vq_config: Optional[VQConfig] = None
+    lowpass_filter_config: Optional["LowPassFilterConfig"] = None
 
 
 #########################
@@ -297,6 +297,7 @@ class DicodecConfig:
 
         self.encoder_config.latent_dim = self.latent_dim
         self.encoder_config.compress_factor_C = self.compress_factor
+        self.encoder_config.lowpass_filter_config = self.lowpass_filter_config
 
         self.decoder_config.mel_dim = self.mel_dim
         self.decoder_config.audio_latent_dim = self.latent_dim

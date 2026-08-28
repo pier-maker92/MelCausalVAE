@@ -5,7 +5,6 @@ from ..configs import VQConfig
 import torch.nn.functional as F
 from .fsq import FiniteScalarQuantizer
 from .bsq import BinarySphericalQuantizer
-from .focal import FocalDecoder, FocalEncoder
 from ..output_dataclasses import VQVAEOutput, VQStats
 
 
@@ -71,33 +70,11 @@ class VectorQuantizer(nn.Module):
             raise ValueError(f"Unknown vq_type: {self.vq_type}")
         
         self.recon_weight = getattr(config, "recon_weight", None)
-        self.focal_encoder = None
-        self.focal_decoder = None
-
-        if config.focal_encoder_config is not None:
-            self.focal_encoder = FocalEncoder(
-                input_dim=self.dim,
-                output_dim=self.quantizer.dim,
-                config=config.focal_encoder_config,
-            )
-            self.proj_in = nn.Identity()
-        else:
-            self.proj_in = nn.Sequential(
-                nn.Linear(self.dim, self.quantizer.dim, bias=False),
-                nn.LayerNorm(self.quantizer.dim),
-            )
-
-        if config.focal_decoder_config is not None:
-            self.focal_decoder = FocalDecoder(
-                input_dim=self.quantizer.dim,
-                output_dim=self.dim,
-                config=config.focal_decoder_config,
-            )
-            self.proj_out = nn.Identity()
-        else:
-            self.proj_out = nn.Sequential(
-                nn.Linear(self.quantizer.dim, self.dim, bias=True),
-            )
+        self.proj_in = nn.Sequential(
+            nn.Linear(self.dim, self.quantizer.dim, bias=False),
+            nn.LayerNorm(self.quantizer.dim),
+        )
+        self.proj_out = nn.Linear(self.quantizer.dim, self.dim, bias=True)
 
     def forward(
         self,
@@ -194,13 +171,9 @@ class VectorQuantizer(nn.Module):
         )
 
     def _encode(self, z: torch.Tensor) -> torch.Tensor:
-        if self.focal_encoder is not None:
-            return self.focal_encoder(z)
         return self.proj_in(z)
 
     def _decode(self, z_q_proj: torch.Tensor) -> torch.Tensor:
-        if self.focal_decoder is not None:
-            return self.focal_decoder(z_q_proj)
         return self.proj_out(z_q_proj)
 
     @property

@@ -12,7 +12,7 @@ import torchaudio
 from tqdm import tqdm
 from transformers import set_seed
 import torchaudio.transforms as T
-from dicodec.modules.builder import build_model
+from dicodec.modules.builder import load_pretrained_model
 
 from dicodec.data.audio_dataset import EvalDataCollator
 from dicodec.data.audio_dataset import TestDatasetWrapper
@@ -23,20 +23,23 @@ from evaluation.scripts.utmos import UTMOS
 from evaluation.scripts.speaker_similarity import SpkSimWavLM
 
 
-def load_model(checkpoint, device):
+def load_model(checkpoint, device, quantizer_name=None, kmeans_name=None, kmeans_dir=None):
     print(f"Loading model from {checkpoint}...")
     config_path = os.path.join(checkpoint, "config.json")
     with open(config_path, "r") as f:
         cfg_dict = json.load(f)
 
     model_name = cfg_dict.get("model_name")
-
-    model = build_model(cfg_dict)
-
-    checkpoint_path = os.path.join(checkpoint, "model.safetensors")
-    model.from_pretrained(checkpoint_path)
+    model = load_pretrained_model(
+        checkpoint,
+        quantizer_name=quantizer_name,
+        kmeans_name=kmeans_name,
+        kmeans_dir=kmeans_dir,
+    )
     model.eval()
+    print(f"Moving model to {device}...", flush=True)
     model.to(device)
+    print(f"Model moved to {device}.", flush=True)
     assert not model.training, "Model must be in eval mode"
     assert not model.encoder.training, (
         "Encoder must be in eval mode: reparameterization trick and "
@@ -48,10 +51,16 @@ def load_model(checkpoint, device):
 def load_test_dataset(
     num_workers: int, batch_size: int, num_samples=None, max_audio_len=None
 ):
+    print("Loading LibriSpeechDataset...", flush=True)
     dataset = LibriSpeechDataset()
+    print("LibriSpeechDataset loaded.", flush=True)
+    print("Building TestDatasetWrapper...", flush=True)
     test_dataset = TestDatasetWrapper(dataset, "test", max_audio_len=max_audio_len)
+    print(f"TestDatasetWrapper loaded with {len(test_dataset)} examples.", flush=True)
     if num_samples is not None:
         test_dataset = torch.utils.data.Subset(test_dataset, range(num_samples))
+        print(f"Subset selected with {len(test_dataset)} examples.", flush=True)
+    print("Building DataLoader...", flush=True)
     dataloader = torch.utils.data.DataLoader(
         test_dataset,
         batch_size=batch_size,
@@ -59,6 +68,7 @@ def load_test_dataset(
         num_workers=num_workers,
         collate_fn=EvalDataCollator(),
     )
+    print("DataLoader built.", flush=True)
     return dataloader
 
 
@@ -71,6 +81,15 @@ def get_hypothesis(model, audios_srs, args, device, audio_16khz=None):
     }
     if audio_16khz is not None:
         params["audio_16khz"] = audio_16khz
+    quant_name = getattr(args, "quantized_name", None) or getattr(args, "quantizer_name", None)
+    if quant_name:
+        params["quantizer_name"] = quant_name
+        params["quantized"] = True
+    elif getattr(args, "quantized", False):
+        params["quantized"] = True
+    if getattr(args, "residual", False):
+        params["residual"] = True
+        params["quantized"] = False
 
     generator = torch.Generator(device=device).manual_seed(args.seed)
     params["generator"] = generator
@@ -108,10 +127,11 @@ def run_evaluation(
     Perform evaluation during training using eval.py metric classes.
     """
     model.eval()
+    metric_device = torch.device("cpu") if device.type == "mps" else device
     
-    DWER_computer = DWER("small", device=device)
-    UTMOS_reference = UTMOS(sample_rate=16000, device=device)
-    UTMOS_hypothesis = UTMOS(sample_rate=24000, device=device)
+    DWER_computer = DWER("small", device=metric_device)
+    UTMOS_reference = UTMOS(sample_rate=16000, device=metric_device)
+    UTMOS_hypothesis = UTMOS(sample_rate=24000, device=metric_device)
 
     processed_count = 0
     print(f"Starting evaluation on {num_samples} samples...")
@@ -171,15 +191,17 @@ def run_evaluation(
         references = references[:remaining]
         hypotheses = hypotheses[:remaining]
         ids = batch.get("ids", [str(i) for i in range(len(references))])[:remaining]
+        metric_references = [ref.to(metric_device) for ref in references]
+        metric_hypotheses = [hyp.to(metric_device) for hyp in hypotheses]
         
-        UTMOS_reference.append(ids, references)
-        UTMOS_hypothesis.append(ids, hypotheses)
+        UTMOS_reference.append(ids, metric_references)
+        UTMOS_hypothesis.append(ids, metric_hypotheses)
         DWER_computer.append(
             hyp_sr=24000,
             ref_sr=16000,
             ids=ids,
-            hyp_sig=hypotheses,
-            ref_sig=references,
+            hyp_sig=metric_hypotheses,
+            ref_sig=metric_references,
         )
         processed_count += len(references)
 
@@ -209,32 +231,59 @@ def get_eval_id(args):
         eval_id += f"_temp{args.temperature}"
     if args.guidance_scale is not None:
         eval_id += f"_guidance{args.guidance_scale}"
+    if getattr(args, "kmeans_name", None) is not None:
+        eval_id += f"_kmeans{args.kmeans_name}"
     return eval_id
+
+
+def get_device() -> torch.device:
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if torch.backends.mps.is_available():
+        try:
+            torch.zeros(1, device="mps")
+            return torch.device("mps")
+        except RuntimeError:
+            pass
+    raise RuntimeError(
+        "No CUDA or MPS device is available. CPU inference is strongly discouraged."
+    )
 
 
 def main(args):
     set_seed(args.seed)
-    if torch.cuda.is_available():
-        device = torch.device("cuda")
-    else:
-        raise RuntimeError(
-            "No CUDA device is available. CPU inference is strongly discouraged."
-        )
-    model, model_name = load_model(args.checkpoint, device)
+    device = get_device()
+    quant_name = getattr(args, "quantized_name", None) or getattr(args, "quantizer_name", None)
+    model, model_name = load_model(
+        args.checkpoint,
+        device,
+        quantizer_name=quant_name,
+        kmeans_name=args.kmeans_name,
+        kmeans_dir=args.kmeans_dir,
+    )
+    metric_device = torch.device("cpu") if device.type == "mps" else device
+    print(f"Using {device} for inference and {metric_device} for metrics.", flush=True)
 
     # get models
-    DWER_computer = DWER("small", device=device)  # FIXME
-    UTMOS_reference = UTMOS(sample_rate=16000, device=device)
-    UTMOS_hypothesis = UTMOS(sample_rate=24000, device=device)
-    SpkSim_computer = SpkSimWavLM("microsoft/wavlm-base-sv", device=device)
+    print("Initializing DWER metric...", flush=True)
+    DWER_computer = DWER("small", device=metric_device)  # FIXME
+    print("Initializing UTMOS reference metric...", flush=True)
+    UTMOS_reference = UTMOS(sample_rate=16000, device=metric_device)
+    print("Initializing UTMOS hypothesis metric...", flush=True)
+    UTMOS_hypothesis = UTMOS(sample_rate=24000, device=metric_device)
+    print("Initializing speaker similarity metric...", flush=True)
+    SpkSim_computer = SpkSimWavLM("microsoft/wavlm-base-sv", device=metric_device)
+    print("Metrics initialized.", flush=True)
 
     # load Librispeech test dataset
+    print("Loading evaluation dataloader...", flush=True)
     dataloader = load_test_dataset(
         args.num_workers,
         args.batch_size,
         num_samples=args.num_samples,
         max_audio_len=args.max_audio_len,
     )
+    print("Evaluation dataloader loaded.", flush=True)
 
     with torch.inference_mode():
         for batch in tqdm(dataloader, desc="Processing batches", unit="batch"):
@@ -251,22 +300,24 @@ def main(args):
                 device=device,
                 audio_16khz=[audio.to(device) for audio in batch["16k_audio"]],
             )
+            metric_references = [ref.to(metric_device) for ref in references]
+            metric_hypotheses = [hyp.to(metric_device) for hyp in hypotheses]
 
-            UTMOS_reference.append(batch["ids"], references)
-            UTMOS_hypothesis.append(batch["ids"], hypotheses)
+            UTMOS_reference.append(batch["ids"], metric_references)
+            UTMOS_hypothesis.append(batch["ids"], metric_hypotheses)
             DWER_computer.append(
                 hyp_sr=24000,
                 ref_sr=16000,
                 ids=batch["ids"],
-                hyp_sig=hypotheses,
-                ref_sig=references,
+                hyp_sig=metric_hypotheses,
+                ref_sig=metric_references,
             )
             SpkSim_computer.append(
                 hyp_sr=24000,
                 ref_sr=16000,
                 ids=batch["ids"],
-                hyp_sig=hypotheses,
-                ref_sig=references,
+                hyp_sig=metric_hypotheses,
+                ref_sig=metric_references,
             )
 
         utmos_ref = UTMOS_reference.summarize("average")
@@ -319,7 +370,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--num_samples",
         type=int,
-        default=None,
+        default=100,
         help="Number of samples to evaluate",
     )
 
@@ -340,6 +391,38 @@ if __name__ == "__main__":
     parser.add_argument("--num_steps", type=int, default=8)
     parser.add_argument("--temperature", type=float, default=0.3)
     parser.add_argument("--guidance_scale", type=float, default=1.3)
+    parser.add_argument(
+        "--quantized",
+        action="store_true",
+        help="Apply the attached external z_sem quantizer during inference.",
+    )
+    parser.add_argument(
+        "--residual",
+        action="store_true",
+        help="Replace z_sem with the residual against the attached external quantizer.",
+    )
+    parser.add_argument(
+        "--quantized_name",
+        "--quantizer_name",
+        type=str,
+        default=None,
+        choices=["128", "512", "1024", "2048", "z_sem_vq_ema_128", "z_sem_vq_ema_512", "z_sem_vq_ema_1024", "z_sem_vq_ema_2048"],
+        dest="quantized_name",
+        help="Quantizer codebook size or name to load (e.g. 128, 512, 1024).",
+    )
+    parser.add_argument(
+        "--kmeans_name",
+        type=str,
+        default=None,
+        choices=["128", "512", "1024"],
+        help="KMeans codebook size/name to use for z_sem semantic quantization.",
+    )
+    parser.add_argument(
+        "--kmeans_dir",
+        type=str,
+        default=None,
+        help="Optional directory containing kmeans_manifest.json and kmeans codebooks.",
+    )
 
     args = parser.parse_args()
     main(args)
