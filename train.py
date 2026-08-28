@@ -430,7 +430,7 @@ def get_dataset(training_cfg):
         from dicodec.data.mls import MLSDataset
 
         dataset = MLSDataset()
-    elif dataset_name == "librispeech":
+    elif dataset_name in ("librispeech", "librispeech-aligned"):
         from dicodec.data.librispeech import LibriSpeechDataset
 
         dataset = LibriSpeechDataset()
