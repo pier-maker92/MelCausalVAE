@@ -126,6 +126,10 @@ class VQConfig:
     def __post_init__(self):
         if self.vq_type not in {"bsq", "fsq", "vq", "vq_ema"}:
             raise ValueError("vq_type must be one of: bsq, fsq, vq, vq_ema.")
+        if self.vq_type in {"vq", "vq_ema"} and (
+            self.vq_dim is None or self.vq_dim <= 0
+        ):
+            raise ValueError("vq_dim must be > 0 when vq_type is 'vq' or 'vq_ema'.")
         if not 0.0 <= self.add_residual_p <= 1.0:
             raise ValueError("add_residual_p must be in [0, 1].")
         if self.entropy_loss_weight < 0.0:
