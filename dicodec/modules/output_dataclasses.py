@@ -25,6 +25,8 @@ class EncoderOutput(ModelOutput):
     z: Optional[torch.FloatTensor] = None
     kl_loss: Optional[torch.FloatTensor] = None
     vq_loss: Optional[torch.FloatTensor] = None
+    vq_perplexity: Optional[torch.FloatTensor] = None
+    vq_codebook_usage: Optional[torch.FloatTensor] = None
     padding_mask: Optional[torch.BoolTensor] = None
     mu: Optional[torch.FloatTensor] = None
 
@@ -34,6 +36,8 @@ class DicodecOutput(ModelOutput):
     audio_loss: Optional[torch.FloatTensor] = None
     kl_loss: Optional[torch.FloatTensor] = None
     vq_loss: Optional[torch.FloatTensor] = None
+    vq_perplexity: Optional[torch.FloatTensor] = None
+    vq_codebook_usage: Optional[torch.FloatTensor] = None
     mu_mean: Optional[torch.FloatTensor] = None
     mu_var: Optional[torch.FloatTensor] = None
 

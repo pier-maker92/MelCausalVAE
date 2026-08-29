@@ -245,6 +245,14 @@ class Encoder(SigmaVAEEncoder):
             "z": z,
             "kl_loss": kl_loss,
             "vq_loss": vq_output.loss if vq_output is not None else None,
+            "vq_perplexity": (
+                vq_output.stats.perplexity if vq_output is not None else None
+            ),
+            "vq_codebook_usage": (
+                vq_output.stats.codes_used_frac * 100.0
+                if vq_output is not None
+                else None
+            ),
             "mu": mu,
             "padding_mask": padding_mask,
         }

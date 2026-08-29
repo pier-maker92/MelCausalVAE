@@ -105,6 +105,8 @@ class Dicodectrainer(Trainer):
             "audio_loss",
             "kl_loss",
             "vq_loss",
+            "vq_perplexity",
+            "vq_codebook_usage",
             "mu_mean",
             "mu_var",
         ]
@@ -288,6 +290,8 @@ class Dicodectrainer(Trainer):
                 "audio_loss": audio_loss,
                 "kl_loss": kl_loss,
                 "vq_loss": vq_loss,
+                "vq_perplexity": getattr(output, "vq_perplexity", None),
+                "vq_codebook_usage": getattr(output, "vq_codebook_usage", None),
                 "mu_mean": getattr(output, "mu_mean", None),
                 "mu_var": getattr(output, "mu_var", None),
             }

@@ -361,6 +361,8 @@ class Dicodec(torch.nn.Module):
             "audio_loss": audio_loss,
             "kl_loss": encoder_output.kl_loss,
             "vq_loss": encoder_output.vq_loss,
+            "vq_perplexity": encoder_output.vq_perplexity,
+            "vq_codebook_usage": encoder_output.vq_codebook_usage,
             "mu_mean": mu_mean,
             "mu_var": mu_var,
         }
