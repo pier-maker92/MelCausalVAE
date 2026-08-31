@@ -1,6 +1,5 @@
 import argparse
 import json
-import math
 import random
 import sys
 from dataclasses import asdict
@@ -16,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from dicodec.modules.configs import FocalQuantizerConfig, VQConfig
+from dicodec.modules.configs import VQConfig
 from dicodec.modules.quantizer.vq import VectorQuantizer
 
 
@@ -24,6 +23,7 @@ INPUT_DIR = Path("/Volumes/Crucial X6/Research/dicodec-attributes")
 OUTPUT_DIR = INPUT_DIR / "quantizers"
 ATTRIBUTE = "z_sem"
 SEED = 1234
+VQ_TYPE_ALIASES = {"std_vq": "vq"}
 
 
 def seed_everything(seed: int) -> None:
@@ -172,34 +172,6 @@ def collate_with_padding(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torc
     return {"z": z, "padding_mask": padding_mask}
 
 
-def build_focal_config(args: argparse.Namespace, prefix: str) -> FocalQuantizerConfig | None:
-    hidden_dim = getattr(args, f"{prefix}_hidden_dim")
-    num_layers = getattr(args, f"{prefix}_num_layers")
-    if hidden_dim is None and num_layers <= 0:
-        return None
-    if hidden_dim is None and num_layers == 0:
-        return None
-    if num_layers <= 0:
-        raise ValueError(f"--{prefix.replace('_', '-')}-num-layers must be > 0 when focal is enabled.")
-
-    return FocalQuantizerConfig(
-        hidden_dim=hidden_dim,
-        num_layers=num_layers,
-        ffn_dim=getattr(args, f"{prefix}_ffn_dim"),
-        focal_window=args.focal_window,
-        focal_level=args.focal_level,
-        focal_factor=args.focal_factor,
-        dropout=args.focal_dropout,
-        use_post_norm=args.focal_use_post_norm,
-        use_layerscale=args.focal_use_layerscale,
-        layerscale_init=args.focal_layerscale_init,
-        tanhscale_init=args.focal_tanhscale_init,
-        normalize_modulator=args.focal_normalize_modulator,
-        causal=args.focal_causal,
-        window_size=args.focal_window_size,
-    )
-
-
 def infer_feature_dim(paths: List[Path]) -> int:
     for path in paths:
         array = np.load(path, mmap_mode="r")
@@ -211,38 +183,30 @@ def infer_feature_dim(paths: List[Path]) -> int:
 def validate_args(args: argparse.Namespace) -> None:
     if args.seq_len is not None and args.seq_len <= 0:
         raise ValueError("--seq-len must be > 0 when provided.")
-    if args.vq_type == "bsq":
+    vq_type = VQ_TYPE_ALIASES.get(args.vq_type, args.vq_type)
+    if vq_type == "bsq":
         if args.codebook_size < 2 or args.codebook_size & (args.codebook_size - 1):
             raise ValueError("--codebook-size for bsq must be a power of two >= 2.")
-        expected_vq_dim = int(math.log2(args.codebook_size))
-        if args.vq_dim != expected_vq_dim:
-            raise ValueError(
-                f"--vq-dim must be {expected_vq_dim} for bsq when "
-                f"--codebook-size={args.codebook_size}."
-            )
 
 
 def build_model(args: argparse.Namespace, dim: int, device: str) -> Tuple[VectorQuantizer, VQConfig]:
-    focal_encoder_config = build_focal_config(args, "focal_encoder")
-    focal_decoder_config = build_focal_config(args, "focal_decoder")
+    vq_type = VQ_TYPE_ALIASES.get(args.vq_type, args.vq_type)
 
     config = VQConfig(
         num_embeddings=args.codebook_size,
         add_residual=False,
         add_residual_p=0.0,
         drop_acoustic_p=0.0,
-        vq_type=args.vq_type,
+        vq_type=vq_type,
         vq_dim=args.vq_dim,
         commitment_weight=args.commitment_weight,
         ema_decay=args.ema_decay,
         ema_eps=args.ema_eps,
-        reset_dead_codes=args.vq_type == "vq_ema",
+        reset_dead_codes=vq_type == "vq_ema",
         reset_every_forward=10,
         entropy_loss_weight=args.entropy_loss_weight,
         entropy_temperature=args.entropy_temperature,
         recon_weight=args.recon_weight,
-        focal_encoder_config=focal_encoder_config,
-        focal_decoder_config=focal_decoder_config,
     )
     model = VectorQuantizer(config=config, dim=dim).to(device)
     return model, config
@@ -281,9 +245,12 @@ def save_checkpoint(
 
     quantizer = model.quantizer
     if hasattr(quantizer, "embedding"):
+        embedding = quantizer.embedding
+        if isinstance(embedding, torch.nn.Embedding):
+            embedding = embedding.weight
         torch.save(
             {
-                "embedding": quantizer.embedding.detach().cpu(),
+                "embedding": embedding.detach().cpu(),
                 "cluster_size": getattr(quantizer, "cluster_size", None),
                 "embed_avg": getattr(quantizer, "embed_avg", None),
                 "step": step,
@@ -307,7 +274,11 @@ def main() -> None:
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
-    parser.add_argument("--vq-type", choices=["vq_ema", "bsq"], default="vq_ema")
+    parser.add_argument(
+        "--vq-type",
+        choices=["vq_ema", "vq", "std_vq", "bsq", "fsq"],
+        default="vq_ema",
+    )
     parser.add_argument("--codebook-size", type=int, default=1024)
     parser.add_argument("--vq-dim", type=int, default=64)
     parser.add_argument("--commitment-weight", type=float, default=0.25)
@@ -321,23 +292,6 @@ def main() -> None:
     parser.add_argument("--save-every", type=int, default=1000)
     parser.add_argument("--log-every", type=int, default=50)
 
-    parser.add_argument("--focal-encoder-hidden-dim", type=int, default=None)
-    parser.add_argument("--focal-encoder-num-layers", type=int, default=0)
-    parser.add_argument("--focal-encoder-ffn-dim", type=int, default=None)
-    parser.add_argument("--focal-decoder-hidden-dim", type=int, default=None)
-    parser.add_argument("--focal-decoder-num-layers", type=int, default=0)
-    parser.add_argument("--focal-decoder-ffn-dim", type=int, default=None)
-    parser.add_argument("--focal-window", type=int, default=7)
-    parser.add_argument("--focal-level", type=int, default=2)
-    parser.add_argument("--focal-factor", type=int, default=2)
-    parser.add_argument("--focal-dropout", type=float, default=0.0)
-    parser.add_argument("--focal-window-size", type=int, default=128)
-    parser.add_argument("--focal-layerscale-init", type=float, default=1e-4)
-    parser.add_argument("--focal-tanhscale-init", type=float, default=0.5)
-    parser.add_argument("--focal-use-post-norm", action="store_true")
-    parser.add_argument("--focal-use-layerscale", action="store_true")
-    parser.add_argument("--focal-normalize-modulator", action="store_true")
-    parser.add_argument("--focal-causal", action="store_true")
     args = parser.parse_args()
 
     validate_args(args)
@@ -388,6 +342,7 @@ def main() -> None:
 
     step = 0
     running_loss = 0.0
+    cumulative_code_counts = torch.zeros(args.codebook_size, dtype=torch.long)
     progress = tqdm(
         total=args.steps,
         desc=f"Training {args.vq_type}",
@@ -414,14 +369,25 @@ def main() -> None:
             running_loss += loss_value
             progress.update(1)
 
+            valid_indices = output.indices[~padding_mask].detach().cpu().long()
+            if valid_indices.numel() > 0:
+                cumulative_code_counts += torch.bincount(
+                    valid_indices, minlength=args.codebook_size
+                )
+
             if step % args.log_every == 0 or step == 1:
                 avg = running_loss / step
-                perplexity = float(output.stats.perplexity.detach().item())
-                used = float(output.stats.codes_used_frac.detach().item())
+                total_codes = cumulative_code_counts.sum().clamp_min(1)
+                probs = cumulative_code_counts.float() / total_codes
+                perplexity = float(torch.exp(-(probs * torch.log(probs + 1e-10)).sum()))
+                used = float(
+                    (cumulative_code_counts > 0).sum().item()
+                    / args.codebook_size
+                )
                 progress.set_postfix(
                     loss=f"{avg:.4f}",
-                    ppl=f"{perplexity:.1f}",
-                    used=f"{used:.3f}",
+                    ppl_all=f"{perplexity:.1f}",
+                    used_all=f"{used:.3f}",
                 )
 
             if step % args.save_every == 0:
@@ -429,7 +395,7 @@ def main() -> None:
                 save_dir = args.output_dir / f"{args.attribute}_{args.vq_type}_{args.codebook_size}"
                 save_checkpoint(model, config, save_dir, step, avg, dim)
 
-        if step >= args.steps or args.seq_len is None:
+        if step >= args.steps:
             break
 
     progress.close()

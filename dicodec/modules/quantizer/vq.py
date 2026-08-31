@@ -145,8 +145,12 @@ class VectorQuantizer(nn.Module):
         z_q_proj = z_q_proj_flat.view_as(z_proj)
         indices_bt = indices_flat.view(B, T)
 
-        # Straight-Through Estimator (STE)
-        z_q_proj_st = z_proj + (z_q_proj - z_proj).detach()
+        # FSQ owns its STE so gradients retain the tanh bounding derivative.
+        # Nearest-neighbour and binary quantizers use the identity STE here.
+        if self.vq_type == "fsq":
+            z_q_proj_st = z_q_proj
+        else:
+            z_q_proj_st = z_proj + (z_q_proj - z_proj).detach()
         
         z_q = self._decode(z_q_proj_st)
 
@@ -176,13 +180,17 @@ class VectorQuantizer(nn.Module):
                 # Probabilità marginale di bit = 1
                 p = torch.sigmoid(z_proj_valid / temp)
                 p_avg = p.mean(dim=0)
-                # Vogliamo massimizzare l'entropia, quindi minimizziamo l'entropia negativa
+                # High marginal bit entropy alone allows a two-code collapse
+                # (all bits flip together), so also decorrelate bit choices.
                 entropy = -p_avg * torch.log(p_avg + 1e-7) - (1 - p_avg) * torch.log(1 - p_avg + 1e-7)
-                entropy_loss = -entropy.mean()
+                centered = p - p_avg
+                covariance = centered.transpose(0, 1) @ centered / max(p.shape[0], 1)
+                off_diagonal = covariance - torch.diag_embed(torch.diagonal(covariance))
+                entropy_loss = -entropy.mean() + off_diagonal.square().mean()
                 total_loss = total_loss + entropy_weight * entropy_loss
         
-        if self.recon_weight is not None:
-            recon_loss = F.mse_loss(z_q[valid], z[valid])
+        if self.recon_weight is not None and valid.any():
+            recon_loss = F.mse_loss(z_q[valid], z[valid].detach())
             total_loss = total_loss + self.recon_weight * recon_loss
 
         return VQVAEOutput(

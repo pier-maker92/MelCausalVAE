@@ -63,7 +63,10 @@ class FiniteScalarQuantizer(nn.Module):
         offset = torch.where(self._levels % 2 == 0, 0.5, 0.0)
         
         z = z * half_l - offset
-        z_q = torch.round(z)
+        # Straight-through rounding keeps the bounded tanh derivative.  The
+        # caller must not wrap FSQ in an additional identity STE, otherwise
+        # the bounding non-linearity is bypassed during backpropagation.
+        z_q = z + (torch.round(z) - z).detach()
         
         z_q = z_q + offset
         z_q = z_q / half_l

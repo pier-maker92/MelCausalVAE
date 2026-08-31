@@ -39,6 +39,7 @@ class DualBranchAEOutput:
     z_sem_q: torch.Tensor
     z_pros_enc: torch.Tensor
     quantizer_loss: torch.Tensor
+    consistency_loss: torch.Tensor
     indices: torch.Tensor | None
 
 
@@ -47,17 +48,30 @@ class ResNetBlock1D(nn.Module):
     def __init__(self, dim: int, kernel_size: int = 3, dilation: int = 1):
         super().__init__()
         padding = (kernel_size - 1) * dilation // 2
-        self.norm1 = nn.GroupNorm(num_groups=min(8, dim), num_channels=dim)
+        self.norm1 = nn.LayerNorm(dim)
         self.conv1 = nn.Conv1d(dim, dim, kernel_size, padding=padding, dilation=dilation)
-        self.norm2 = nn.GroupNorm(num_groups=min(8, dim), num_channels=dim)
+        self.norm2 = nn.LayerNorm(dim)
         self.conv2 = nn.Conv1d(dim, dim, kernel_size, padding=padding, dilation=dilation)
         self.act = nn.SiLU()
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    @staticmethod
+    def _normalize(x: torch.Tensor, norm: nn.LayerNorm) -> torch.Tensor:
+        return norm(x.transpose(1, 2)).transpose(1, 2)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        valid_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         residual = x
-        x = self.conv1(self.act(self.norm1(x)))
-        x = self.conv2(self.act(self.norm2(x)))
-        return residual + x
+        x = self.conv1(self.act(self._normalize(x, self.norm1)))
+        if valid_mask is not None:
+            x = x * valid_mask
+        x = self.conv2(self.act(self._normalize(x, self.norm2)))
+        x = residual + x
+        if valid_mask is not None:
+            x = x * valid_mask
+        return x
 
 
 class ResNetStack1D(nn.Module):
@@ -75,9 +89,13 @@ class ResNetStack1D(nn.Module):
             ResNetBlock1D(dim, kernel_size=kernel_size, dilation=d) for d in dilations
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        valid_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         for block in self.blocks:
-            x = block(x)
+            x = block(x, valid_mask=valid_mask)
         return x
 
 
@@ -92,11 +110,16 @@ class SemanticEncoder(nn.Module):
 
     def forward(self, z_sem: torch.Tensor, valid_mask: torch.Tensor | None = None) -> torch.Tensor:
         x = z_sem.transpose(1, 2)
+        channel_mask = None
         if valid_mask is not None:
-            x = x * valid_mask.transpose(1, 2)
-        x = self.out_proj(self.resnet(self.in_proj(x)))
+            channel_mask = valid_mask.transpose(1, 2)
+            x = x * channel_mask
+        x = self.in_proj(x)
+        if channel_mask is not None:
+            x = x * channel_mask
+        x = self.out_proj(self.resnet(x, valid_mask=channel_mask))
         if valid_mask is not None:
-            x = x * valid_mask.transpose(1, 2)
+            x = x * channel_mask
         return x.transpose(1, 2)
 
 
@@ -112,11 +135,16 @@ class Decoder(nn.Module):
 
     def forward(self, z_sem_q: torch.Tensor, valid_mask: torch.Tensor | None = None) -> torch.Tensor:
         x = z_sem_q.transpose(1, 2)
+        channel_mask = None
         if valid_mask is not None:
-            x = x * valid_mask.transpose(1, 2)
-        x = self.out_proj(self.resnet(self.in_proj(x)))
+            channel_mask = valid_mask.transpose(1, 2)
+            x = x * channel_mask
+        x = self.in_proj(x)
+        if channel_mask is not None:
+            x = x * channel_mask
+        x = self.out_proj(self.resnet(x, valid_mask=channel_mask))
         if valid_mask is not None:
-            x = x * valid_mask.transpose(1, 2)
+            x = x * channel_mask
         return x.transpose(1, 2)
 
 
@@ -163,21 +191,62 @@ class DualBranchQuantizedAE(nn.Module):
             f"Unrecognized quantizer output type {type(out)}."
         )
 
-    def forward(self, z_sem: torch.Tensor, valid_mask: torch.Tensor | None = None) -> DualBranchAEOutput:
+    def forward(
+        self,
+        z: torch.Tensor,
+        z_sem_target: torch.Tensor | None = None,
+        valid_mask: torch.Tensor | None = None,
+    ) -> DualBranchAEOutput:
         if valid_mask is not None and valid_mask.ndim == 2:
             valid_mask = valid_mask.unsqueeze(-1)
 
-        sem_enc = self.sem_encoder(z_sem, valid_mask=valid_mask)
-        quant_out = self._run_quantizer(sem_enc, valid_mask=valid_mask)
-        z_rec = self.decoder(quant_out.z_q, valid_mask=valid_mask)
+        sem_enc = self.sem_encoder(z, valid_mask=valid_mask)
+        consistency_loss = z.new_zeros(())
+
+        if z_sem_target is not None:
+            with torch.no_grad():
+                target_enc = self.sem_encoder(z_sem_target, valid_mask=valid_mask)
+
+            joint_enc = torch.cat([sem_enc, target_enc], dim=0)
+            joint_mask = (
+                torch.cat([valid_mask, valid_mask], dim=0)
+                if valid_mask is not None
+                else None
+            )
+            quant_out = self._run_quantizer(joint_enc, valid_mask=joint_mask)
+            z_sem_q, target_q = quant_out.z_q.chunk(2, dim=0)
+            indices = (
+                quant_out.indices.chunk(2, dim=0)[0]
+                if quant_out.indices is not None
+                else None
+            )
+
+            if valid_mask is None:
+                consistency_loss = F.mse_loss(z_sem_q, target_q.detach())
+            else:
+                valid_elements = (
+                    valid_mask.sum() * z_sem_q.shape[-1]
+                ).clamp_min(1.0)
+                consistency_loss = F.mse_loss(
+                    z_sem_q * valid_mask,
+                    target_q.detach() * valid_mask,
+                    reduction="sum",
+                ) / valid_elements
+        else:
+            quant_out = self._run_quantizer(sem_enc, valid_mask=valid_mask)
+            z_sem_q = quant_out.z_q
+            indices = quant_out.indices
+
+        z_rec = self.decoder(z_sem_q, valid_mask=valid_mask)
 
         return DualBranchAEOutput(
             z_rec=z_rec,
-            z_sem_q=quant_out.z_q,
-            z_pros_enc=torch.zeros_like(quant_out.z_q), # dummy to avoid breaking typing
+            z_sem_q=z_sem_q,
+            z_pros_enc=torch.zeros_like(z_sem_q), # dummy to avoid breaking typing
 
             quantizer_loss=quant_out.loss,
-            indices=quant_out.indices,
+            consistency_loss=consistency_loss,
+            indices=indices,
         )
 
 
@@ -236,6 +305,7 @@ def main():
     parser.add_argument("--reset-every-forward", type=int, default=10)
     parser.add_argument("--entropy-loss-weight", type=float, default=0.01)
     parser.add_argument("--entropy-temperature", type=float, default=1.0)
+    parser.add_argument("--consistency-weight", type=float, default=0.1)
     
     args = parser.parse_args()
 
@@ -257,55 +327,52 @@ def main():
             self.args = args
             
         def forward(self, x, valid_mask=None):
+            if valid_mask is None:
+                valid = torch.ones(x.shape[:2], dtype=torch.bool, device=x.device)
+            else:
+                valid = valid_mask.squeeze(-1).bool()
+
+            x_valid = x[valid]
+            if x_valid.numel() == 0:
+                return (
+                    torch.zeros_like(x),
+                    x.new_zeros(()),
+                    torch.zeros(x.shape[:2], dtype=torch.long, device=x.device),
+                )
+
+            toks_valid, codes_valid = self.quantizer_module(x_valid)
+
             if self.quantizer_type == "vq_ema":
-                toks, codes = self.quantizer_module(x)
-                if valid_mask is not None:
-                    x_m = x * valid_mask
-                    codes_m = codes * valid_mask
-                    valid_elems = (valid_mask.sum() * x.shape[-1]).clamp_min(1.0)
-                    commit_loss = F.mse_loss(codes_m.detach(), x_m, reduction='sum') / valid_elems
-                else:
-                    commit_loss = F.mse_loss(codes.detach(), x)
-                    
-                codes_ste = x + (codes - x).detach()
-                return codes_ste, self.args.commit_weight * commit_loss, toks
+                commit_loss = F.mse_loss(codes_valid.detach(), x_valid)
+                quantizer_loss = self.args.commit_weight * commit_loss
 
             elif self.quantizer_type == "bsq":
-                toks, codes = self.quantizer_module(x)
-                
-                if valid_mask is not None:
-                    probs = torch.sigmoid(x / self.args.entropy_temperature) * valid_mask
-                    valid_frames = valid_mask.sum().clamp_min(1.0)
-                    avg_probs = probs.sum(dim=(0, 1)) / valid_frames # shape [D]
-                else:
-                    probs = torch.sigmoid(x / self.args.entropy_temperature)
-                    avg_probs = probs.mean(dim=(0, 1)) # shape [D]
-                    
-                entropy_loss = torch.mean(avg_probs * torch.log(avg_probs + 1e-5) + (1 - avg_probs) * torch.log(1 - avg_probs + 1e-5))
-                
-                codes_ste = x + (codes - x).detach()
-                return codes_ste, self.args.entropy_loss_weight * entropy_loss, toks
+                probs = torch.sigmoid(x_valid / self.args.entropy_temperature)
+                avg_probs = probs.mean(dim=0)
+                negative_entropy = torch.mean(avg_probs * torch.log(avg_probs + 1e-5) + (1 - avg_probs) * torch.log(1 - avg_probs + 1e-5))
+                centered = probs - avg_probs
+                covariance = centered.transpose(0, 1) @ centered / max(probs.shape[0], 1)
+                off_diagonal = covariance - torch.diag_embed(torch.diagonal(covariance))
+                entropy_loss = negative_entropy + off_diagonal.square().mean()
+                quantizer_loss = self.args.entropy_loss_weight * entropy_loss
 
             elif self.quantizer_type == "std_vq":
-                toks, codes = self.quantizer_module(x)
-                if valid_mask is not None:
-                    x_m = x * valid_mask
-                    codes_m = codes * valid_mask
-                    valid_elems = (valid_mask.sum() * x.shape[-1]).clamp_min(1.0)
-                    commit_loss = F.mse_loss(codes_m.detach(), x_m, reduction='sum') / valid_elems
-                    codebook_loss = F.mse_loss(codes_m, x_m.detach(), reduction='sum') / valid_elems
-                else:
-                    commit_loss = F.mse_loss(codes.detach(), x)
-                    codebook_loss = F.mse_loss(codes, x.detach())
-                    
-                loss = codebook_loss + self.args.commit_weight * commit_loss
-                codes_ste = x + (codes - x).detach()
-                return codes_ste, loss, toks
+                commit_loss = F.mse_loss(codes_valid.detach(), x_valid)
+                codebook_loss = F.mse_loss(codes_valid, x_valid.detach())
+                quantizer_loss = codebook_loss + self.args.commit_weight * commit_loss
 
             elif self.quantizer_type == "fsq":
-                toks, codes = self.quantizer_module(x)
-                codes_ste = x + (codes - x).detach()
-                return codes_ste, torch.tensor(0.0).to(x.device), toks
+                quantizer_loss = x.new_zeros(())
+
+            if self.quantizer_type == "fsq":
+                codes_valid_ste = codes_valid
+            else:
+                codes_valid_ste = x_valid + (codes_valid - x_valid).detach()
+            codes_ste = torch.zeros_like(x)
+            codes_ste[valid] = codes_valid_ste
+            toks = torch.zeros(x.shape[:2], dtype=torch.long, device=x.device)
+            toks[valid] = toks_valid.long()
+            return codes_ste, quantizer_loss, toks
 
     if args.quantizer == "vq_ema":
         from dicodec.modules.quantizer.vq_ema import EMAVectorQuantizer
@@ -354,6 +421,7 @@ def main():
     dataloader = get_dataloader(args.data_dir, target_sr=dicodec.config.sample_rate, batch_size=args.batch_size)
     
     global_step = 0
+    cumulative_code_counts = torch.zeros(args.codebook_size, dtype=torch.long)
     print("Starting training loop...")
     for epoch in range(args.epochs):
         pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{args.epochs}")
@@ -378,7 +446,11 @@ def main():
                 z_sem, z_pros, z_mean = attrs.z_sem, attrs.z_pros, attrs.z_mean
 
             optimizer.zero_grad()
-            ae_out = model(z_sem, valid_mask=~padding_mask if padding_mask is not None else None)
+            ae_out = model(
+                z,
+                z_sem_target=z_sem,
+                valid_mask=~padding_mask if padding_mask is not None else None,
+            )
             
             # Mask out padding for reconstruction loss
             if padding_mask is not None:
@@ -388,7 +460,11 @@ def main():
             else:
                 rec_loss = F.mse_loss(ae_out.z_rec, z_sem)
             
-            loss = rec_loss + ae_out.quantizer_loss
+            loss = (
+                rec_loss
+                + ae_out.quantizer_loss
+                + args.consistency_weight * ae_out.consistency_loss
+            )
             loss.backward()
             optimizer.step()
             
@@ -396,7 +472,11 @@ def main():
             global_step += 1
             
             # Compute codebook utilization and perplexity
-            postfix_dict = {"loss": f"{loss.item():.4f}", "rec_loss": f"{rec_loss.item():.4f}"}
+            postfix_dict = {
+                "loss": f"{loss.item():.4f}",
+                "rec_loss": f"{rec_loss.item():.4f}",
+                "cons": f"{ae_out.consistency_loss.item():.4f}",
+            }
             if ae_out.indices is not None:
                 codebook_size = args.codebook_size
                 if padding_mask is not None:
@@ -407,15 +487,26 @@ def main():
                     toks_flat = ae_out.indices.view(-1)
                     
                 if toks_flat.numel() > 0:
-                    unique_indices = torch.unique(toks_flat)
-                    utilization = len(unique_indices) / codebook_size * 100.0
-                    
-                    probs = torch.bincount(toks_flat, minlength=codebook_size).float() / toks_flat.numel()
+                    batch_counts = torch.bincount(
+                        toks_flat.detach().cpu(), minlength=codebook_size
+                    )
+                    cumulative_code_counts += batch_counts
+                    batch_utilization = (
+                        (batch_counts > 0).sum().item() / codebook_size * 100.0
+                    )
+                    utilization = (
+                        (cumulative_code_counts > 0).sum().item()
+                        / codebook_size
+                        * 100.0
+                    )
+
+                    probs = cumulative_code_counts.float() / cumulative_code_counts.sum()
                     entropy = -torch.sum(probs * torch.log(probs + 1e-10))
                     perplexity = torch.exp(entropy)
-                    
-                    postfix_dict["util%"] = f"{utilization:.1f}"
-                    postfix_dict["ppl"] = f"{perplexity.item():.1f}"
+
+                    postfix_dict["batch_util%"] = f"{batch_utilization:.1f}"
+                    postfix_dict["util_all%"] = f"{utilization:.1f}"
+                    postfix_dict["ppl_all"] = f"{perplexity.item():.1f}"
                     
             pbar.set_postfix(postfix_dict)
         

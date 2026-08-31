@@ -128,8 +128,8 @@ def main():
         # 3. Dual Branch AE - Full
         valid_mask = ~padding_mask if padding_mask is not None else None
         
-        # The AE now only reconstructs z_sem
-        ae_out = model(z_sem, valid_mask=valid_mask)
+        # The semantic AE extracts and quantizes semantics directly from z.
+        ae_out = model(z, valid_mask=valid_mask)
         z_sem_rec = ae_out.z_rec
         
         # To get the full z for the codec, we MUST add back the unquantized z_pros and z_mean

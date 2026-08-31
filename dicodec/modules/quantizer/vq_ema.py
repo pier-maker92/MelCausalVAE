@@ -60,26 +60,19 @@ class EMAVectorQuantizer(nn.Module):
             - 2 * torch.matmul(flatten, embedding.t())
         )
         encoding_indices = torch.argmin(distances, dim=1)
+        codes_flat = F.embedding(encoding_indices, embedding)
 
         if self.training:
-            counts = self._ema_update(flatten.detach(), encoding_indices)
+            self._ema_update(flatten.detach(), encoding_indices)
             self._forward_count.add_(1)
             if (
                 self.reset_dead_codes
                 and self._forward_count.item() % self.reset_every_forward == 0
             ):
-                did_reset = self._reset_dead_codes(flatten.detach(), counts)
-                if did_reset:
-                    embedding = self.embedding.to(dtype=flatten.dtype)
-                    distances = (
-                        torch.sum(flatten**2, dim=1, keepdim=True)
-                        + torch.sum(embedding**2, dim=1)
-                        - 2 * torch.matmul(flatten, embedding.t())
-                    )
-                    encoding_indices = torch.argmin(distances, dim=1)
+                self._reset_dead_codes(flatten.detach())
 
         toks = encoding_indices.view(*lats.shape[:-1])
-        codes = F.embedding(toks, self.embedding).to(dtype=lats.dtype)
+        codes = codes_flat.view_as(lats).to(dtype=lats.dtype)
         return toks, codes
 
     @torch.no_grad()
@@ -110,9 +103,10 @@ class EMAVectorQuantizer(nn.Module):
     def _reset_dead_codes(
         self,
         flatten: torch.Tensor,
-        counts: torch.Tensor,
     ) -> bool:
-        dead_mask = counts == 0
+        # A code is dead when its smoothed historical usage has decayed, not
+        # merely because it was absent from the current mini-batch.
+        dead_mask = self.cluster_size < 0.5
         num_dead = int(dead_mask.sum().item())
         if num_dead == 0 or flatten.numel() == 0:
             return False
