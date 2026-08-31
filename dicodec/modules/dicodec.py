@@ -474,6 +474,8 @@ class Dicodec(torch.nn.Module):
             speaker_embedding = torch.zeros_like(speaker_embedding)
 
         z = encoder_output.z
+        attributes = self.encode_attributes(z, padding_mask=encoder_output.padding_mask)
+        #z = attributes.z_sem + attributes.z_mean
 
         # Apply kmeans if loaded
         if hasattr(self, "kmeans_codebook") and self.kmeans_codebook is not None:

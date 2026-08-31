@@ -244,9 +244,9 @@ class WavLMModuleConfig:
 
 @dataclass(kw_only=True)
 class LowPassFilterConfig:
-    cutoff_hz: float = 1.42
+    cutoff_hz: float = 1.0
     sample_rate: Optional[float] = None
-    order: int = 56
+    order: int = 24
 
     def __post_init__(self):
         if self.order <= 0:
