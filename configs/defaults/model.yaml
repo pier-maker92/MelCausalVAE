@@ -10,7 +10,6 @@ semantic_quantizer_config:
   quant_dim: null
   num_sem_blocks: 2
   num_pros_blocks: 2
-  kernel_size: 3
   recon_weight: 0.0
   vq_config: null
 mel_spectrogram_config:

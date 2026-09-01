@@ -107,8 +107,6 @@ class FocalQuantizerConfig:
 @dataclass(kw_only=True)
 class VQConfig:
     num_embeddings: int
-    add_residual:bool
-    add_residual_p:float
     drop_acoustic_p:float
     vq_type: str # "bsq" or "fsq" or "vq" or "vq_ema"
     vq_dim: Optional[int] = None
@@ -128,8 +126,8 @@ class VQConfig:
     def __post_init__(self):
         if self.vq_type not in {"bsq", "fsq", "vq", "vq_ema"}:
             raise ValueError("vq_type must be one of: bsq, fsq, vq, vq_ema.")
-        if not 0.0 <= self.add_residual_p <= 1.0:
-            raise ValueError("add_residual_p must be in [0, 1].")
+        if not 0.0 <= self.drop_acoustic_p <= 1.0:
+            raise ValueError("drop_acoustic_p must be in [0, 1].")
         if self.entropy_loss_weight < 0.0:
             raise ValueError("entropy_loss_weight must be >= 0.")
         if self.entropy_temperature <= 0.0:
@@ -272,7 +270,6 @@ class SemanticQuantizerConfig:
     quant_dim: Optional[int] = None
     num_sem_blocks: int = 2
     num_pros_blocks: int = 2
-    kernel_size: int = 3
     recon_weight: float = 0.0
     vq_config: Optional[VQConfig] = None
 
@@ -285,10 +282,6 @@ class SemanticQuantizerConfig:
             raise ValueError("semantic_quantizer_config.num_sem_blocks must be > 0.")
         if self.num_pros_blocks <= 0:
             raise ValueError("semantic_quantizer_config.num_pros_blocks must be > 0.")
-        if self.kernel_size <= 0 or self.kernel_size % 2 == 0:
-            raise ValueError(
-                "semantic_quantizer_config.kernel_size must be a positive odd number."
-            )
         if self.recon_weight < 0.0:
             raise ValueError("semantic_quantizer_config.recon_weight must be >= 0.")
 

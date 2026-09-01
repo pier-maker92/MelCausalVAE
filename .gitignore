@@ -36,6 +36,9 @@ evaluation_logs/
 # Project specific
 data/
 audio_assets/
+demopage/
+demo_page/
+demo-page/
 *.wav
 *.json
 *.txt

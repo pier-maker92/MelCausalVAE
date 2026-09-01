@@ -10,12 +10,9 @@ semantic_quantizer_config:
   quant_dim: 64
   num_sem_blocks: 2
   num_pros_blocks: 2
-  kernel_size: 3
   recon_weight: 0.0
   vq_config:
     num_embeddings: 1024
-    add_residual: false
-    add_residual_p: 0.0
     drop_acoustic_p: 0.0
     vq_type: vq_ema
     vq_dim: 64

@@ -22,19 +22,13 @@ class SemanticQuantizerOutput:
     indices: torch.Tensor | None = None
 
 
-class ResNetBlock1D(nn.Module):
-    def __init__(self, dim: int, kernel_size: int = 3, dilation: int = 1):
+class MLPResNetBlock(nn.Module):
+    def __init__(self, dim: int):
         super().__init__()
-        padding = (kernel_size - 1) * dilation // 2
         self.norm1 = nn.LayerNorm(dim)
-        self.conv1 = nn.Conv1d(dim, dim, kernel_size, padding=padding, dilation=dilation)
-        self.norm2 = nn.LayerNorm(dim)
-        self.conv2 = nn.Conv1d(dim, dim, kernel_size, padding=padding, dilation=dilation)
+        self.linear1 = nn.Linear(dim, dim)
+        self.linear2 = nn.Linear(dim, dim)
         self.act = nn.SiLU()
-
-    @staticmethod
-    def _normalize(x: torch.Tensor, norm: nn.LayerNorm) -> torch.Tensor:
-        return norm(x.transpose(1, 2)).transpose(1, 2)
 
     def forward(
         self,
@@ -42,31 +36,21 @@ class ResNetBlock1D(nn.Module):
         valid_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         residual = x
-        x = self.conv1(self.act(self._normalize(x, self.norm1)))
-        if valid_mask is not None:
-            x = x * valid_mask
-        x = self.conv2(self.act(self._normalize(x, self.norm2)))
-        x = residual + x
+        x = self.linear2(self.act(self.linear1(self.norm1(x))))
+        x = x + residual
         if valid_mask is not None:
             x = x * valid_mask
         return x
 
 
-class ResNetStack1D(nn.Module):
+class MLPResNetStack(nn.Module):
     def __init__(
         self,
         dim: int,
         num_blocks: int,
-        kernel_size: int = 3,
-        dilations: list[int] | None = None,
     ):
         super().__init__()
-        dilations = dilations or [1] * num_blocks
-        if len(dilations) != num_blocks:
-            raise ValueError("dilations length must match num_blocks.")
-        self.blocks = nn.ModuleList(
-            ResNetBlock1D(dim, kernel_size=kernel_size, dilation=d) for d in dilations
-        )
+        self.blocks = nn.ModuleList(MLPResNetBlock(dim) for _ in range(num_blocks))
 
     def forward(
         self,
@@ -78,37 +62,33 @@ class ResNetStack1D(nn.Module):
         return x
 
 
-class ResNetEncoder1D(nn.Module):
+class MLPResNetEncoder(nn.Module):
     def __init__(
         self,
         in_dim: int,
         hidden_dim: int,
         out_dim: int,
         num_blocks: int = 2,
-        kernel_size: int = 3,
     ):
         super().__init__()
-        self.in_proj = nn.Conv1d(in_dim, hidden_dim, kernel_size=1)
-        self.resnet = ResNetStack1D(hidden_dim, num_blocks, kernel_size=kernel_size)
-        self.out_proj = nn.Conv1d(hidden_dim, out_dim, kernel_size=1)
+        self.in_proj = nn.Linear(in_dim, hidden_dim)
+        self.resnet = MLPResNetStack(hidden_dim, num_blocks)
+        self.out_proj = nn.Linear(hidden_dim, out_dim)
 
     def forward(
         self,
         x: torch.Tensor,
         valid_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        x = x.transpose(1, 2)
-        channel_mask = None
         if valid_mask is not None:
-            channel_mask = valid_mask.transpose(1, 2)
-            x = x * channel_mask
+            x = x * valid_mask
         x = self.in_proj(x)
-        if channel_mask is not None:
-            x = x * channel_mask
-        x = self.out_proj(self.resnet(x, valid_mask=channel_mask))
-        if channel_mask is not None:
-            x = x * channel_mask
-        return x.transpose(1, 2)
+        if valid_mask is not None:
+            x = x * valid_mask
+        x = self.out_proj(self.resnet(x, valid_mask=valid_mask))
+        if valid_mask is not None:
+            x = x * valid_mask
+        return x
 
 
 class SemanticQuantizer(nn.Module):
@@ -131,20 +111,18 @@ class SemanticQuantizer(nn.Module):
         self.config = config
         self.dim = dim
         self.quant_dim = quant_dim
-        self.semantic_encoder = ResNetEncoder1D(
+        self.semantic_encoder = MLPResNetEncoder(
             in_dim=dim,
             hidden_dim=config.hidden_dim,
             out_dim=quant_dim,
             num_blocks=config.num_sem_blocks,
-            kernel_size=config.kernel_size,
         )
         self.quantizer = VectorQuantizer(config.vq_config, dim=quant_dim)
-        self.prosody_encoder = ResNetEncoder1D(
+        self.prosody_encoder = MLPResNetEncoder(
             in_dim=dim,
             hidden_dim=config.hidden_dim,
             out_dim=quant_dim,
             num_blocks=config.num_pros_blocks,
-            kernel_size=config.kernel_size,
         )
         self.out_proj = nn.Linear(quant_dim * 2, dim)
 
@@ -162,6 +140,16 @@ class SemanticQuantizer(nn.Module):
         vq_out = self.quantizer(z_sem_enc, padding_mask=padding_mask)
         z_sem_q = vq_out.quantized
         z_pros = self.prosody_encoder(z_pros_mean, valid_mask=valid_mask)
+        drop_acoustic_p = self.config.vq_config.drop_acoustic_p
+        if self.training and drop_acoustic_p > 0.0:
+            keep = torch.rand(
+                z_pros.shape[0],
+                1,
+                1,
+                device=z_pros.device,
+                dtype=z_pros.dtype,
+            ) >= drop_acoustic_p
+            z_pros = z_pros * keep.to(dtype=z_pros.dtype)
         z = self.out_proj(torch.cat([z_sem_q, z_pros], dim=-1))
 
         if padding_mask is not None:
