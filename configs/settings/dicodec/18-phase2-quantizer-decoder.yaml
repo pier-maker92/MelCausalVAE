@@ -4,15 +4,21 @@ mel_dim: 100
 latent_dim: 64
 sample_rate: 24000
 mix_attributes_strategy: concat
+external_semantic_quantizer_config:
+  enabled: true
+  checkpoint_path: /workspace/MelCausalVAE/checkpoints/paper/baseline/18-denc128-novq/quantized/2kstep/vq_ema_cb1024
+  quantizer_type: vq_ema
+  codebook_size: 1024
+  input_source: z_sem
 
 training:
   dataset_name: libritts-r
   from_pretrained: /scratch/piermel/MelCausalVAE/checkpoints/paper/baseline/18-denc128-novq
-  semantic_quantizer_pretrained: /scratch/piermel/MelCausalVAE/checkpoints/paper/baseline/18-denc128-novq/quantized/50kstep/vq_ema_cb1024
+  semantic_quantizer_pretrained: /workspace/MelCausalVAE/checkpoints/paper/baseline/18-denc128-novq/quantized/2kstep/vq_ema_cb1024
   semantic_quantizer_type: vq_ema
   semantic_codebook_size: 1024
-  semantic_quantizer_input: null
-  semantic_recon_weight: 0.05
+  semantic_quantizer_input: z_sem
+  semantic_recon_weight: 0.1
   train_only_decoder_and_quantizer: true
 
   num_train_epochs: 3
