@@ -38,7 +38,7 @@ training:
   per_device_eval_batch_size: 8
   gradient_accumulation_steps: 1
 
-  output_dir: checkpoints/exps/dicodec-18-quantizer-decoder-ft
+  output_dir: /scratch/piermel/MelCausalVAE/checkpoints/paper/baseline/18-denc128-novq/e2e-vq
   save_total_limit: 3
   save_steps: 5000
   logging_steps: 10
@@ -58,10 +58,11 @@ training:
   min_learning_rate: 0.0
   encoder_min_lr: 1.0e-5
   decoder_min_lr: 1.0e-5
+  max_grad_norm: 1.0
 
   report_to: wandb
   wandb_project: dicodec
-  wandb_run_name: dicodec-18-quantizer-decoder-ft
+  wandb_run_name: dicodec-18-e2e-vq-ema
 
   fp16: false
   bf16: true

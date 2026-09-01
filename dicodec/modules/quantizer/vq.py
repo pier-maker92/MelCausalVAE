@@ -35,6 +35,8 @@ def _batch_vq_stats(
         perplexity=perplexity.detach(),
         codes_used=codes_used.detach(),
         codes_used_frac=codes_used_frac.detach(),
+        code_counts=counts.detach(),
+        token_count=total.detach(),
     )
 
 class VectorQuantizer(nn.Module):

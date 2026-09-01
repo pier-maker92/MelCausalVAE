@@ -112,6 +112,8 @@ class Dicodectrainer(Trainer):
 
         self.add_callback(AddGranularLossesToTrainerState(granular_losses))
         self.add_callback(KLWarmupRatioCallback())
+        self.vq_code_counts = None
+        self.vq_token_count = None
 
     def create_optimizer(self):
         """
@@ -142,13 +144,13 @@ class Dicodectrainer(Trainer):
             for n, p in self.model.named_parameters():
                 if not p.requires_grad:
                     continue
-                if "encoder" in n or "feature_extractor" in n:
-                    encoder_params.append(p)
-                elif (
-                    "decoder" in n
-                    or "external_semantic_quantizer" in n
-                    or "semantic_quantizer_projection" in n
+                if (
+                    "encoder" in n
+                    or "feature_extractor" in n
+                    or "semantic_quantizer" in n
                 ):
+                    encoder_params.append(p)
+                elif "decoder" in n:
                     decoder_params.append(p)
                 else:
                     # Fallback for any other parameters (e.g. at root level)
@@ -288,15 +290,25 @@ class Dicodectrainer(Trainer):
             kl_loss = output.kl_loss
             semantic_recon_loss = getattr(output, "semantic_recon_loss", None)
             semantic_quantizer_loss = getattr(output, "semantic_quantizer_loss", None)
-            core_model = model.module if hasattr(model, "module") else model
-            semantic_recon_weight = getattr(core_model, "semantic_recon_weight", 1.0)
             loss = audio_loss
             if kl_loss is not None:
                 loss = loss + kl_loss
-            if semantic_recon_loss is not None:
-                loss = loss + semantic_recon_weight * semantic_recon_loss
             if semantic_quantizer_loss is not None:
                 loss = loss + semantic_quantizer_loss
+
+            vq_stats = getattr(output, "semantic_vq_stats", None)
+            if (
+                vq_stats is not None
+                and getattr(vq_stats, "code_counts", None) is not None
+                and getattr(vq_stats, "token_count", None) is not None
+            ):
+                code_counts = vq_stats.code_counts.detach().float().to(self.args.device)
+                token_count = vq_stats.token_count.detach().float().to(self.args.device)
+                if self.vq_code_counts is None:
+                    self.vq_code_counts = torch.zeros_like(code_counts)
+                    self.vq_token_count = torch.zeros_like(token_count)
+                self.vq_code_counts += code_counts
+                self.vq_token_count += token_count
 
             # Accumulate granular losses
             flat_metrics = {
@@ -359,6 +371,28 @@ class Dicodectrainer(Trainer):
                         logs[k] = round(avg_val, 8)
                     else:
                         logs[k] = round(avg_val, 4)
+
+            if self.vq_code_counts is not None and self.vq_token_count is not None:
+                counts = self.vq_code_counts.clone()
+                total = self.vq_token_count.clone()
+                if dist.is_available() and dist.is_initialized():
+                    dist.all_reduce(counts, op=dist.ReduceOp.SUM)
+                    dist.all_reduce(total, op=dist.ReduceOp.SUM)
+                if total.item() > 0:
+                    probs = counts / total.clamp_min(1.0)
+                    entropy = -(probs * torch.log(probs + 1e-10)).sum()
+                    perplexity = entropy.exp()
+                    codes_used = (counts > 0).sum().float()
+                    codebook_size = counts.numel()
+                    logs["semantic_vq_perplexity"] = round(perplexity.item(), 4)
+                    logs["semantic_vq_usage_pct"] = round(
+                        (codes_used / codebook_size * 100.0).item(),
+                        4,
+                    )
+                    logs["semantic_vq_codes_used"] = int(codes_used.item())
+                    logs["semantic_vq_token_count"] = int(total.item())
+                self.vq_code_counts.zero_()
+                self.vq_token_count.zero_()
 
             # Log separate learning rates for encoder and decoder
             if self.optimizer is not None:
@@ -517,73 +551,6 @@ def get_config(training_cfg):
     )
 
 
-def maybe_load_external_quantizer(model, training_cfg):
-    quantizer_path = training_cfg.pop("semantic_quantizer_pretrained")
-    quantizer_type = training_cfg.pop("semantic_quantizer_type")
-    codebook_size = training_cfg.pop("semantic_codebook_size")
-    input_source = training_cfg.pop("semantic_quantizer_input")
-    semantic_recon_weight = float(training_cfg.pop("semantic_recon_weight"))
-    model.semantic_recon_weight = semantic_recon_weight
-
-    if quantizer_path:
-        already_initialized = (
-            getattr(model, "external_semantic_quantizer", None) is not None
-            and model.config.external_semantic_quantizer_config.checkpoint_path
-            == quantizer_path
-        )
-        if already_initialized:
-            model.config.external_semantic_quantizer_config.quantizer_type = (
-                quantizer_type
-            )
-            model.config.external_semantic_quantizer_config.codebook_size = (
-                codebook_size
-            )
-            if input_source is not None:
-                model.external_semantic_quantizer_input = input_source
-                model.config.external_semantic_quantizer_config.input_source = (
-                    input_source
-                )
-            logger.info(
-                "External semantic quantizer already initialized from model config."
-            )
-        else:
-            model.load_external_semantic_quantizer(
-                checkpoint_path=quantizer_path,
-                quantizer_type=quantizer_type,
-                codebook_size=codebook_size,
-                input_source=input_source,
-            )
-            logger.info(f"Loaded external semantic quantizer from {quantizer_path}")
-
-
-def maybe_freeze_for_decoder_quantizer_training(model, training_cfg):
-    train_only_decoder_and_quantizer = training_cfg.pop(
-        "train_only_decoder_and_quantizer"
-    )
-    if not train_only_decoder_and_quantizer:
-        return
-
-    model.train_only_decoder_and_quantizer = True
-    for param in model.parameters():
-        param.requires_grad_(False)
-
-    for module in (
-        model.decoder,
-        model.external_semantic_quantizer,
-        model.semantic_quantizer_projection,
-    ):
-        if module is None:
-            continue
-        module.train()
-        for param in module.parameters():
-            param.requires_grad_(True)
-
-    logger.info(
-        "Frozen all modules except decoder, external semantic quantizer, "
-        "and semantic quantizer projection."
-    )
-
-
 @hydra.main(version_base=None, config_path="configs", config_name="main")
 def main(cfg: DictConfig):
     # Convert OmegaConf DictConfig to standard python dict
@@ -626,9 +593,6 @@ def main(cfg: DictConfig):
     if from_pretrained:
         model.from_pretrained(from_pretrained)
         logger.info(f"Loaded pretrained model from {from_pretrained}")
-
-    maybe_load_external_quantizer(model, training_cfg)
-    maybe_freeze_for_decoder_quantizer_training(model, training_cfg)
 
     # Create unique run ID for evaluation outputs
     # If run_id is provided via command line (run_job.sh), use it.

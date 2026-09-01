@@ -266,28 +266,31 @@ class LowPassFilterConfig:
 
 
 @dataclass(kw_only=True)
-class ExternalSemanticQuantizerConfig:
+class SemanticQuantizerConfig:
     enabled: bool = False
-    checkpoint_path: Optional[str] = None
-    quantizer_type: str = "std_vq"
-    codebook_size: Optional[int] = None
-    input_source: Optional[str] = None
+    hidden_dim: int = 256
+    quant_dim: Optional[int] = None
+    num_sem_blocks: int = 2
+    num_pros_blocks: int = 2
+    kernel_size: int = 3
+    recon_weight: float = 0.0
+    vq_config: Optional[VQConfig] = None
 
     def __post_init__(self):
-        if self.quantizer_type not in {"bsq", "fsq", "std_vq", "vq", "vq_ema"}:
+        if self.hidden_dim <= 0:
+            raise ValueError("semantic_quantizer_config.hidden_dim must be > 0.")
+        if self.quant_dim is not None and self.quant_dim <= 0:
+            raise ValueError("semantic_quantizer_config.quant_dim must be > 0.")
+        if self.num_sem_blocks <= 0:
+            raise ValueError("semantic_quantizer_config.num_sem_blocks must be > 0.")
+        if self.num_pros_blocks <= 0:
+            raise ValueError("semantic_quantizer_config.num_pros_blocks must be > 0.")
+        if self.kernel_size <= 0 or self.kernel_size % 2 == 0:
             raise ValueError(
-                "external_semantic_quantizer_config.quantizer_type must be one of: "
-                "bsq, fsq, std_vq, vq, vq_ema."
+                "semantic_quantizer_config.kernel_size must be a positive odd number."
             )
-        if self.codebook_size is not None and self.codebook_size <= 0:
-            raise ValueError(
-                "external_semantic_quantizer_config.codebook_size must be > 0."
-            )
-        if self.input_source is not None and self.input_source not in {"z", "z_sem"}:
-            raise ValueError(
-                "external_semantic_quantizer_config.input_source must be either "
-                "'z' or 'z_sem'."
-            )
+        if self.recon_weight < 0.0:
+            raise ValueError("semantic_quantizer_config.recon_weight must be >= 0.")
 
 
 @dataclass(kw_only=True)
@@ -304,8 +307,8 @@ class DicodecConfig:
     lowpass_filter_config: LowPassFilterConfig = field(
         default_factory=LowPassFilterConfig
     )
-    external_semantic_quantizer_config: ExternalSemanticQuantizerConfig = field(
-        default_factory=ExternalSemanticQuantizerConfig
+    semantic_quantizer_config: SemanticQuantizerConfig = field(
+        default_factory=SemanticQuantizerConfig
     )
 
     def __post_init__(self):

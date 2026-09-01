@@ -9,6 +9,8 @@ class VQStats(ModelOutput):
     perplexity: Optional[torch.Tensor] = None
     codes_used: Optional[torch.Tensor] = None
     codes_used_frac: Optional[torch.Tensor] = None
+    code_counts: Optional[torch.Tensor] = None
+    token_count: Optional[torch.Tensor] = None
 
 
 @dataclass
@@ -34,6 +36,7 @@ class DicodecOutput(ModelOutput):
     kl_loss: Optional[torch.FloatTensor] = None
     semantic_recon_loss: Optional[torch.FloatTensor] = None
     semantic_quantizer_loss: Optional[torch.FloatTensor] = None
+    semantic_vq_stats: Optional[VQStats] = None
     mu_mean: Optional[torch.FloatTensor] = None
     mu_var: Optional[torch.FloatTensor] = None
 

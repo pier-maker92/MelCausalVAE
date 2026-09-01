@@ -47,12 +47,6 @@ training:
   # Dataset / Dicodec specifics
   resume_from_checkpoint: null
   from_pretrained: null
-  semantic_quantizer_pretrained: null
-  semantic_quantizer_type: vq_ema
-  semantic_codebook_size: null
-  semantic_quantizer_input: null
-  semantic_recon_weight: 0.05
-  train_only_decoder_and_quantizer: false
   dataset_name: null
   eval_num_samples: null
   run_id: null

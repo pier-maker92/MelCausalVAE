@@ -15,7 +15,9 @@ from .configs import (
     NoiseConfig,
     SpeakerEncoderConfig,
     LowPassFilterConfig,
-    ExternalSemanticQuantizerConfig,
+    FocalQuantizerConfig,
+    VQConfig,
+    SemanticQuantizerConfig,
 )
 
 
@@ -29,6 +31,33 @@ def _load_default_model_config() -> Dict[str, Any]:
 
     defaults_path = Path(__file__).resolve().parents[2] / "configs" / "defaults" / "model.yaml"
     return OmegaConf.to_container(OmegaConf.load(defaults_path), resolve=True)
+
+
+def _build_vq_config(vq_dict: Dict[str, Any] | None) -> VQConfig | None:
+    if not vq_dict:
+        return None
+    vq_dict = vq_dict.copy()
+    focal_encoder_dict = vq_dict.pop("focal_encoder_config", None)
+    focal_decoder_dict = vq_dict.pop("focal_decoder_config", None)
+    focal_encoder_config = (
+        FocalQuantizerConfig(
+            **_filter_dataclass_kwargs(FocalQuantizerConfig, focal_encoder_dict)
+        )
+        if focal_encoder_dict
+        else None
+    )
+    focal_decoder_config = (
+        FocalQuantizerConfig(
+            **_filter_dataclass_kwargs(FocalQuantizerConfig, focal_decoder_dict)
+        )
+        if focal_decoder_dict
+        else None
+    )
+    return VQConfig(
+        focal_encoder_config=focal_encoder_config,
+        focal_decoder_config=focal_decoder_config,
+        **_filter_dataclass_kwargs(VQConfig, vq_dict),
+    )
 
 
 def build_model(cfg_dict: Dict[str, Any]) -> Dicodec:
@@ -120,19 +149,21 @@ def build_model(cfg_dict: Dict[str, Any]) -> Dicodec:
         if lowpass_filter_dict
         else LowPassFilterConfig()
     )
-    external_quantizer_dict = cfg_dict.get(
-        "external_semantic_quantizer_config",
-        cfg_dict.get("external_semantic_quantizer", None),
-    )
-    external_quantizer_config = (
-        ExternalSemanticQuantizerConfig(
+    semantic_quantizer_dict = cfg_dict.get("semantic_quantizer_config", None)
+    if semantic_quantizer_dict:
+        semantic_quantizer_dict = semantic_quantizer_dict.copy()
+        semantic_quantizer_dict["vq_config"] = _build_vq_config(
+            semantic_quantizer_dict.get("vq_config")
+        )
+    semantic_quantizer_config = (
+        SemanticQuantizerConfig(
             **_filter_dataclass_kwargs(
-                ExternalSemanticQuantizerConfig,
-                external_quantizer_dict,
+                SemanticQuantizerConfig,
+                semantic_quantizer_dict,
             )
         )
-        if external_quantizer_dict
-        else ExternalSemanticQuantizerConfig()
+        if semantic_quantizer_dict
+        else SemanticQuantizerConfig()
     )
 
     dicodec_config = DicodecConfig(
@@ -140,13 +171,13 @@ def build_model(cfg_dict: Dict[str, Any]) -> Dicodec:
         latent_dim=cfg_dict.get("latent_dim"),
         sample_rate=cfg_dict.get("sample_rate"),
         compress_factor=cfg_dict.get("compress_factor"),
-        mix_attributes_strategy=cfg_dict.get("mix_attributes_strategy", "add"), #FIXME this is hardcoded, should be specified in the config
+        mix_attributes_strategy=cfg_dict.get("mix_attributes_strategy", "add"),
         encoder_config=encoder_config,
         decoder_config=decoder_config,
         mel_spectrogram_config=mel_spec_config,
         wavlm_module_config=wavlm_module_config,
         lowpass_filter_config=lowpass_filter_config,
-        external_semantic_quantizer_config=external_quantizer_config,
+        semantic_quantizer_config=semantic_quantizer_config,
     )
 
     training_cfg = cfg_dict.get("training", {}) or {}
@@ -163,7 +194,7 @@ def load_pretrained_model(checkpoint_dir: str):
     with open(config_path, "r") as f:
         cfg_dict = json.load(f)
     default_model_cfg = _load_default_model_config()
-    for key in ("mix_attributes_strategy", "external_semantic_quantizer_config"):
+    for key in ("mix_attributes_strategy", "semantic_quantizer_config"):
         cfg_dict.setdefault(key, default_model_cfg[key])
 
     model = build_model(cfg_dict)
