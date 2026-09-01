@@ -16,7 +16,6 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from dicodec.modules.builder import load_pretrained_model
 from dicodec.modules.semantic_quantizer_ae import SemanticQuantizerAE
 
 
@@ -49,6 +48,10 @@ class TrainQuantizerConfig:
     reset_every_forward: int
     entropy_loss_weight: float
     entropy_temperature: float
+    wandb_mode: str
+    wandb_project: str
+    wandb_run_name: str | None
+    wandb_id: str | None
 
 
 class QuantizerWrapper(nn.Module):
@@ -223,6 +226,31 @@ def make_config(args, latent_dim: int, quant_dim: int) -> TrainQuantizerConfig:
         reset_every_forward=args.reset_every_forward,
         entropy_loss_weight=args.entropy_loss_weight,
         entropy_temperature=args.entropy_temperature,
+        wandb_mode=args.wandb_mode,
+        wandb_project=args.wandb_project,
+        wandb_run_name=args.wandb_run_name,
+        wandb_id=args.wandb_id,
+    )
+
+
+def maybe_init_wandb(config: TrainQuantizerConfig):
+    if config.wandb_mode == "disabled":
+        return None
+
+    try:
+        import wandb
+    except ImportError as exc:
+        raise RuntimeError(
+            "wandb is not installed. Use --wandb-mode disabled or install the training extra."
+        ) from exc
+
+    return wandb.init(
+        project=config.wandb_project,
+        name=config.wandb_run_name,
+        id=config.wandb_id,
+        resume="allow" if config.wandb_id else None,
+        mode=config.wandb_mode,
+        config=asdict(config),
     )
 
 
@@ -272,8 +300,18 @@ def main():
     parser.add_argument("--reset-every-forward", type=int, default=10)
     parser.add_argument("--entropy-loss-weight", type=float, default=0.1)
     parser.add_argument("--entropy-temperature", type=float, default=1.0)
+    parser.add_argument(
+        "--wandb-mode",
+        choices=["online", "offline", "disabled"],
+        default="online",
+    )
+    parser.add_argument("--wandb-project", type=str, default="dicodec-quantizer")
+    parser.add_argument("--wandb-run-name", type=str, default=None)
+    parser.add_argument("--wandb-id", type=str, default=None)
 
     args = parser.parse_args()
+
+    from dicodec.modules.builder import load_pretrained_model
 
     device = torch.device(args.device)
     print(f"Loading base Dicodec from {args.checkpoint_dir}...")
@@ -309,6 +347,7 @@ def main():
     )
 
     config = make_config(args, latent_dim=latent_dim, quant_dim=quant_dim)
+    wandb_run = maybe_init_wandb(config)
     root_output_dir = args.output_dir
     if root_output_dir is None:
         root_output_dir = args.checkpoint_dir / "quantized"
@@ -370,6 +409,14 @@ def main():
                 "loss": f"{loss.item():.4f}",
                 "rec_loss": f"{rec_loss.item():.4f}",
             }
+            log_metrics = {
+                "train/loss": loss.item(),
+                "train/rec_loss": rec_loss.item(),
+                "train/quantizer_loss": ae_out.quantizer_loss.item(),
+                "train/lr": optimizer.param_groups[0]["lr"],
+                "train/epoch": epoch + 1,
+                "train/batch_idx": batch_idx,
+            }
             if ae_out.indices is not None:
                 if padding_mask is not None:
                     toks_flat = ae_out.indices.view(-1)[(~padding_mask).view(-1)]
@@ -385,15 +432,34 @@ def main():
                         cumulative_code_counts.float() / cumulative_code_counts.sum()
                     )
                     entropy = -torch.sum(probs * torch.log(probs + 1e-10))
-                    postfix["batch_util%"] = (
-                        f"{(batch_counts > 0).sum().item() / args.codebook_size * 100.0:.1f}"
+                    batch_util = (
+                        (batch_counts > 0).sum().item()
+                        / args.codebook_size
+                        * 100.0
                     )
-                    postfix["util_all%"] = (
-                        f"{(cumulative_code_counts > 0).sum().item() / args.codebook_size * 100.0:.1f}"
+                    util_all = (
+                        (cumulative_code_counts > 0).sum().item()
+                        / args.codebook_size
+                        * 100.0
                     )
-                    postfix["ppl_all"] = f"{torch.exp(entropy).item():.1f}"
+                    ppl_all = torch.exp(entropy).item()
+                    postfix["batch_util%"] = f"{batch_util:.1f}"
+                    postfix["util_all%"] = f"{util_all:.1f}"
+                    postfix["ppl_all"] = f"{ppl_all:.1f}"
+                    log_metrics.update(
+                        {
+                            "codebook/batch_util_pct": batch_util,
+                            "codebook/util_all_pct": util_all,
+                            "codebook/ppl_all": ppl_all,
+                            "codebook/used_all": int(
+                                (cumulative_code_counts > 0).sum().item()
+                            ),
+                        }
+                    )
 
             pbar.set_postfix(postfix)
+            if wandb_run is not None:
+                wandb_run.log(log_metrics, step=global_step)
 
             if args.save_every_steps and global_step % args.save_every_steps == 0:
                 step_dir = (
@@ -404,6 +470,8 @@ def main():
                 config.max_steps = args.max_steps
                 save_checkpoint(model, step_dir, config)
                 print(f"\nSaved checkpoint to {step_dir}")
+                if wandb_run is not None:
+                    wandb_run.summary["latest_checkpoint"] = str(step_dir)
 
         epoch_dir = (
             root_output_dir
@@ -412,10 +480,15 @@ def main():
         )
         save_checkpoint(model, epoch_dir, config)
         print(f"Saved checkpoint to {epoch_dir}")
+        if wandb_run is not None:
+            wandb_run.summary["latest_checkpoint"] = str(epoch_dir)
 
         if args.max_steps and global_step >= args.max_steps:
             print(f"Reached max steps ({args.max_steps}). Stopping training.")
             break
+
+    if wandb_run is not None:
+        wandb_run.finish()
 
 
 if __name__ == "__main__":
