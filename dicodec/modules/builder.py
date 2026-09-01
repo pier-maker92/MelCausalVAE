@@ -1,6 +1,5 @@
 import os
 import json
-import torch
 from dataclasses import fields
 from typing import Dict, Any
 
@@ -149,30 +148,5 @@ def load_pretrained_model(checkpoint_dir: str):
         model.from_pretrained(checkpoint_dir)
 
     model.eval()
-
-    kmeans_path = os.path.join(checkpoint_dir, "kmeans.pt")
-    if os.path.exists(kmeans_path):
-        print(f"Found kmeans codebook at {kmeans_path}, attaching to model...")
-        model.kmeans_codebook = torch.load(kmeans_path, map_location="cpu")
-    else:
-        model.kmeans_codebook = None
-
-    kmeans_manifest_path = os.path.join(checkpoint_dir, "kmeans_manifest.json")
-    model.kmeans_codebooks = {}
-    if os.path.exists(kmeans_manifest_path):
-        with open(kmeans_manifest_path, "r") as f:
-            kmeans_manifest = json.load(f)
-        for name, entry in kmeans_manifest.get("codebooks", {}).items():
-            codebook_path = entry["path"]
-            if not os.path.isabs(codebook_path):
-                codebook_path = os.path.join(checkpoint_dir, codebook_path)
-            if os.path.exists(codebook_path):
-                model.kmeans_codebooks[name] = torch.load(
-                    codebook_path,
-                    map_location="cpu",
-                )
-        default_codebook = str(kmeans_manifest.get("default", ""))
-        if model.kmeans_codebook is None and default_codebook in model.kmeans_codebooks:
-            model.kmeans_codebook = model.kmeans_codebooks[default_codebook]
 
     return model

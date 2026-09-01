@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Deep Learning / Data
+checkpoints/
+outputs/
+wandb/
+evaluation_logs/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Project specific
+data/
+audio_assets/
+*.wav
+*.json
+*.txt
+*.png
+*.log

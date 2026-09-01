@@ -59,6 +59,9 @@ class Dicodec(torch.nn.Module):
         for param in self.vocoder.parameters():
             param.requires_grad = False
 
+        self.external_semantic_quantizer = None
+        self.external_semantic_quantizer_input = "z_sem"
+
         count_parameters_by_module(self.encoder, "Encoder")
         count_parameters_by_module(self.decoder, "Decoder")
 
@@ -406,41 +409,59 @@ class Dicodec(torch.nn.Module):
             reconstructed_mel = self.denormalize_mel(reconstructed_mel)
         return reconstructed_mel, reconstructed_padding_mask
 
+    def load_external_semantic_quantizer(
+        self,
+        checkpoint_path: str,
+        quantizer_type: str = "std_vq",
+        codebook_size: Optional[int] = None,
+        input_source: Optional[str] = None,
+    ):
+        from .semantic_quantizer_ae import (
+            load_semantic_quantizer_ae,
+            read_semantic_quantizer_config,
+        )
+
+        quantizer_config = read_semantic_quantizer_config(checkpoint_path)
+        quantizer_type = quantizer_config.get("quantizer_type", quantizer_type)
+        codebook_size = quantizer_config.get(
+            "codebook_size",
+            quantizer_config.get(
+                "num_embeddings",
+                quantizer_config.get("num_codebooks", codebook_size),
+            ),
+        )
+        input_source = input_source or quantizer_config.get("input_source", "z_sem")
+        if input_source not in {"z", "z_sem"}:
+            raise ValueError("input_source must be either 'z' or 'z_sem'.")
+
+        quantizer = load_semantic_quantizer_ae(
+            checkpoint_path=checkpoint_path,
+            latent_dim=self.encoder.config.latent_dim,
+            quantizer_type=quantizer_type,
+            codebook_size=codebook_size,
+            device=self.device,
+        )
+        quantizer.to(device=self.device, dtype=self.dtype)
+        quantizer.eval()
+        self.external_semantic_quantizer = quantizer
+        self.external_semantic_quantizer_input = input_source
+        return quantizer
+
     @torch.no_grad()
-    def apply_kmeans(self, z, padding_mask=None, chunk_size=16384):
-        if not hasattr(self, "kmeans_codebook") or self.kmeans_codebook is None:
+    def apply_external_semantic_quantizer(self, z, padding_mask=None):
+        if self.external_semantic_quantizer is None:
             return z
 
         attrs = self.encode_attributes(z, padding_mask=padding_mask)
-        z_sem = attrs.z_sem
-
-        centroids = self.kmeans_codebook["centroids"].to(device=z.device, dtype=z.dtype)
-
-        if padding_mask is not None:
-            valid_mask = ~padding_mask
-            X = z_sem[valid_mask]
-        else:
-            X = z_sem.view(-1, z_sem.shape[-1])
-
-        distances = []
-        for i in range(0, X.shape[0], chunk_size):
-            chunk = X[i : i + chunk_size]
-            dist = torch.cdist(chunk, centroids)
-            distances.append(dist)
-        distances = torch.cat(distances, dim=0)
-
-        indices = torch.argmin(distances, dim=-1)
-        quantized = centroids[indices]
-
-        z_sem_q = torch.zeros_like(z_sem)
-        if padding_mask is not None:
-            z_sem_q[valid_mask] = quantized
-        else:
-            z_sem_q = quantized.view(*z_sem.shape)
-
-        # Reconstruct z with quantized semantic part
-        z_reconstructed = z_sem_q + attrs.z_pros + attrs.z_mean
-        return z_reconstructed
+        valid_mask = ~padding_mask if padding_mask is not None else None
+        quantizer_input = (
+            attrs.z_sem if self.external_semantic_quantizer_input == "z_sem" else z
+        )
+        ae_out = self.external_semantic_quantizer(
+            quantizer_input,
+            valid_mask=valid_mask,
+        )
+        return ae_out.z_rec + attrs.z_pros + attrs.z_mean
 
     @torch.no_grad()
     def encode_decode(
@@ -474,12 +495,11 @@ class Dicodec(torch.nn.Module):
             speaker_embedding = torch.zeros_like(speaker_embedding)
 
         z = encoder_output.z
-        attributes = self.encode_attributes(z, padding_mask=encoder_output.padding_mask)
-        #z = attributes.z_sem + attributes.z_mean
-
-        # Apply kmeans if loaded
-        if hasattr(self, "kmeans_codebook") and self.kmeans_codebook is not None:
-            z = self.apply_kmeans(z, padding_mask=encoder_output.padding_mask)
+        if self.external_semantic_quantizer is not None:
+            z = self.apply_external_semantic_quantizer(
+                z,
+                padding_mask=encoder_output.padding_mask,
+            )
 
         reconstructed_mel, reconstructed_padding_mask = self.sample(
             num_steps=num_steps,

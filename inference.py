@@ -3,6 +3,7 @@ import torch
 import argparse
 import torchaudio
 import torchaudio.transforms as T
+from pathlib import Path
 from dicodec.modules.builder import load_pretrained_model
 
 
@@ -15,6 +16,92 @@ def load_wav_mono_resampled(path: str, target_sr: int) -> torch.Tensor:
     # normalize audio
     wav = wav / wav.abs().max()
     return wav.squeeze(0)
+
+
+def normalize_quantized_step(value: str) -> tuple[str, int | None]:
+    value = str(value).strip().lower()
+    value = value.removesuffix("step")
+    if value.endswith("k"):
+        step_count = int(float(value[:-1]) * 1000)
+        return f"{int(step_count / 1000)}k", step_count
+    step_count = int(value)
+    if step_count % 1000 == 0:
+        return f"{step_count // 1000}k", step_count
+    return str(step_count), step_count
+
+
+def infer_quantizer_type_from_path(path: Path, fallback: str) -> str:
+    config_path = path / "config.json" if path.is_dir() else None
+    if config_path is not None and config_path.exists():
+        import json
+
+        with open(config_path, "r") as f:
+            config = json.load(f)
+        return config.get("quantizer_type", fallback)
+
+    name = path.name
+    for quantizer_type in ("vq_ema", "std_vq", "bsq", "fsq"):
+        if quantizer_type in name:
+            return quantizer_type
+    return fallback
+
+
+def resolve_semantic_quantizer_checkpoint(args) -> Path | None:
+    if args.semantic_quantizer_checkpoint is not None:
+        return Path(args.semantic_quantizer_checkpoint)
+
+    if args.semantic_quantizer_steps is None and args.semantic_codebook_size is None:
+        return None
+    if args.semantic_quantizer_steps is None or args.semantic_codebook_size is None:
+        raise ValueError(
+            "Pass both --semantic_quantizer_steps and --semantic_codebook_size, "
+            "or pass --semantic_quantizer_checkpoint explicitly."
+        )
+
+    step_label, step_count = normalize_quantized_step(args.semantic_quantizer_steps)
+    quantized_dir = Path(args.checkpoint_dir) / "quantized" / f"{step_label}step"
+    if not quantized_dir.is_dir():
+        raise FileNotFoundError(f"Quantized checkpoint directory not found: {quantized_dir}")
+
+    candidates = sorted(
+        {
+            path
+            for pattern in (
+                f"*cb{args.semantic_codebook_size}*",
+                str(args.semantic_codebook_size),
+            )
+            for path in quantized_dir.glob(pattern)
+            if path.is_dir() or path.suffix == ".pt"
+        }
+    )
+    configured_dirs = [
+        path for path in candidates if path.is_dir() and (path / "config.json").exists()
+    ]
+    if configured_dirs:
+        candidates = configured_dirs
+    if step_count is not None:
+        exact = [
+            path
+            for path in candidates
+            if f"step_{step_count}_" in path.name
+            or (step_count == 1000 and "model_epoch_1_" in path.name)
+            or path.is_dir()
+        ]
+        if len(exact) == 1:
+            return exact[0]
+        if len(exact) > 1:
+            candidates = exact
+
+    if len(candidates) == 1:
+        return candidates[0]
+    if not candidates:
+        raise FileNotFoundError(
+            "No semantic quantizer checkpoint found for "
+            f"steps={args.semantic_quantizer_steps}, "
+            f"codebook_size={args.semantic_codebook_size} in {quantized_dir}."
+        )
+    formatted = "\n".join(str(path) for path in candidates)
+    raise RuntimeError(f"Multiple matching semantic quantizer checkpoints:\n{formatted}")
 
 
 def main(args):
@@ -31,6 +118,19 @@ def main(args):
     print(f"Loading model from {checkpoint_dir}...")
     model = load_pretrained_model(checkpoint_dir)
     model.to(device)
+    semantic_quantizer_checkpoint = resolve_semantic_quantizer_checkpoint(args)
+    if semantic_quantizer_checkpoint is not None:
+        args.semantic_quantizer_type = infer_quantizer_type_from_path(
+            semantic_quantizer_checkpoint,
+            args.semantic_quantizer_type,
+        )
+        print(f"Loading semantic quantizer from {semantic_quantizer_checkpoint}...")
+        model.load_external_semantic_quantizer(
+            checkpoint_path=str(semantic_quantizer_checkpoint),
+            quantizer_type=args.semantic_quantizer_type,
+            codebook_size=args.semantic_codebook_size,
+            input_source=args.semantic_quantizer_input_override,
+        )
     assert not model.training, "Model must be in eval mode"
     assert not model.encoder.training, (
         "Encoder must be in eval mode: reparameterization trick and "
@@ -100,6 +200,39 @@ if __name__ == "__main__":
     parser.add_argument("--num_steps", type=int, default=16)
     parser.add_argument("--temperature", type=float, default=0.3)
     parser.add_argument("--guidance_scale", type=float, default=1.3)
+    parser.add_argument(
+        "--semantic_quantizer_checkpoint",
+        type=str,
+        default=None,
+        help="External quantizer folder or legacy .pt checkpoint.",
+    )
+    parser.add_argument(
+        "--semantic_quantizer_steps",
+        type=str,
+        default=None,
+        help="Reference checkpoint under checkpoint_dir/quantized, e.g. 1k, 5k, 11k, 1000, 5000, 11000.",
+    )
+    parser.add_argument(
+        "--semantic_quantizer_type",
+        type=str,
+        choices=["vq_ema", "bsq", "std_vq", "fsq"],
+        default="std_vq",
+    )
+    parser.add_argument(
+        "--semantic_codebook_size",
+        type=int,
+        default=None,
+        help="Optional override; inferred from checkpoint when possible.",
+    )
+    parser.add_argument(
+        "--semantic_quantizer_input_override",
+        "--semantic_quantizer_input",
+        dest="semantic_quantizer_input_override",
+        type=str,
+        choices=["z", "z_sem"],
+        default=None,
+        help="Override input_source from the quantizer config.",
+    )
     parser.add_argument(
         "-qq", "--zero_speaker", action="store_true", help="Zero out speaker embedding"
     )
