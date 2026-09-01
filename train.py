@@ -104,6 +104,8 @@ class Dicodectrainer(Trainer):
         granular_losses = [
             "audio_loss",
             "kl_loss",
+            "semantic_recon_loss",
+            "semantic_quantizer_loss",
             "mu_mean",
             "mu_var",
         ]
@@ -142,7 +144,11 @@ class Dicodectrainer(Trainer):
                     continue
                 if "encoder" in n or "feature_extractor" in n:
                     encoder_params.append(p)
-                elif "decoder" in n:
+                elif (
+                    "decoder" in n
+                    or "external_semantic_quantizer" in n
+                    or "semantic_quantizer_projection" in n
+                ):
                     decoder_params.append(p)
                 else:
                     # Fallback for any other parameters (e.g. at root level)
@@ -277,12 +283,22 @@ class Dicodectrainer(Trainer):
             )
             audio_loss = output.audio_loss
             kl_loss = output.kl_loss
+            semantic_recon_loss = getattr(output, "semantic_recon_loss", None)
+            semantic_quantizer_loss = getattr(output, "semantic_quantizer_loss", None)
+            core_model = model.module if hasattr(model, "module") else model
+            semantic_recon_weight = getattr(core_model, "semantic_recon_weight", 1.0)
             loss = audio_loss + kl_loss
+            if semantic_recon_loss is not None:
+                loss = loss + semantic_recon_weight * semantic_recon_loss
+            if semantic_quantizer_loss is not None:
+                loss = loss + semantic_quantizer_loss
 
             # Accumulate granular losses
             flat_metrics = {
                 "audio_loss": audio_loss,
                 "kl_loss": kl_loss,
+                "semantic_recon_loss": semantic_recon_loss,
+                "semantic_quantizer_loss": semantic_quantizer_loss,
                 "mu_mean": getattr(output, "mu_mean", None),
                 "mu_var": getattr(output, "mu_var", None),
             }
@@ -496,6 +512,52 @@ def get_config(training_cfg):
     )
 
 
+def maybe_load_external_quantizer(model, training_cfg):
+    quantizer_path = training_cfg.pop("semantic_quantizer_pretrained")
+    quantizer_type = training_cfg.pop("semantic_quantizer_type")
+    codebook_size = training_cfg.pop("semantic_codebook_size")
+    input_source = training_cfg.pop("semantic_quantizer_input")
+    semantic_recon_weight = float(training_cfg.pop("semantic_recon_weight"))
+    model.semantic_recon_weight = semantic_recon_weight
+
+    if quantizer_path:
+        model.load_external_semantic_quantizer(
+            checkpoint_path=quantizer_path,
+            quantizer_type=quantizer_type,
+            codebook_size=codebook_size,
+            input_source=input_source,
+        )
+        logger.info(f"Loaded external semantic quantizer from {quantizer_path}")
+
+
+def maybe_freeze_for_decoder_quantizer_training(model, training_cfg):
+    train_only_decoder_and_quantizer = training_cfg.pop(
+        "train_only_decoder_and_quantizer"
+    )
+    if not train_only_decoder_and_quantizer:
+        return
+
+    model.train_only_decoder_and_quantizer = True
+    for param in model.parameters():
+        param.requires_grad_(False)
+
+    for module in (
+        model.decoder,
+        model.external_semantic_quantizer,
+        model.semantic_quantizer_projection,
+    ):
+        if module is None:
+            continue
+        module.train()
+        for param in module.parameters():
+            param.requires_grad_(True)
+
+    logger.info(
+        "Frozen all modules except decoder, external semantic quantizer, "
+        "and semantic quantizer projection."
+    )
+
+
 @hydra.main(version_base=None, config_path="configs", config_name="main")
 def main(cfg: DictConfig):
     # Convert OmegaConf DictConfig to standard python dict
@@ -538,6 +600,9 @@ def main(cfg: DictConfig):
     if from_pretrained:
         model.from_pretrained(from_pretrained)
         logger.info(f"Loaded pretrained model from {from_pretrained}")
+
+    maybe_load_external_quantizer(model, training_cfg)
+    maybe_freeze_for_decoder_quantizer_training(model, training_cfg)
 
     # Create unique run ID for evaluation outputs
     # If run_id is provided via command line (run_job.sh), use it.
