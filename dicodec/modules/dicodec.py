@@ -65,7 +65,6 @@ class Dicodec(torch.nn.Module):
             config.latent_dim * 2,
             config.latent_dim,
         )
-        self._init_semantic_quantizer_projection()
         self.train_only_decoder_and_quantizer = False
 
         count_parameters_by_module(self.encoder, "Encoder")
@@ -88,19 +87,6 @@ class Dicodec(torch.nn.Module):
 
     def get_vocoder(self):
         return self.vocoder
-
-    def _init_semantic_quantizer_projection(self):
-        latent_dim = self.config.latent_dim
-        with torch.no_grad():
-            self.semantic_quantizer_projection.weight.zero_()
-            self.semantic_quantizer_projection.bias.zero_()
-            eye = torch.eye(
-                latent_dim,
-                device=self.semantic_quantizer_projection.weight.device,
-                dtype=self.semantic_quantizer_projection.weight.dtype,
-            )
-            self.semantic_quantizer_projection.weight[:, :latent_dim] = eye
-            self.semantic_quantizer_projection.weight[:, latent_dim:] = eye
 
     def _freeze_wavlm(self):
         if self.wavlm is None:
@@ -492,7 +478,9 @@ class Dicodec(torch.nn.Module):
         self.external_semantic_quantizer_input = input_source
         return quantizer
 
-    def apply_external_semantic_quantizer(self, z, padding_mask=None, return_losses=False):
+    def apply_external_semantic_quantizer(
+        self, z, padding_mask=None, return_losses=False
+    ):
         if self.external_semantic_quantizer is None:
             return z
 
