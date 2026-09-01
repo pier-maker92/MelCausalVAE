@@ -287,7 +287,9 @@ class Dicodectrainer(Trainer):
             semantic_quantizer_loss = getattr(output, "semantic_quantizer_loss", None)
             core_model = model.module if hasattr(model, "module") else model
             semantic_recon_weight = getattr(core_model, "semantic_recon_weight", 1.0)
-            loss = audio_loss + kl_loss
+            loss = audio_loss
+            if kl_loss is not None:
+                loss = loss + kl_loss
             if semantic_recon_loss is not None:
                 loss = loss + semantic_recon_weight * semantic_recon_loss
             if semantic_quantizer_loss is not None:

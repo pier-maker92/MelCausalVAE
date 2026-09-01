@@ -125,7 +125,7 @@ def build_model(cfg_dict: Dict[str, Any]) -> Dicodec:
         latent_dim=cfg_dict.get("latent_dim"),
         sample_rate=cfg_dict.get("sample_rate"),
         compress_factor=cfg_dict.get("compress_factor"),
-        mix_attributes_strategy=cfg_dict.get("mix_attributes_strategy"),
+        mix_attributes_strategy=cfg_dict.get("mix_attributes_strategy", "add"), #FIXME this is hardcoded, should be specified in the config
         encoder_config=encoder_config,
         decoder_config=decoder_config,
         mel_spectrogram_config=mel_spec_config,
