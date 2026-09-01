@@ -7,7 +7,6 @@ import json
 from dicodec.modules.dicodec import Dicodec
 from dicodec.modules.configs import DicodecConfig
 
-from train_dual_branch_ae import DualBranchQuantizedAE
 from dicodec.modules.quantizer.std_vq import StandardVectorQuantizer
 
 def main():
@@ -20,8 +19,15 @@ def main():
     parser.add_argument("--codebook-size", type=int, default=1024)
     parser.add_argument("--hidden-dim", type=int, default=1024)
     parser.add_argument("--quantizer", type=str, default="std_vq")
+    parser.add_argument("--input-latent", type=str, choices=["z_sem", "z"], default="z_sem", help="Input to the semantic encoder")
+    parser.add_argument("--pros-encoder", action="store_true", help="Use the model with prosody encoder")
     args = parser.parse_args()
     
+    if args.pros_encoder:
+        from train_dual_branch_pros_ae import DualBranchQuantizedAE
+    else:
+        from train_dual_branch_ae import DualBranchQuantizedAE
+        
     device = torch.device(args.device)
     
     from dicodec.modules.builder import load_pretrained_model
@@ -35,13 +41,34 @@ def main():
     latent_dim = dicodec.encoder.config.latent_dim
     quant_dim = latent_dim
     
-    # Load state dict FIRST to auto-infer hyperparameters (like codebook_size = 1)
+    # Load state dict FIRST to auto-infer hyperparameters
     state_dict = torch.load(args.ae_checkpoint, map_location=device)
     
+    # Auto-infer quantizer type and codebook size
+    dim = state_dict["sem_encoder.out_proj.bias"].shape[0]
+    
     if "quantizer.quantizer_module.embedding.weight" in state_dict:
+        args.quantizer = "std_vq"
         inferred_cb_size = state_dict["quantizer.quantizer_module.embedding.weight"].shape[0]
-        print(f"Auto-inferred codebook size from checkpoint: {inferred_cb_size}")
         args.codebook_size = inferred_cb_size
+        print(f"Auto-inferred VQ codebook size: {inferred_cb_size}")
+    elif "quantizer.quantizer_module.embedding" in state_dict:
+        args.quantizer = "vq_ema"
+        inferred_cb_size = state_dict["quantizer.quantizer_module.embedding"].shape[0]
+        args.codebook_size = inferred_cb_size
+        print(f"Auto-inferred VQ EMA codebook size: {inferred_cb_size}")
+    elif dim == 4:
+        print("Auto-inferred quantizer type: fsq (based on dim=4)")
+        args.quantizer = "fsq"
+        # We can't know the exact codebook size for FSQ without knowing the levels, 
+        # but the default 1024 uses [8,8,4,4] which is 4 dimensions.
+        args.codebook_size = 1024 
+        print(f"Falling back to default FSQ codebook size: {args.codebook_size}")
+    else:
+        print(f"Auto-inferred quantizer type: bsq (based on dim={dim})")
+        args.quantizer = "bsq"
+        args.codebook_size = 2 ** dim
+        print(f"Auto-inferred BSQ codebook size: {args.codebook_size}")
         
     sem_block_keys = set([k.split('.')[3] for k in state_dict.keys() if k.startswith("sem_encoder.resnet.blocks.")])
     if sem_block_keys:
@@ -60,29 +87,37 @@ def main():
         args.num_dec_blocks = 2 # default fallback
     
     class QuantizerWrapper(torch.nn.Module):
-        def __init__(self, quantizer_module, quantizer_type):
+        def __init__(self, quantizer_module, quantizer_type, args):
             super().__init__()
             self.quantizer_module = quantizer_module
             self.quantizer_type = quantizer_type
+            self.args = args
             
         def forward(self, x, valid_mask=None):
             toks, codes = self.quantizer_module(x)
-            from train_dual_branch_ae import QuantizerOutput
+            if self.args.pros_encoder:
+                from train_dual_branch_pros_ae import QuantizerOutput
+            else:
+                from train_dual_branch_ae import QuantizerOutput
             return QuantizerOutput(z_q=codes, loss=torch.tensor(0.0).to(x.device), indices=toks)
 
     if args.quantizer == "std_vq":
         from dicodec.modules.quantizer.std_vq import StandardVectorQuantizer
         base_quantizer = StandardVectorQuantizer(dim=quant_dim, codebook_size=args.codebook_size).to(device)
-        quantizer_wrapper = QuantizerWrapper(base_quantizer, args.quantizer)
+        quantizer_wrapper = QuantizerWrapper(base_quantizer, args.quantizer, args)
+    elif args.quantizer == "vq_ema":
+        from dicodec.modules.quantizer.vq_ema import EMAVectorQuantizer
+        base_quantizer = EMAVectorQuantizer(dim=quant_dim, codebook_size=args.codebook_size).to(device)
+        quantizer_wrapper = QuantizerWrapper(base_quantizer, args.quantizer, args)
     elif args.quantizer == "fsq":
         from dicodec.modules.quantizer.fsq import FiniteScalarQuantizer
         base_quantizer = FiniteScalarQuantizer(codebook_size=args.codebook_size).to(device)
-        quantizer_wrapper = QuantizerWrapper(base_quantizer, args.quantizer)
+        quantizer_wrapper = QuantizerWrapper(base_quantizer, args.quantizer, args)
         quant_dim = base_quantizer.dim
     elif args.quantizer == "bsq":
         from dicodec.modules.quantizer.bsq import BinarySphericalQuantizer
         base_quantizer = BinarySphericalQuantizer(codebook_size=args.codebook_size).to(device)
-        quantizer_wrapper = QuantizerWrapper(base_quantizer, args.quantizer)
+        quantizer_wrapper = QuantizerWrapper(base_quantizer, args.quantizer, args)
         quant_dim = base_quantizer.dim
     else:
         raise NotImplementedError(f"Quantizer {args.quantizer} not implemented in inference script yet.")
@@ -128,24 +163,32 @@ def main():
         # 3. Dual Branch AE - Full
         valid_mask = ~padding_mask if padding_mask is not None else None
         
-        # The semantic AE extracts and quantizes semantics directly from z.
-        ae_out = model(z, valid_mask=valid_mask)
-        z_sem_rec = ae_out.z_rec
-        
-        # To get the full z for the codec, we MUST add back the unquantized z_pros and z_mean
-        z_rec_full = z_sem_rec + z_pros + z_mean
-        
-        # 3b. Only Quantized (Reconstructed semantics + mean, but NO prosody)
-        z_rec_only_quantized = z_sem_rec + z_mean
-        
-        # 3c. Only Prosody (Original prosody + mean, NO semantics)
-        z_rec_only_prosody = z_pros + z_mean
-        
-        z_variants = {
-            "ae_full": z_rec_full,
-            "only_quantized": z_rec_only_quantized,
-            "only_prosody": z_rec_only_prosody
-        }
+        if args.pros_encoder:
+            ae_out = model(z_sem=z_sem, z_pros=z_pros, z_mean=z_mean, valid_mask=valid_mask)
+            z_variants = {
+                "ae_full": ae_out.z_rec
+            }
+        else:
+            if getattr(args, "input_latent", "z_sem") == "z":
+                ae_out = model(z, valid_mask=valid_mask)
+            else:
+                ae_out = model(z_sem, valid_mask=valid_mask)
+            z_sem_rec = ae_out.z_rec
+            
+            # To get the full z for the codec, we MUST add back the unquantized z_pros and z_mean
+            z_rec_full = z_sem_rec + z_pros + z_mean
+            
+            # 3b. Only Quantized (Reconstructed semantics + mean, but NO prosody)
+            z_rec_only_quantized = z_sem_rec + z_mean
+            
+            # 3c. Only Prosody (Original prosody + mean, NO semantics)
+            z_rec_only_prosody = z_pros + z_mean
+            
+            z_variants = {
+                "ae_full": z_rec_full,
+                "only_quantized": z_rec_only_quantized,
+                "only_prosody": z_rec_only_prosody
+            }
         
     # 4. Decode
     # To guarantee 100% parity with inference.py, we will use its own load function and encode_decode

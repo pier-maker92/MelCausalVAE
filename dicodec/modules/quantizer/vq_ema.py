@@ -69,7 +69,17 @@ class EMAVectorQuantizer(nn.Module):
                 self.reset_dead_codes
                 and self._forward_count.item() % self.reset_every_forward == 0
             ):
-                self._reset_dead_codes(flatten.detach())
+                if self._reset_dead_codes(flatten.detach()):
+                    # Recompute assignments so the new codes are immediately used,
+                    # which prevents the encoder from collapsing via commitment loss.
+                    embedding = self.embedding.to(dtype=flatten.dtype)
+                    distances = (
+                        torch.sum(flatten**2, dim=1, keepdim=True)
+                        + torch.sum(embedding**2, dim=1)
+                        - 2 * torch.matmul(flatten, embedding.t())
+                    )
+                    encoding_indices = torch.argmin(distances, dim=1)
+                    codes_flat = F.embedding(encoding_indices, embedding)
 
         toks = encoding_indices.view(*lats.shape[:-1])
         codes = codes_flat.view_as(lats).to(dtype=lats.dtype)

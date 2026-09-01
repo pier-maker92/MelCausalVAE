@@ -82,10 +82,15 @@ class VectorQuantizer(nn.Module):
             )
             self.proj_in = nn.Identity()
         else:
-            self.proj_in = nn.Sequential(
-                nn.Linear(self.dim, self.quantizer.dim, bias=False),
-                nn.LayerNorm(self.quantizer.dim),
-            )
+            if self.vq_type == "bsq":
+                self.proj_in = nn.Sequential(
+                    nn.Linear(self.dim, self.quantizer.dim, bias=False),
+                    nn.LayerNorm(self.quantizer.dim),
+                )
+            else:
+                self.proj_in = nn.Sequential(
+                    nn.Linear(self.dim, self.quantizer.dim, bias=True),
+                )
 
         if config.focal_decoder_config is not None:
             self.focal_decoder = FocalDecoder(

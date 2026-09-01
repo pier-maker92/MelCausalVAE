@@ -123,6 +123,29 @@ class SemanticEncoder(nn.Module):
         return x.transpose(1, 2)
 
 
+class ProsodyEncoder(nn.Module):
+    def __init__(
+        self, in_dim: int, hidden_dim: int, out_dim: int, num_blocks: int = 2, kernel_size: int = 3,
+    ):
+        super().__init__()
+        self.in_proj = nn.Conv1d(in_dim, hidden_dim, kernel_size=1)
+        self.resnet = ResNetStack1D(hidden_dim, num_blocks, kernel_size=kernel_size)
+        self.out_proj = nn.Conv1d(hidden_dim, out_dim, kernel_size=1)
+
+    def forward(self, z_pros_mean: torch.Tensor, valid_mask: torch.Tensor | None = None) -> torch.Tensor:
+        x = z_pros_mean.transpose(1, 2)
+        channel_mask = None
+        if valid_mask is not None:
+            channel_mask = valid_mask.transpose(1, 2)
+            x = x * channel_mask
+        x = self.in_proj(x)
+        if channel_mask is not None:
+            x = x * channel_mask
+        x = self.out_proj(self.resnet(x, valid_mask=channel_mask))
+        if valid_mask is not None:
+            x = x * channel_mask
+        return x.transpose(1, 2)
+
 
 class Decoder(nn.Module):
     def __init__(
@@ -167,8 +190,12 @@ class DualBranchQuantizedAE(nn.Module):
             num_blocks=num_sem_blocks, kernel_size=kernel_size,
         )
         self.quantizer = quantizer
+        self.pros_encoder = ProsodyEncoder(
+            in_dim=dim, hidden_dim=hidden_dim, out_dim=dim,
+            num_blocks=num_sem_blocks, kernel_size=kernel_size,
+        )
         self.decoder = Decoder(
-            sem_dim=quant_dim, hidden_dim=hidden_dim, out_dim=dim,
+            sem_dim=quant_dim + dim, hidden_dim=hidden_dim, out_dim=dim,
             num_blocks=num_dec_blocks, kernel_size=kernel_size,
         )
 
@@ -193,57 +220,31 @@ class DualBranchQuantizedAE(nn.Module):
 
     def forward(
         self,
-        z_input: torch.Tensor,
-        z_sem_target: torch.Tensor | None = None,
+        z_sem: torch.Tensor,
+        z_pros: torch.Tensor,
+        z_mean: torch.Tensor,
         valid_mask: torch.Tensor | None = None,
     ) -> DualBranchAEOutput:
         if valid_mask is not None and valid_mask.ndim == 2:
             valid_mask = valid_mask.unsqueeze(-1)
 
-        sem_enc = self.sem_encoder(z_input, valid_mask=valid_mask)
-        consistency_loss = z_input.new_zeros(())
+        sem_enc = self.sem_encoder(z_sem, valid_mask=valid_mask)
+        consistency_loss = z_sem.new_zeros(())
 
-        if z_sem_target is not None:
-            with torch.no_grad():
-                target_enc = self.sem_encoder(z_sem_target, valid_mask=valid_mask)
+        quant_out = self._run_quantizer(sem_enc, valid_mask=valid_mask)
+        z_sem_q = quant_out.z_q
+        indices = quant_out.indices
 
-            joint_enc = torch.cat([sem_enc, target_enc], dim=0)
-            joint_mask = (
-                torch.cat([valid_mask, valid_mask], dim=0)
-                if valid_mask is not None
-                else None
-            )
-            quant_out = self._run_quantizer(joint_enc, valid_mask=joint_mask)
-            z_sem_q, target_q = quant_out.z_q.chunk(2, dim=0)
-            indices = (
-                quant_out.indices.chunk(2, dim=0)[0]
-                if quant_out.indices is not None
-                else None
-            )
-
-            if valid_mask is None:
-                consistency_loss = F.mse_loss(z_sem_q, target_q.detach())
-            else:
-                valid_elements = (
-                    valid_mask.sum() * z_sem_q.shape[-1]
-                ).clamp_min(1.0)
-                consistency_loss = F.mse_loss(
-                    z_sem_q * valid_mask,
-                    target_q.detach() * valid_mask,
-                    reduction="sum",
-                ) / valid_elements
-        else:
-            quant_out = self._run_quantizer(sem_enc, valid_mask=valid_mask)
-            z_sem_q = quant_out.z_q
-            indices = quant_out.indices
-
-        z_rec = self.decoder(z_sem_q, valid_mask=valid_mask)
+        z_pros_mean = z_pros + z_mean
+        z_pros_enc = self.pros_encoder(z_pros_mean, valid_mask=valid_mask)
+        
+        dec_input = torch.cat([z_sem_q, z_pros_enc], dim=-1)
+        z_rec = self.decoder(dec_input, valid_mask=valid_mask)
 
         return DualBranchAEOutput(
             z_rec=z_rec,
             z_sem_q=z_sem_q,
-            z_pros_enc=torch.zeros_like(z_sem_q), # dummy to avoid breaking typing
-
+            z_pros_enc=z_pros_enc,
             quantizer_loss=quant_out.loss,
             consistency_loss=consistency_loss,
             indices=indices,
@@ -296,7 +297,6 @@ def main():
     parser.add_argument("--codebook-size", type=int, default=1024, help="Number of codes in the codebook")
     parser.add_argument("--num-sem-blocks", type=int, default=4, help="Number of residual blocks in SemanticEncoder")
     parser.add_argument("--num-dec-blocks", type=int, default=4, help="Number of residual blocks in Decoder")
-    parser.add_argument("--input-latent", type=str, choices=["z_sem", "z"], default="z_sem", help="Input to the semantic encoder")
     
     # Regularizations
     parser.add_argument("--commit-weight", type=float, default=0.25)
@@ -412,10 +412,12 @@ def main():
     model.train()
     
     sem_enc_params = sum(p.numel() for p in model.sem_encoder.parameters() if p.requires_grad)
+    pros_enc_params = sum(p.numel() for p in model.pros_encoder.parameters() if p.requires_grad)
     dec_params = sum(p.numel() for p in model.decoder.parameters() if p.requires_grad)
     print(f"SemanticEncoder Trainable Parameters: {sem_enc_params:,}")
+    print(f"ProsodyEncoder Trainable Parameters: {pros_enc_params:,}")
     print(f"Decoder Trainable Parameters: {dec_params:,}")
-    print(f"Total Model Trainable Parameters: {sem_enc_params + dec_params:,}")
+    print(f"Total Model Trainable Parameters: {sem_enc_params + pros_enc_params + dec_params:,}")
 
     optimizer = optim.AdamW(model.parameters(), lr=args.lr)
 
@@ -447,26 +449,20 @@ def main():
                 z_sem, z_pros, z_mean = attrs.z_sem, attrs.z_pros, attrs.z_mean
 
             optimizer.zero_grad()
-            if args.input_latent == "z":
-                ae_out = model(
-                    z,
-                    z_sem_target=z_sem,
-                    valid_mask=~padding_mask if padding_mask is not None else None,
-                )
-            else:
-                ae_out = model(
-                    z_sem,
-                    z_sem_target=None,
-                    valid_mask=~padding_mask if padding_mask is not None else None,
-                )
+            ae_out = model(
+                z_sem=z_sem,
+                z_pros=z_pros,
+                z_mean=z_mean,
+                valid_mask=~padding_mask if padding_mask is not None else None,
+            )
             
             # Mask out padding for reconstruction loss
             if padding_mask is not None:
                 valid_mask = (~padding_mask).unsqueeze(-1)
-                valid_elems = (valid_mask.sum() * z_sem.shape[-1]).clamp_min(1.0)
-                rec_loss = F.mse_loss(ae_out.z_rec * valid_mask, z_sem * valid_mask, reduction='sum') / valid_elems
+                valid_elems = (valid_mask.sum() * z.shape[-1]).clamp_min(1.0)
+                rec_loss = F.mse_loss(ae_out.z_rec * valid_mask, z * valid_mask, reduction='sum') / valid_elems
             else:
-                rec_loss = F.mse_loss(ae_out.z_rec, z_sem)
+                rec_loss = F.mse_loss(ae_out.z_rec, z)
             
             loss = (
                 rec_loss
