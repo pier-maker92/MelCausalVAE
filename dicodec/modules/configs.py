@@ -271,6 +271,7 @@ class DicodecConfig:
     latent_dim: int
     sample_rate: int
     compress_factor: int
+    mix_attributes_strategy: str
     encoder_config: EncoderConfig
     decoder_config: DiTConfig
     mel_spectrogram_config: MelSpectrogramConfig
@@ -280,6 +281,9 @@ class DicodecConfig:
     )
 
     def __post_init__(self):
+        if self.mix_attributes_strategy not in {"add", "concat"}:
+            raise ValueError("mix_attributes_strategy must be either 'add' or 'concat'.")
+
         self.mel_spectrogram_config.n_mels = self.mel_dim
         self.mel_spectrogram_config.sampling_rate = self.sample_rate
         if self.lowpass_filter_config.sample_rate is None:

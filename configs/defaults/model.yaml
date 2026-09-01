@@ -3,6 +3,7 @@ mel_dim: null
 latent_dim: null
 sample_rate: null
 compress_factor: null
+mix_attributes_strategy: add
 mel_spectrogram_config:
   sampling_rate: null
   n_fft: 1024

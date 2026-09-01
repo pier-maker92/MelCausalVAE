@@ -1,5 +1,6 @@
 import os
 import json
+from pathlib import Path
 from dataclasses import fields
 from typing import Dict, Any
 
@@ -20,6 +21,13 @@ from .configs import (
 def _filter_dataclass_kwargs(config_cls, values: Dict[str, Any]) -> Dict[str, Any]:
     allowed = {field.name for field in fields(config_cls)}
     return {key: value for key, value in values.items() if key in allowed}
+
+
+def _load_default_model_config() -> Dict[str, Any]:
+    from omegaconf import OmegaConf
+
+    defaults_path = Path(__file__).resolve().parents[2] / "configs" / "defaults" / "model.yaml"
+    return OmegaConf.to_container(OmegaConf.load(defaults_path), resolve=True)
 
 
 def build_model(cfg_dict: Dict[str, Any]) -> Dicodec:
@@ -117,6 +125,7 @@ def build_model(cfg_dict: Dict[str, Any]) -> Dicodec:
         latent_dim=cfg_dict.get("latent_dim"),
         sample_rate=cfg_dict.get("sample_rate"),
         compress_factor=cfg_dict.get("compress_factor"),
+        mix_attributes_strategy=cfg_dict.get("mix_attributes_strategy"),
         encoder_config=encoder_config,
         decoder_config=decoder_config,
         mel_spectrogram_config=mel_spec_config,
@@ -137,6 +146,9 @@ def load_pretrained_model(checkpoint_dir: str):
     config_path = os.path.join(checkpoint_dir, "config.json")
     with open(config_path, "r") as f:
         cfg_dict = json.load(f)
+    default_model_cfg = _load_default_model_config()
+    for key in ("mix_attributes_strategy",):
+        cfg_dict.setdefault(key, default_model_cfg[key])
 
     model = build_model(cfg_dict)
 

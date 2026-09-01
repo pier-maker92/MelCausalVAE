@@ -65,6 +65,7 @@ class Dicodec(torch.nn.Module):
             config.latent_dim * 2,
             config.latent_dim,
         )
+        self._init_semantic_quantizer_projection()
         self.train_only_decoder_and_quantizer = False
 
         count_parameters_by_module(self.encoder, "Encoder")
@@ -87,6 +88,19 @@ class Dicodec(torch.nn.Module):
 
     def get_vocoder(self):
         return self.vocoder
+
+    def _init_semantic_quantizer_projection(self):
+        latent_dim = self.config.latent_dim
+        with torch.no_grad():
+            self.semantic_quantizer_projection.weight.zero_()
+            self.semantic_quantizer_projection.bias.zero_()
+            eye = torch.eye(
+                latent_dim,
+                device=self.semantic_quantizer_projection.weight.device,
+                dtype=self.semantic_quantizer_projection.weight.dtype,
+            )
+            self.semantic_quantizer_projection.weight[:, :latent_dim] = eye
+            self.semantic_quantizer_projection.weight[:, latent_dim:] = eye
 
     def _freeze_wavlm(self):
         if self.wavlm is None:
@@ -492,9 +506,16 @@ class Dicodec(torch.nn.Module):
             valid_mask=valid_mask,
         )
         pros_mean = attrs.z_pros + attrs.z_mean
-        z_reconstructed = self.semantic_quantizer_projection(
-            torch.cat([ae_out.z_rec, pros_mean], dim=-1)
-        )
+        if self.config.mix_attributes_strategy == "add":
+            z_reconstructed = ae_out.z_rec + pros_mean
+        elif self.config.mix_attributes_strategy == "concat":
+            z_reconstructed = self.semantic_quantizer_projection(
+                torch.cat([ae_out.z_rec, pros_mean], dim=-1)
+            )
+        else:
+            raise ValueError(
+                "mix_attributes_strategy must be either 'add' or 'concat'."
+            )
 
         if not return_losses:
             return z_reconstructed

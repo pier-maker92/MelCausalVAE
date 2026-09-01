@@ -3,6 +3,7 @@ compress_factor: 4
 mel_dim: 100
 latent_dim: 64
 sample_rate: 24000
+mix_attributes_strategy: concat
 
 training:
   dataset_name: libritts-r

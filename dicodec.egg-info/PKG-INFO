@@ -1,0 +1,80 @@
+Metadata-Version: 2.4
+Name: dicodec
+Version: 0.1.0
+Summary: Speech AE
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: torch==2.8.0
+Requires-Dist: torchaudio==2.8.0
+Requires-Dist: torchvision==0.23.0
+Requires-Dist: numpy==1.26.4
+Requires-Dist: soundfile
+Requires-Dist: transformers==5.0.0
+Requires-Dist: hydra-core==1.3.2
+Requires-Dist: omegaconf==2.3.0
+Requires-Dist: torchdiffeq
+Requires-Dist: beartype
+Requires-Dist: torchcodec==0.7
+Requires-Dist: tqdm
+Requires-Dist: vocos==0.1.0
+Provides-Extra: training
+Requires-Dist: deepspeed==0.18.4; extra == "training"
+Requires-Dist: accelerate==1.13.0; extra == "training"
+Requires-Dist: datasets==4.1.0; extra == "training"
+Requires-Dist: speechbrain; extra == "training"
+Requires-Dist: utmosv2 @ git+https://github.com/sarulab-speech/UTMOSv2.git ; extra == "training"
+Requires-Dist: matplotlib; extra == "training"
+Requires-Dist: wandb; extra == "training"
+Requires-Dist: jiwer; extra == "training"
+Requires-Dist: torchaudio_filters; extra == "training"
+Requires-Dist: torchcrepe; extra == "training"
+Provides-Extra: eval
+Requires-Dist: faster_whisper; extra == "eval"
+Requires-Dist: speechbrain; extra == "eval"
+
+# Dicodec
+
+## Overview
+
+Dicodec is a disentangled audio codec that can process either WavLM features or Mel spectrograms as input. Its architecture is designed to explicitly isolate different components of the audio signal through a multi-branch approach:
+
+- **Global Branch:** Dedicated to extracting and modeling the global timbre (speaker identity).
+- **Local Branch:** Focuses on modeling the semantics and prosody of the speech.
+
+By disentangling these elements, Dicodec allows you to easily isolate and manipulate specific audio components (e.g., separating the speaker's voice from the spoken content and intonation).
+
+## Installation
+
+To set up the environment and install the required dependencies using `uv`, run:
+
+```bash
+uv pip install -e .
+uv pip install -e ".[training,eval]"
+```
+
+
+## Training
+
+Dicodec uses [Hydra](https://hydra.cc/) for robust configuration management. The base configurations are located in `configs/defaults/`, while experiment-specific overrides are stored in `configs/settings/`.
+
+### Running an Experiment (Single GPU)
+To start a training run with a specific setting file, use:
+```bash
+python train.py settings=your_experiment_name
+```
+
+### Multi-GPU (Accelerate)
+```bash
+accelerate launch train.py settings=your_experiment_name
+```
+
+### DeepSpeed
+```bash
+accelerate launch --config_file configs/deepspeed/ds_config.yaml train.py settings=your_experiment_name
+```
+
+### Managing Configurations via CLI
+Hydra allows you to override any configuration parameter directly from the command line. For example:
+```bash
+python train.py settings=your_experiment_name training.learning_rate=1e-4 training.per_device_train_batch_size=8
+```
