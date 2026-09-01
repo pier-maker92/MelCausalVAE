@@ -66,6 +66,18 @@ class Dicodec(torch.nn.Module):
             config.latent_dim,
         )
         self.train_only_decoder_and_quantizer = False
+        if config.external_semantic_quantizer_config.enabled:
+            if config.external_semantic_quantizer_config.checkpoint_path is None:
+                raise ValueError(
+                    "external_semantic_quantizer_config.enabled=true requires "
+                    "checkpoint_path so the quantizer architecture can be initialized."
+                )
+            self.load_external_semantic_quantizer(
+                checkpoint_path=config.external_semantic_quantizer_config.checkpoint_path,
+                quantizer_type=config.external_semantic_quantizer_config.quantizer_type,
+                codebook_size=config.external_semantic_quantizer_config.codebook_size,
+                input_source=config.external_semantic_quantizer_config.input_source,
+            )
 
         count_parameters_by_module(self.encoder, "Encoder")
         count_parameters_by_module(self.decoder, "Decoder")
@@ -476,6 +488,11 @@ class Dicodec(torch.nn.Module):
         quantizer.eval()
         self.external_semantic_quantizer = quantizer
         self.external_semantic_quantizer_input = input_source
+        self.config.external_semantic_quantizer_config.enabled = True
+        self.config.external_semantic_quantizer_config.checkpoint_path = checkpoint_path
+        self.config.external_semantic_quantizer_config.quantizer_type = quantizer_type
+        self.config.external_semantic_quantizer_config.codebook_size = codebook_size
+        self.config.external_semantic_quantizer_config.input_source = input_source
         return quantizer
 
     def apply_external_semantic_quantizer(

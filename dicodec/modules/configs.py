@@ -266,6 +266,31 @@ class LowPassFilterConfig:
 
 
 @dataclass(kw_only=True)
+class ExternalSemanticQuantizerConfig:
+    enabled: bool = False
+    checkpoint_path: Optional[str] = None
+    quantizer_type: str = "std_vq"
+    codebook_size: Optional[int] = None
+    input_source: Optional[str] = None
+
+    def __post_init__(self):
+        if self.quantizer_type not in {"bsq", "fsq", "std_vq", "vq", "vq_ema"}:
+            raise ValueError(
+                "external_semantic_quantizer_config.quantizer_type must be one of: "
+                "bsq, fsq, std_vq, vq, vq_ema."
+            )
+        if self.codebook_size is not None and self.codebook_size <= 0:
+            raise ValueError(
+                "external_semantic_quantizer_config.codebook_size must be > 0."
+            )
+        if self.input_source is not None and self.input_source not in {"z", "z_sem"}:
+            raise ValueError(
+                "external_semantic_quantizer_config.input_source must be either "
+                "'z' or 'z_sem'."
+            )
+
+
+@dataclass(kw_only=True)
 class DicodecConfig:
     mel_dim: int
     latent_dim: int
@@ -278,6 +303,9 @@ class DicodecConfig:
     wavlm_module_config: Optional[WavLMModuleConfig] = None
     lowpass_filter_config: LowPassFilterConfig = field(
         default_factory=LowPassFilterConfig
+    )
+    external_semantic_quantizer_config: ExternalSemanticQuantizerConfig = field(
+        default_factory=ExternalSemanticQuantizerConfig
     )
 
     def __post_init__(self):

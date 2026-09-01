@@ -270,8 +270,11 @@ class Dicodectrainer(Trainer):
             import dataclasses
 
             config_path = os.path.join(output_dir, "config.json")
+            model_to_save = (
+                self.model.module if hasattr(self.model, "module") else self.model
+            )
             with open(config_path, "w") as f:
-                json.dump(dataclasses.asdict(self.model.config), f, indent=4)
+                json.dump(dataclasses.asdict(model_to_save.config), f, indent=4)
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         if hasattr(self.control, "granular_losses") and model.training:
@@ -521,13 +524,34 @@ def maybe_load_external_quantizer(model, training_cfg):
     model.semantic_recon_weight = semantic_recon_weight
 
     if quantizer_path:
-        model.load_external_semantic_quantizer(
-            checkpoint_path=quantizer_path,
-            quantizer_type=quantizer_type,
-            codebook_size=codebook_size,
-            input_source=input_source,
+        already_initialized = (
+            getattr(model, "external_semantic_quantizer", None) is not None
+            and model.config.external_semantic_quantizer_config.checkpoint_path
+            == quantizer_path
         )
-        logger.info(f"Loaded external semantic quantizer from {quantizer_path}")
+        if already_initialized:
+            model.config.external_semantic_quantizer_config.quantizer_type = (
+                quantizer_type
+            )
+            model.config.external_semantic_quantizer_config.codebook_size = (
+                codebook_size
+            )
+            if input_source is not None:
+                model.external_semantic_quantizer_input = input_source
+                model.config.external_semantic_quantizer_config.input_source = (
+                    input_source
+                )
+            logger.info(
+                "External semantic quantizer already initialized from model config."
+            )
+        else:
+            model.load_external_semantic_quantizer(
+                checkpoint_path=quantizer_path,
+                quantizer_type=quantizer_type,
+                codebook_size=codebook_size,
+                input_source=input_source,
+            )
+            logger.info(f"Loaded external semantic quantizer from {quantizer_path}")
 
 
 def maybe_freeze_for_decoder_quantizer_training(model, training_cfg):

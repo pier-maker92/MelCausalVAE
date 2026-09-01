@@ -15,6 +15,7 @@ from .configs import (
     NoiseConfig,
     SpeakerEncoderConfig,
     LowPassFilterConfig,
+    ExternalSemanticQuantizerConfig,
 )
 
 
@@ -119,6 +120,20 @@ def build_model(cfg_dict: Dict[str, Any]) -> Dicodec:
         if lowpass_filter_dict
         else LowPassFilterConfig()
     )
+    external_quantizer_dict = cfg_dict.get(
+        "external_semantic_quantizer_config",
+        cfg_dict.get("external_semantic_quantizer", None),
+    )
+    external_quantizer_config = (
+        ExternalSemanticQuantizerConfig(
+            **_filter_dataclass_kwargs(
+                ExternalSemanticQuantizerConfig,
+                external_quantizer_dict,
+            )
+        )
+        if external_quantizer_dict
+        else ExternalSemanticQuantizerConfig()
+    )
 
     dicodec_config = DicodecConfig(
         mel_dim=cfg_dict.get("mel_dim"),
@@ -131,6 +146,7 @@ def build_model(cfg_dict: Dict[str, Any]) -> Dicodec:
         mel_spectrogram_config=mel_spec_config,
         wavlm_module_config=wavlm_module_config,
         lowpass_filter_config=lowpass_filter_config,
+        external_semantic_quantizer_config=external_quantizer_config,
     )
 
     training_cfg = cfg_dict.get("training", {}) or {}
@@ -147,7 +163,7 @@ def load_pretrained_model(checkpoint_dir: str):
     with open(config_path, "r") as f:
         cfg_dict = json.load(f)
     default_model_cfg = _load_default_model_config()
-    for key in ("mix_attributes_strategy",):
+    for key in ("mix_attributes_strategy", "external_semantic_quantizer_config"):
         cfg_dict.setdefault(key, default_model_cfg[key])
 
     model = build_model(cfg_dict)
