@@ -32,8 +32,6 @@ class EncoderOutput(ModelOutput):
 class DicodecOutput(ModelOutput):
     audio_loss: Optional[torch.FloatTensor] = None
     kl_loss: Optional[torch.FloatTensor] = None
-    semantic_recon_loss: Optional[torch.FloatTensor] = None
-    semantic_quantizer_loss: Optional[torch.FloatTensor] = None
     mu_mean: Optional[torch.FloatTensor] = None
     mu_var: Optional[torch.FloatTensor] = None
 
@@ -52,6 +50,15 @@ class AttributesOutput(ModelOutput):
     z_mean: Optional[torch.FloatTensor] = None
     z_lp: Optional[torch.FloatTensor] = None
     z_hp: Optional[torch.FloatTensor] = None
+
+
+@dataclass
+class QuantizeOutput(ModelOutput):
+    quantized: Optional[torch.FloatTensor] = None
+    indices: Optional[torch.LongTensor] = None
+    residual: Optional[torch.FloatTensor] = None
+    z_pros: Optional[torch.FloatTensor] = None
+    attributes: Optional[AttributesOutput] = None
 
 
 @dataclass

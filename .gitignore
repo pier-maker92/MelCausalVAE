@@ -36,6 +36,9 @@ evaluation_logs/
 # Project specific
 data/
 audio_assets/
+demopage/
+dicodec.egg-info/
+lab/
 *.wav
 *.json
 *.txt

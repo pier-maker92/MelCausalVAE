@@ -3,13 +3,12 @@ mel_dim: null
 latent_dim: null
 sample_rate: null
 compress_factor: null
-mix_attributes_strategy: add
 external_semantic_quantizer_config:
   enabled: false
   checkpoint_path: null
   quantizer_type: std_vq
   codebook_size: null
-  input_source: null
+  target_source: null
 mel_spectrogram_config:
   sampling_rate: null
   n_fft: 1024

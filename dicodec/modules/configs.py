@@ -271,7 +271,6 @@ class ExternalSemanticQuantizerConfig:
     checkpoint_path: Optional[str] = None
     quantizer_type: str = "std_vq"
     codebook_size: Optional[int] = None
-    input_source: Optional[str] = None
     target_source: Optional[str] = None
 
     def __post_init__(self):
@@ -293,7 +292,6 @@ class ExternalSemanticQuantizerConfig:
                 )
             return aliases[value]
 
-        self.input_source = normalize_source(self.input_source, "input_source")
         self.target_source = normalize_source(self.target_source, "target_source")
 
         if self.quantizer_type not in {"bsq", "fsq", "std_vq", "vq", "vq_ema"}:
@@ -313,7 +311,6 @@ class DicodecConfig:
     latent_dim: int
     sample_rate: int
     compress_factor: int
-    mix_attributes_strategy: str
     encoder_config: EncoderConfig
     decoder_config: DiTConfig
     mel_spectrogram_config: MelSpectrogramConfig
@@ -326,9 +323,6 @@ class DicodecConfig:
     )
 
     def __post_init__(self):
-        if self.mix_attributes_strategy not in {"add", "concat"}:
-            raise ValueError("mix_attributes_strategy must be either 'add' or 'concat'.")
-
         self.mel_spectrogram_config.n_mels = self.mel_dim
         self.mel_spectrogram_config.sampling_rate = self.sample_rate
         if self.lowpass_filter_config.sample_rate is None:

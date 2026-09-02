@@ -246,15 +246,7 @@ def run_evaluation(
     model: torch.nn.Module,
     eval_dataloader: torch.utils.data.DataLoader,
     device: torch.device,
-    step: int,
-    dataset_name: str,
     num_samples: int = 100,
-    run_id: str = "default_run",
-    quantized: bool = False,
-    residual: bool = False,
-    tail: bool = False,
-    chunk: int | None = None,
-    chunk_size: int | None = None,
 ) -> dict[str, float]:
     """
     Perform evaluation during training using eval.py metric classes.
@@ -287,27 +279,7 @@ def run_evaluation(
             "guidance_scale": 1.3,
             "audio_16khz": references,
         }
-        has_vq = getattr(model.config.encoder_config, "vq_config", None) is not None
-        if tail:
-            if not has_vq:
-                raise ValueError("The -t flag was passed, but the model's config does not have a vq_config.")
-            params["quantized"] = False
-            params["residual"] = False
-            params["tail"] = True
-        else:
-            if has_vq:
-                params["quantized"] = True
-                params["residual"] = False
-                params["tail"] = True
-            else:
-                params["quantized"] = False
-                params["residual"] = False
-                params["tail"] = False
-        if chunk is not None:
-            params["chunk"] = chunk
-        if chunk_size is not None:
-            params["chunk_size"] = chunk_size
-            
+
         out = model.encode_decode(**params)
         padding_mask = out["decoder_output"].padding_mask
         audio_waveform = out["audio_waveform"]
@@ -401,7 +373,7 @@ def main(args):
             checkpoint_path=str(semantic_quantizer_checkpoint),
             quantizer_type=args.semantic_quantizer_type,
             codebook_size=args.semantic_codebook_size,
-            input_source=args.semantic_quantizer_input_override,
+            target_source=args.semantic_quantizer_target_override,
         )
 
     # get models
@@ -485,8 +457,8 @@ def main(args):
                                 args.semantic_quantizer_variant
                             )
                         ),
-                        "semantic_quantizer_input_override": (
-                            args.semantic_quantizer_input_override
+                        "semantic_quantizer_target_override": (
+                            args.semantic_quantizer_target_override
                         ),
                     },
                 },
@@ -569,13 +541,13 @@ if __name__ == "__main__":
         help="Choose which quantized/<step>step subfolder to load: z or z_sem.",
     )
     parser.add_argument(
-        "--semantic_quantizer_input_override",
-        "--semantic_quantizer_input",
-        dest="semantic_quantizer_input_override",
+        "--semantic_quantizer_target_override",
+        "--semantic_quantizer_target",
+        dest="semantic_quantizer_target_override",
         type=str,
         choices=["z", "z_sem"],
         default=None,
-        help="Override input_source from the quantizer config.",
+        help="Override target_source from the quantizer config.",
     )
 
     args = parser.parse_args()

@@ -62,7 +62,6 @@ encoder:
   kl_loss_weight: 1e-5
   use_reparameterization_trick: false
   use_std_sweep: true
-  vq_config: null
   dropout_regularizer_config: null
   kl_chunk_regularizer_config: null
   noise_regularizer_config: null

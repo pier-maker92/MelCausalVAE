@@ -9,9 +9,14 @@ from .encoder.encoder import Encoder
 from .utils import count_parameters_by_module
 from .feature_extractor import FeatureExtractor, WavLMFeatureExtractor
 from .speaker_encoder import WavLMSpeakerEncoder
-from .output_dataclasses import DicodecOutput, DecoderOutput, FeatureExtractorOutput
+from .output_dataclasses import (
+    AttributesOutput,
+    DicodecOutput,
+    DecoderOutput,
+    FeatureExtractorOutput,
+    QuantizeOutput,
+)
 from .lp_filter import LowPassFilter
-from .output_dataclasses import AttributesOutput
 from vocos import Vocos
 
 logger = logging.getLogger(__name__)
@@ -60,13 +65,7 @@ class Dicodec(torch.nn.Module):
             param.requires_grad = False
 
         self.external_semantic_quantizer = None
-        self.external_semantic_quantizer_input = "z_sem"
         self.external_semantic_quantizer_target = "z_sem"
-        self.semantic_quantizer_projection = torch.nn.Linear(
-            config.latent_dim * 2,
-            config.latent_dim,
-        )
-        self.train_only_decoder_and_quantizer = False
         if config.external_semantic_quantizer_config.enabled:
             if config.external_semantic_quantizer_config.checkpoint_path is None:
                 raise ValueError(
@@ -77,7 +76,6 @@ class Dicodec(torch.nn.Module):
                 checkpoint_path=config.external_semantic_quantizer_config.checkpoint_path,
                 quantizer_type=config.external_semantic_quantizer_config.quantizer_type,
                 codebook_size=config.external_semantic_quantizer_config.codebook_size,
-                input_source=config.external_semantic_quantizer_config.input_source,
                 target_source=config.external_semantic_quantizer_config.target_source,
             )
 
@@ -112,18 +110,8 @@ class Dicodec(torch.nn.Module):
     def train(self, mode: bool = True):
         super().train(mode)
         self._freeze_wavlm()
-        if mode and self.train_only_decoder_and_quantizer:
-            self.encoder.eval()
-            self.feature_extractor.eval()
-            self.vocoder.eval()
-            if self.wavlm_extractor is not None:
-                self.wavlm_extractor.eval()
-            if self.speaker_encoder is not None:
-                self.speaker_encoder.eval()
-            self.decoder.train()
-            self.semantic_quantizer_projection.train()
-            if self.external_semantic_quantizer is not None:
-                self.external_semantic_quantizer.train()
+        if self.external_semantic_quantizer is not None:
+            self.external_semantic_quantizer.eval()
         return self
 
     def from_pretrained(self, checkpoint_path: str):
@@ -372,17 +360,7 @@ class Dicodec(torch.nn.Module):
         if speaker_embedding is None:
             speaker_embedding = self.extract_speaker_embedding(audios_srs)
 
-        semantic_recon_loss = encoder_output.z.new_zeros(())
-        semantic_quantizer_loss = encoder_output.z.new_zeros(())
         z = encoder_output.z
-        if self.external_semantic_quantizer is not None:
-            z, semantic_recon_loss, semantic_quantizer_loss = (
-                self.apply_external_semantic_quantizer(
-                    z,
-                    padding_mask=encoder_output.padding_mask,
-                    return_losses=True,
-                )
-            )
 
         # decode from latent space
         decoder_output = self.decode(
@@ -406,8 +384,6 @@ class Dicodec(torch.nn.Module):
         out = {
             "audio_loss": audio_loss,
             "kl_loss": encoder_output.kl_loss,
-            "semantic_recon_loss": semantic_recon_loss,
-            "semantic_quantizer_loss": semantic_quantizer_loss,
             "mu_mean": mu_mean,
             "mu_var": mu_var,
         }
@@ -459,7 +435,6 @@ class Dicodec(torch.nn.Module):
         checkpoint_path: str,
         quantizer_type: str = "std_vq",
         codebook_size: Optional[int] = None,
-        input_source: Optional[str] = None,
         target_source: Optional[str] = None,
     ):
         from .semantic_quantizer_ae import (
@@ -491,13 +466,11 @@ class Dicodec(torch.nn.Module):
                 quantizer_config.get("num_codebooks", codebook_size),
             ),
         )
-        input_source = normalize_source(
-            input_source or quantizer_config.get("input_source", "z_sem"),
-            "input_source",
-        )
         target_source = normalize_source(
             target_source
-            or quantizer_config.get("target_source", input_source),
+            or quantizer_config.get("target_source")
+            or quantizer_config.get("input_source")
+            or "z_sem",
             "target_source",
         )
 
@@ -510,71 +483,62 @@ class Dicodec(torch.nn.Module):
         )
         quantizer.to(device=self.device, dtype=self.dtype)
         quantizer.eval()
+        for parameter in quantizer.parameters():
+            parameter.requires_grad_(False)
         self.external_semantic_quantizer = quantizer
-        self.external_semantic_quantizer_input = input_source
         self.external_semantic_quantizer_target = target_source
         self.config.external_semantic_quantizer_config.enabled = True
         self.config.external_semantic_quantizer_config.checkpoint_path = checkpoint_path
         self.config.external_semantic_quantizer_config.quantizer_type = quantizer_type
         self.config.external_semantic_quantizer_config.codebook_size = codebook_size
-        self.config.external_semantic_quantizer_config.input_source = input_source
         self.config.external_semantic_quantizer_config.target_source = target_source
         return quantizer
 
-    def apply_external_semantic_quantizer(
-        self, z, padding_mask=None, return_losses=False
-    ):
+    @torch.no_grad()
+    def quantize(
+        self,
+        z: torch.Tensor,
+        padding_mask: Optional[torch.BoolTensor] = None,
+        return_attributes: bool = False,
+    ) -> QuantizeOutput:
         if self.external_semantic_quantizer is None:
-            return z
+            raise RuntimeError("No external semantic quantizer is loaded.")
 
         attrs = self.encode_attributes(z, padding_mask=padding_mask)
         valid_mask = ~padding_mask if padding_mask is not None else None
-        quantizer_input = (
-            attrs.z_sem if self.external_semantic_quantizer_input == "z_sem" else z
-        )
+        target_source = self.external_semantic_quantizer_target
+        quantizer_input = attrs.z_sem if target_source == "z_sem" else z
         ae_out = self.external_semantic_quantizer(
             quantizer_input,
             valid_mask=valid_mask,
         )
-        if self.external_semantic_quantizer_target == "z":
-            z_reconstructed = ae_out.z_rec
-            recon_target = z
-        elif self.external_semantic_quantizer_target == "z_sem":
-            recon_target = attrs.z_sem
-            pros_mean = attrs.z_pros + attrs.z_mean
-            if self.config.mix_attributes_strategy == "add":
-                z_reconstructed = ae_out.z_rec + pros_mean
-            elif self.config.mix_attributes_strategy == "concat":
-                z_reconstructed = self.semantic_quantizer_projection(
-                    torch.cat([ae_out.z_rec, pros_mean], dim=-1)
-                )
-            else:
-                raise ValueError(
-                    "mix_attributes_strategy must be either 'add' or 'concat'."
-                )
+        quantized = ae_out.z_rec
+
+        if target_source == "z":
+            residual = z - quantized
+            z_pros = None
+        elif target_source == "z_sem":
+            residual = attrs.z_sem - quantized
+            z_pros = attrs.z_pros + attrs.z_mean
         else:
             raise ValueError(
                 "external semantic quantizer target_source must be either 'z' or 'z_sem'."
             )
 
-        if not return_losses:
-            return z_reconstructed
+        return QuantizeOutput(
+            quantized=quantized,
+            indices=ae_out.indices,
+            residual=residual,
+            z_pros=z_pros,
+            attributes=attrs if return_attributes else None,
+        )
 
-        if padding_mask is not None:
-            valid_3d = (~padding_mask).unsqueeze(-1)
-            valid_elems = (valid_3d.sum() * recon_target.shape[-1]).clamp_min(1.0)
-            semantic_recon_loss = (
-                F.mse_loss(
-                    ae_out.z_rec * valid_3d,
-                    recon_target.detach() * valid_3d,
-                    reduction="sum",
-                )
-                / valid_elems
-            )
-        else:
-            semantic_recon_loss = F.mse_loss(ae_out.z_rec, recon_target.detach())
-
-        return z_reconstructed, semantic_recon_loss, ae_out.quantizer_loss
+    @torch.no_grad()
+    def apply_external_semantic_quantizer(self, z, padding_mask=None):
+        quantized = self.quantize(z, padding_mask=padding_mask)
+        if self.external_semantic_quantizer_target == "z_sem":
+            return quantized.quantized + quantized.z_pros
+        return quantized.quantized
 
     @torch.no_grad()
     def encode_decode(

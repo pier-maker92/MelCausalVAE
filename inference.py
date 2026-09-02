@@ -200,7 +200,7 @@ def main(args):
             checkpoint_path=str(semantic_quantizer_checkpoint),
             quantizer_type=args.semantic_quantizer_type,
             codebook_size=args.semantic_codebook_size,
-            input_source=args.semantic_quantizer_input_override,
+            target_source=args.semantic_quantizer_target_override,
         )
     assert not model.training, "Model must be in eval mode"
     assert not model.encoder.training, (
@@ -303,13 +303,13 @@ if __name__ == "__main__":
         help="Choose which quantized/<step>step subfolder to load: z or z_sem.",
     )
     parser.add_argument(
-        "--semantic_quantizer_input_override",
-        "--semantic_quantizer_input",
-        dest="semantic_quantizer_input_override",
+        "--semantic_quantizer_target_override",
+        "--semantic_quantizer_target",
+        dest="semantic_quantizer_target_override",
         type=str,
         choices=["z", "z_sem"],
         default=None,
-        help="Override input_source from the quantizer config.",
+        help="Override target_source from the quantizer config.",
     )
     parser.add_argument(
         "-qq", "--zero_speaker", action="store_true", help="Zero out speaker embedding"

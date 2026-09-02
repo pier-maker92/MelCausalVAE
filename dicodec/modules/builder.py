@@ -140,7 +140,6 @@ def build_model(cfg_dict: Dict[str, Any]) -> Dicodec:
         latent_dim=cfg_dict.get("latent_dim"),
         sample_rate=cfg_dict.get("sample_rate"),
         compress_factor=cfg_dict.get("compress_factor"),
-        mix_attributes_strategy=cfg_dict.get("mix_attributes_strategy", "add"), #FIXME this is hardcoded, should be specified in the config
         encoder_config=encoder_config,
         decoder_config=decoder_config,
         mel_spectrogram_config=mel_spec_config,
@@ -149,12 +148,7 @@ def build_model(cfg_dict: Dict[str, Any]) -> Dicodec:
         external_semantic_quantizer_config=external_quantizer_config,
     )
 
-    training_cfg = cfg_dict.get("training", {}) or {}
-    return Dicodec(
-        config=dicodec_config,
-        train_only_vq=training_cfg.get("train_only_vq", False),
-        train_only_vq_and_decoder=training_cfg.get("train_only_vq_and_decoder", False),
-    )
+    return Dicodec(config=dicodec_config)
 
 
 def load_pretrained_model(checkpoint_dir: str):
@@ -163,7 +157,7 @@ def load_pretrained_model(checkpoint_dir: str):
     with open(config_path, "r") as f:
         cfg_dict = json.load(f)
     default_model_cfg = _load_default_model_config()
-    for key in ("mix_attributes_strategy", "external_semantic_quantizer_config"):
+    for key in ("external_semantic_quantizer_config",):
         cfg_dict.setdefault(key, default_model_cfg[key])
 
     model = build_model(cfg_dict)

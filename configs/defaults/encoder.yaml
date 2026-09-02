@@ -18,8 +18,6 @@ encoder:
   use_reparameterization_trick: false
   use_std_sweep: false
 
-  vq_config: null
-
   # Optional Regularizers
   dropout_regularizer_config: null
   kl_chunk_regularizer_config: null

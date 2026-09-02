@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 from typing import Optional
 import torch.nn.functional as F
-from ..configs import EncoderConfig, VQConfig
+from ..configs import EncoderConfig
 from ..output_dataclasses import EncoderOutput
 from .sigmavae import SigmaVAEEncoder
 from .regularization import (
