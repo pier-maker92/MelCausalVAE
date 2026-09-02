@@ -41,3 +41,7 @@ audio_assets/
 *.txt
 *.png
 *.log
+*.csv
+*.out
+*.err
+*.sh

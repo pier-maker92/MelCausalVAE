@@ -203,7 +203,7 @@ def make_config(args, latent_dim: int, quant_dim: int) -> TrainQuantizerConfig:
         checkpoint_dir=str(args.checkpoint_dir),
         data_dir=str(args.data_dir),
         input_source=args.input_source,
-        target_source="z_sem",
+        target_source=args.target_source,
         quantizer_type=args.quantizer,
         num_codebooks=args.codebook_size,
         num_embeddings=args.codebook_size,
@@ -272,6 +272,7 @@ def main():
     )
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--input-source", choices=["z", "z_sem"], default="z_sem")
+    parser.add_argument("--target-source", choices=["z", "z_sem"], default="z_sem")
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--lr", type=float, default=1e-4)
@@ -356,7 +357,7 @@ def main():
     cumulative_code_counts = torch.zeros(args.codebook_size, dtype=torch.long)
     print(
         "Starting training loop "
-        f"(input_source={args.input_source}, target_source=z_sem, quantizer={args.quantizer})..."
+        f"(input_source={args.input_source}, target_source={args.target_source}, quantizer={args.quantizer})..."
     )
 
     for epoch in range(args.epochs):
@@ -382,23 +383,24 @@ def main():
 
             valid_mask = ~padding_mask if padding_mask is not None else None
             model_input = z if args.input_source == "z" else z_sem
+            model_target = z if args.target_source == "z" else z_sem
 
             optimizer.zero_grad()
             ae_out = model(model_input, valid_mask=valid_mask)
 
             if padding_mask is not None:
                 valid_3d = (~padding_mask).unsqueeze(-1)
-                valid_elems = (valid_3d.sum() * z_sem.shape[-1]).clamp_min(1.0)
+                valid_elems = (valid_3d.sum() * model_target.shape[-1]).clamp_min(1.0)
                 rec_loss = (
                     F.mse_loss(
                         ae_out.z_rec * valid_3d,
-                        z_sem * valid_3d,
+                        model_target * valid_3d,
                         reduction="sum",
                     )
                     / valid_elems
                 )
             else:
-                rec_loss = F.mse_loss(ae_out.z_rec, z_sem)
+                rec_loss = F.mse_loss(ae_out.z_rec, model_target)
 
             loss = rec_loss + ae_out.quantizer_loss
             loss.backward()
