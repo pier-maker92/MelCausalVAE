@@ -65,6 +65,53 @@ def infer_quantizer_type_from_path(path: Path, fallback: str) -> str:
     return fallback
 
 
+def normalize_semantic_quantizer_variant(value: str | None) -> str | None:
+    if value is None:
+        return None
+    value = str(value).strip().lower().replace("-", "_")
+    aliases = {
+        "z": "z",
+        "z_sem": "z_sem",
+        "zsem": "z_sem",
+        "z_semantic": "z_sem",
+        "semantic": "z_sem",
+    }
+    if value not in aliases:
+        raise ValueError("--semantic_quantizer_variant must be either 'z' or 'z_sem'.")
+    return aliases[value]
+
+
+def config_codebook_size(config: dict) -> int | None:
+    value = config.get(
+        "codebook_size",
+        config.get("num_embeddings", config.get("num_codebooks")),
+    )
+    return int(value) if value is not None else None
+
+
+def configured_quantizer_dirs(
+    quantized_dir: Path,
+    codebook_size: int,
+    variant: str | None,
+) -> list[Path]:
+    dirs = []
+    variant_aliases = {
+        "z": {"z"},
+        "z_sem": {"z_sem", "zsem", "z_semantic", "semantic"},
+    }
+    for path in sorted(p for p in quantized_dir.iterdir() if p.is_dir()):
+        if variant is not None and path.name not in variant_aliases[variant]:
+            continue
+        config_path = path / "config.json"
+        if not config_path.exists():
+            continue
+        with open(config_path, "r") as f:
+            config = json.load(f)
+        if config_codebook_size(config) == codebook_size:
+            dirs.append(path)
+    return dirs
+
+
 def resolve_semantic_quantizer_checkpoint(args) -> Path | None:
     if args.semantic_quantizer_checkpoint is not None:
         return Path(args.semantic_quantizer_checkpoint)
@@ -81,6 +128,28 @@ def resolve_semantic_quantizer_checkpoint(args) -> Path | None:
     quantized_dir = Path(args.checkpoint) / "quantized" / f"{step_label}step"
     if not quantized_dir.is_dir():
         raise FileNotFoundError(f"Quantized checkpoint directory not found: {quantized_dir}")
+
+    variant = normalize_semantic_quantizer_variant(args.semantic_quantizer_variant)
+    configured_dirs = configured_quantizer_dirs(
+        quantized_dir,
+        args.semantic_codebook_size,
+        variant,
+    )
+    if len(configured_dirs) == 1:
+        return configured_dirs[0]
+    if len(configured_dirs) > 1:
+        formatted = "\n".join(str(path) for path in configured_dirs)
+        raise RuntimeError(
+            "Multiple matching semantic quantizer variants found. "
+            "Pass --semantic_quantizer_variant z or --semantic_quantizer_variant z_sem.\n"
+            f"{formatted}"
+        )
+    if variant is not None:
+        raise FileNotFoundError(
+            "No semantic quantizer checkpoint found for "
+            f"variant={variant}, steps={args.semantic_quantizer_steps}, "
+            f"codebook_size={args.semantic_codebook_size} in {quantized_dir}."
+        )
 
     candidates = sorted(
         {
@@ -298,10 +367,13 @@ def get_eval_id(args):
     if args.semantic_quantizer_checkpoint is not None:
         eval_id += "_external_quantizer"
     elif args.semantic_quantizer_steps is not None:
+        variant = normalize_semantic_quantizer_variant(args.semantic_quantizer_variant)
         eval_id += (
             f"_external_quantizer_{args.semantic_quantizer_steps}"
             f"_cb{args.semantic_codebook_size}"
         )
+        if variant is not None:
+            eval_id += f"_{variant}"
     return eval_id
 
 
@@ -408,6 +480,11 @@ def main(args):
                         "temperature": args.temperature,
                         "semantic_quantizer_type": args.semantic_quantizer_type,
                         "semantic_codebook_size": args.semantic_codebook_size,
+                        "semantic_quantizer_variant": (
+                            normalize_semantic_quantizer_variant(
+                                args.semantic_quantizer_variant
+                            )
+                        ),
                         "semantic_quantizer_input_override": (
                             args.semantic_quantizer_input_override
                         ),
@@ -483,6 +560,13 @@ if __name__ == "__main__":
         type=int,
         default=None,
         help="Optional override; inferred from checkpoint folder when possible.",
+    )
+    parser.add_argument(
+        "--semantic_quantizer_variant",
+        type=str,
+        choices=["z", "z_sem", "zsem", "z_semantic", "semantic"],
+        default=None,
+        help="Choose which quantized/<step>step subfolder to load: z or z_sem.",
     )
     parser.add_argument(
         "--semantic_quantizer_input_override",

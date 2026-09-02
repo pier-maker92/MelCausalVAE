@@ -272,8 +272,30 @@ class ExternalSemanticQuantizerConfig:
     quantizer_type: str = "std_vq"
     codebook_size: Optional[int] = None
     input_source: Optional[str] = None
+    target_source: Optional[str] = None
 
     def __post_init__(self):
+        def normalize_source(value: Optional[str], field_name: str) -> Optional[str]:
+            if value is None:
+                return None
+            value = str(value).strip().lower().replace("-", "_")
+            aliases = {
+                "z": "z",
+                "z_sem": "z_sem",
+                "zsem": "z_sem",
+                "z_semantic": "z_sem",
+                "semantic": "z_sem",
+            }
+            if value not in aliases:
+                raise ValueError(
+                    f"external_semantic_quantizer_config.{field_name} must be "
+                    "either 'z' or 'z_sem'."
+                )
+            return aliases[value]
+
+        self.input_source = normalize_source(self.input_source, "input_source")
+        self.target_source = normalize_source(self.target_source, "target_source")
+
         if self.quantizer_type not in {"bsq", "fsq", "std_vq", "vq", "vq_ema"}:
             raise ValueError(
                 "external_semantic_quantizer_config.quantizer_type must be one of: "
@@ -282,11 +304,6 @@ class ExternalSemanticQuantizerConfig:
         if self.codebook_size is not None and self.codebook_size <= 0:
             raise ValueError(
                 "external_semantic_quantizer_config.codebook_size must be > 0."
-            )
-        if self.input_source is not None and self.input_source not in {"z", "z_sem"}:
-            raise ValueError(
-                "external_semantic_quantizer_config.input_source must be either "
-                "'z' or 'z_sem'."
             )
 
 

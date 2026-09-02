@@ -61,6 +61,7 @@ class Dicodec(torch.nn.Module):
 
         self.external_semantic_quantizer = None
         self.external_semantic_quantizer_input = "z_sem"
+        self.external_semantic_quantizer_target = "z_sem"
         self.semantic_quantizer_projection = torch.nn.Linear(
             config.latent_dim * 2,
             config.latent_dim,
@@ -77,6 +78,7 @@ class Dicodec(torch.nn.Module):
                 quantizer_type=config.external_semantic_quantizer_config.quantizer_type,
                 codebook_size=config.external_semantic_quantizer_config.codebook_size,
                 input_source=config.external_semantic_quantizer_config.input_source,
+                target_source=config.external_semantic_quantizer_config.target_source,
             )
 
         count_parameters_by_module(self.encoder, "Encoder")
@@ -458,11 +460,27 @@ class Dicodec(torch.nn.Module):
         quantizer_type: str = "std_vq",
         codebook_size: Optional[int] = None,
         input_source: Optional[str] = None,
+        target_source: Optional[str] = None,
     ):
         from .semantic_quantizer_ae import (
             load_semantic_quantizer_ae,
             read_semantic_quantizer_config,
         )
+
+        def normalize_source(value: Optional[str], field_name: str) -> Optional[str]:
+            if value is None:
+                return None
+            value = str(value).strip().lower().replace("-", "_")
+            aliases = {
+                "z": "z",
+                "z_sem": "z_sem",
+                "zsem": "z_sem",
+                "z_semantic": "z_sem",
+                "semantic": "z_sem",
+            }
+            if value not in aliases:
+                raise ValueError(f"{field_name} must be either 'z' or 'z_sem'.")
+            return aliases[value]
 
         quantizer_config = read_semantic_quantizer_config(checkpoint_path)
         quantizer_type = quantizer_config.get("quantizer_type", quantizer_type)
@@ -473,9 +491,15 @@ class Dicodec(torch.nn.Module):
                 quantizer_config.get("num_codebooks", codebook_size),
             ),
         )
-        input_source = input_source or quantizer_config.get("input_source", "z_sem")
-        if input_source not in {"z", "z_sem"}:
-            raise ValueError("input_source must be either 'z' or 'z_sem'.")
+        input_source = normalize_source(
+            input_source or quantizer_config.get("input_source", "z_sem"),
+            "input_source",
+        )
+        target_source = normalize_source(
+            target_source
+            or quantizer_config.get("target_source", input_source),
+            "target_source",
+        )
 
         quantizer = load_semantic_quantizer_ae(
             checkpoint_path=checkpoint_path,
@@ -488,11 +512,13 @@ class Dicodec(torch.nn.Module):
         quantizer.eval()
         self.external_semantic_quantizer = quantizer
         self.external_semantic_quantizer_input = input_source
+        self.external_semantic_quantizer_target = target_source
         self.config.external_semantic_quantizer_config.enabled = True
         self.config.external_semantic_quantizer_config.checkpoint_path = checkpoint_path
         self.config.external_semantic_quantizer_config.quantizer_type = quantizer_type
         self.config.external_semantic_quantizer_config.codebook_size = codebook_size
         self.config.external_semantic_quantizer_config.input_source = input_source
+        self.config.external_semantic_quantizer_config.target_source = target_source
         return quantizer
 
     def apply_external_semantic_quantizer(
@@ -510,16 +536,25 @@ class Dicodec(torch.nn.Module):
             quantizer_input,
             valid_mask=valid_mask,
         )
-        pros_mean = attrs.z_pros + attrs.z_mean
-        if self.config.mix_attributes_strategy == "add":
-            z_reconstructed = ae_out.z_rec + pros_mean
-        elif self.config.mix_attributes_strategy == "concat":
-            z_reconstructed = self.semantic_quantizer_projection(
-                torch.cat([ae_out.z_rec, pros_mean], dim=-1)
-            )
+        if self.external_semantic_quantizer_target == "z":
+            z_reconstructed = ae_out.z_rec
+            recon_target = z
+        elif self.external_semantic_quantizer_target == "z_sem":
+            recon_target = attrs.z_sem
+            pros_mean = attrs.z_pros + attrs.z_mean
+            if self.config.mix_attributes_strategy == "add":
+                z_reconstructed = ae_out.z_rec + pros_mean
+            elif self.config.mix_attributes_strategy == "concat":
+                z_reconstructed = self.semantic_quantizer_projection(
+                    torch.cat([ae_out.z_rec, pros_mean], dim=-1)
+                )
+            else:
+                raise ValueError(
+                    "mix_attributes_strategy must be either 'add' or 'concat'."
+                )
         else:
             raise ValueError(
-                "mix_attributes_strategy must be either 'add' or 'concat'."
+                "external semantic quantizer target_source must be either 'z' or 'z_sem'."
             )
 
         if not return_losses:
@@ -527,17 +562,17 @@ class Dicodec(torch.nn.Module):
 
         if padding_mask is not None:
             valid_3d = (~padding_mask).unsqueeze(-1)
-            valid_elems = (valid_3d.sum() * attrs.z_sem.shape[-1]).clamp_min(1.0)
+            valid_elems = (valid_3d.sum() * recon_target.shape[-1]).clamp_min(1.0)
             semantic_recon_loss = (
                 F.mse_loss(
                     ae_out.z_rec * valid_3d,
-                    attrs.z_sem.detach() * valid_3d,
+                    recon_target.detach() * valid_3d,
                     reduction="sum",
                 )
                 / valid_elems
             )
         else:
-            semantic_recon_loss = F.mse_loss(ae_out.z_rec, attrs.z_sem.detach())
+            semantic_recon_loss = F.mse_loss(ae_out.z_rec, recon_target.detach())
 
         return z_reconstructed, semantic_recon_loss, ae_out.quantizer_loss
 
