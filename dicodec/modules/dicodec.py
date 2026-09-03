@@ -258,61 +258,6 @@ class Dicodec(torch.nn.Module):
             z_pros = z_pros * valid_mask
             z_res_centered = z_res_centered * valid_mask
 
-        if plot:
-            import matplotlib.pyplot as plt
-
-            res_scale = 1.0
-            z_reconstructed = z_pros + res_scale * z_res_centered + z_mean
-            plt.figure(figsize=(14, 6))
-
-            plt.plot(
-                z_original[0, :, 0].detach().cpu().numpy(),
-                label="z original",
-                alpha=0.5,
-            )
-
-            plt.plot(
-                z_centered[0, :, 0].detach().cpu().numpy(),
-                label="z centered",
-                alpha=0.5,
-            )
-
-            plt.plot(
-                z_lp[0, :, 0].detach().cpu().numpy(),
-                label="z_lp",
-                alpha=0.5,
-            )
-
-            plt.plot(
-                z_hp[0, :, 0].detach().cpu().numpy(),
-                label="z_hp",
-                linewidth=2,
-            )
-
-            plt.plot(
-                z_pros[0, :, 0].detach().cpu().numpy(),
-                label="z_pros (projected low-pass)",
-                linewidth=2,
-            )
-
-            plt.plot(
-                z_res_centered[0, :, 0].detach().cpu().numpy(),
-                label="z_sem (high-pass)",
-                alpha=0.8,
-            )
-
-            plt.plot(
-                z_reconstructed[0, :, 0].detach().cpu().numpy(),
-                label=f"output scale={res_scale}",
-                linewidth=2,
-            )
-
-            plt.axhline(0, linestyle="--", alpha=0.5)
-            plt.legend()
-            plt.tight_layout()
-            plt.savefig("plot_dc_removed_projection.png", dpi=150)
-            plt.close()
-
         return AttributesOutput(
             z_sem=z_res_centered,
             z_pros=z_pros,
