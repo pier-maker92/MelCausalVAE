@@ -90,7 +90,6 @@ wavlm_module_config:
   feature_extractor_config:
     layer: 18
     sampling_rate: 16000
-    normalize: true
   speaker_encoder_config:
     sampling_rate: 16000
     embedding_dim: 1024
@@ -104,6 +103,5 @@ wavlm_module_config:
     wavlm_layer_combine: weighted_sum
     wavlm_pooling: mean_std
     wavlm_layer_weights: null
-    wavlm_normalize_features: true
     wavlm_freeze: true
     wavlm_attention_channels: 128
