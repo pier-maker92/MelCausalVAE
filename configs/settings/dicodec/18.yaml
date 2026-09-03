@@ -72,7 +72,6 @@ decoder:
   dit_heads: 12
   dit_dropout_rate: 0.1
   use_conv_layer: true
-  uncond_prob: 0.0
   uncond_context_prob: 0.1
   uncond_speaker_prob: 0.1
   uncond_both_prob: 0.05
@@ -83,7 +82,6 @@ decoder:
   causal_convolution: false
   normalize_context_vector: true
   speaker_cond_dim: 1024
-  use_adaln_zero: true
   adaln_cond_dim: 768
   local_speaker_conditioning: false
 

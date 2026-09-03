@@ -26,7 +26,6 @@ class DiT(torch.nn.Module):
         self.use_conv_layer = config.use_conv_layer
         self.audio_latent_dim = config.audio_latent_dim
         self.expansion_factor = config.expansion_factor
-        self.uncond_prob = config.uncond_prob
         self.uncond_context_prob = config.uncond_context_prob
         self.uncond_speaker_prob = config.uncond_speaker_prob
         self.uncond_both_prob = config.uncond_both_prob
@@ -52,8 +51,7 @@ class DiT(torch.nn.Module):
                 f"Dicodec group_bidirectional: enabled (group_size will be set to expansion_factor)"
             )
         total_uncond_prob = (
-            self.uncond_prob
-            + self.uncond_context_prob
+            self.uncond_context_prob
             + self.uncond_speaker_prob
             + self.uncond_both_prob
         )
@@ -98,13 +96,10 @@ class DiT(torch.nn.Module):
             ff_dropout=config.dit_dropout_rate,
             use_conv_layer=self.use_conv_layer,
             is_causal=self.is_causal,
-            attn_flash=True,
             window_size=self.window_size,
             conv_pos_embed_kernel_size=config.kernel_size,
             conv_is_causal=self.causal_convolution,
             speaker_cond_dim=config.speaker_cond_dim,
-            speaker_film_hidden_dim=config.speaker_film_hidden_dim,
-            use_adaln_zero=config.use_adaln_zero,
             adaln_cond_dim=config.adaln_cond_dim,
         )
 
@@ -204,14 +199,13 @@ class DiT(torch.nn.Module):
         context_cutoff = self.uncond_context_prob
         speaker_cutoff = context_cutoff + self.uncond_speaker_prob
         both_cutoff = speaker_cutoff + self.uncond_both_prob
-        legacy_cutoff = both_cutoff + self.uncond_prob
 
         if dropout_draw < context_cutoff:
             context_vector = torch.zeros_like(context_vector)
         elif dropout_draw < speaker_cutoff:
             if speaker_embedding is not None:
                 speaker_embedding = torch.zeros_like(speaker_embedding)
-        elif dropout_draw < both_cutoff or dropout_draw < legacy_cutoff:
+        elif dropout_draw < both_cutoff:
             context_vector = torch.zeros_like(context_vector)
             if speaker_embedding is not None:
                 speaker_embedding = torch.zeros_like(speaker_embedding)

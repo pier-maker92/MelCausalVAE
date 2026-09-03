@@ -9,7 +9,6 @@ decoder:
   expansion_factor: null
   mel_dim: null
   sigma: 1.0e-5
-  uncond_prob: 0.0
   uncond_context_prob: 0.0
   uncond_speaker_prob: 0.0
   uncond_both_prob: 0.0
@@ -21,8 +20,6 @@ decoder:
   causal_convolution: false
   use_group_bidirectional: false
   speaker_cond_dim: null
-  speaker_film_hidden_dim: null
-  use_adaln_zero: false
   adaln_cond_dim: null
   local_speaker_conditioning: false
   normalize_context_vector: false

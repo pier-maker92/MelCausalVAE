@@ -172,7 +172,6 @@ class DiTConfig:
     use_conv_layer: bool
     expansion_factor: int
     mel_dim: int
-    uncond_prob: float
     uncond_context_prob: float = 0.0
     uncond_speaker_prob: float = 0.0
     uncond_both_prob: float = 0.0
@@ -185,8 +184,6 @@ class DiTConfig:
     sigma: float
     use_group_bidirectional: bool
     speaker_cond_dim: Optional[int] = None
-    speaker_film_hidden_dim: Optional[int] = None
-    use_adaln_zero: bool = False
     adaln_cond_dim: Optional[int] = None
     local_speaker_conditioning: bool
     normalize_context_vector: bool
