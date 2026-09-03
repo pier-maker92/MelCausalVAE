@@ -549,6 +549,7 @@ def main(cfg: DictConfig):
         logger.info(f"Loaded pretrained model from {from_pretrained}")
 
     # Setup training arguments
+    training_cfg.pop("run_id", None)
     training_args = TrainingArguments(
         remove_unused_columns=False,  # Don't let Trainer auto-remove columns
         ddp_timeout=7200,  # 2 hours timeout for long evaluation on Rank 0
