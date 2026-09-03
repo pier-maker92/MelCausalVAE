@@ -426,6 +426,7 @@ class Dicodectrainer(Trainer):
 
 def get_dataset(training_cfg):
     dataset_name = training_cfg.pop("dataset_name")
+    max_audio_duration = training_cfg.pop("max_audio_duration", None)
     if dataset_name == "mls":
         from dicodec.data.mls import MLSDataset
 
@@ -440,8 +441,16 @@ def get_dataset(training_cfg):
         dataset = LibriTTSR()
     else:
         raise ValueError(f"Dataset {dataset_name} not supported")
-    train_dataset = TrainDatasetWrapper(dataset, "train")
-    test_dataset = TestDatasetWrapper(dataset, "test")
+    train_dataset = TrainDatasetWrapper(
+        dataset,
+        "train",
+        max_audio_len=max_audio_duration,
+    )
+    test_dataset = TestDatasetWrapper(
+        dataset,
+        "test",
+        max_audio_len=max_audio_duration,
+    )
     return dataset_name, train_dataset, test_dataset
 
 

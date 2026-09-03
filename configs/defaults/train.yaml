@@ -48,4 +48,5 @@ training:
   resume_from_checkpoint: null
   from_pretrained: null
   dataset_name: null
+  max_audio_duration: null
   eval_num_samples: null
