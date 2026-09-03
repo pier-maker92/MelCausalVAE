@@ -208,7 +208,6 @@ class MelSpectrogramConfig:
 class WavLMConfig:
     layer: int
     sampling_rate: int
-    normalize: bool
 
 
 @dataclass(kw_only=True)
@@ -219,7 +218,6 @@ class SpeakerEncoderConfig:
     wavlm_layer_weights: Optional[list[float]] = None
     wavlm_layer_combine: str
     wavlm_pooling: str
-    wavlm_normalize_features: bool
     wavlm_freeze: bool
     wavlm_attention_channels: int
 

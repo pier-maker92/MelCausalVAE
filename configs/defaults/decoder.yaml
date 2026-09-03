@@ -35,6 +35,5 @@ decoder:
 #   wavlm_layer_weights: null
 #   wavlm_layer_combine: weighted_sum
 #   wavlm_pooling: mean_std
-#   wavlm_normalize_features: true
 #   wavlm_freeze: true
 #   wavlm_attention_channels: 128

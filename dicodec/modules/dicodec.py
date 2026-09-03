@@ -95,6 +95,15 @@ class Dicodec(torch.nn.Module):
         for parameter in self.wavlm.parameters():
             parameter.requires_grad_(False)
 
+    def _normalize_ssl_features(
+        self,
+        features: torch.Tensor,
+        eps: float = 1e-8,
+    ) -> torch.Tensor:
+        mean = torch.mean(features, dim=1, keepdim=True)
+        std = torch.std(features, dim=1, keepdim=True)
+        return (features - mean) / (std + eps)
+
     def train(self, mode: bool = True):
         super().train(mode)
         self._freeze_wavlm()
@@ -131,6 +140,7 @@ class Dicodec(torch.nn.Module):
 
         wavlm_output = extractor(audios_srs, audio_16khz=audio_16khz)
         wavlm_features = wavlm_output.audio_features.to(self.dtype)
+        wavlm_features = self._normalize_ssl_features(wavlm_features)
         wavlm_features = wavlm_features.repeat_interleave(2, dim=1)
         wavlm_features = (
             F.interpolate(

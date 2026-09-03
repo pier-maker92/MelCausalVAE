@@ -50,7 +50,6 @@ class WavLMSpeakerEncoder(nn.Module):
         self.layers = list(config.wavlm_layers)
         self.layer_combine = config.wavlm_layer_combine
         self.pooling = config.wavlm_pooling
-        self.normalize_features = config.wavlm_normalize_features
         self.freeze_wavlm = True
 
         if self.layer_combine not in {"mean", "weighted_sum", "concat"}:
@@ -112,9 +111,6 @@ class WavLMSpeakerEncoder(nn.Module):
                 nn.Linear(pooled_input_dim * multiplier, config.embedding_dim),
                 nn.LayerNorm(config.embedding_dim),
             )
-
-        self.register_buffer("feature_mean", torch.tensor(0.0))
-        self.register_buffer("feature_std", torch.tensor(1.0))
 
     @property
     def wavlm(self) -> nn.Module:
@@ -205,16 +201,6 @@ class WavLMSpeakerEncoder(nn.Module):
         )
 
         features = features.to(dtype=next(self.parameters()).dtype)
-        if self.normalize_features:
-            valid_features = features[~feat_padding_mask]
-            if self.training and valid_features.numel() > 0:
-                self.feature_std.copy_(
-                    self.feature_std * 0.99 + valid_features.std().detach() * 0.01
-                )
-                self.feature_mean.copy_(
-                    self.feature_mean * 0.99 + valid_features.mean().detach() * 0.01
-                )
-            features = (features - self.feature_mean) / self.feature_std
 
         if self.pool is not None:
             return self.pool(features, feat_padding_mask)
