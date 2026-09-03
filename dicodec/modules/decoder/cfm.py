@@ -27,6 +27,9 @@ class DiT(torch.nn.Module):
         self.audio_latent_dim = config.audio_latent_dim
         self.expansion_factor = config.expansion_factor
         self.uncond_prob = config.uncond_prob
+        self.uncond_context_prob = config.uncond_context_prob
+        self.uncond_speaker_prob = config.uncond_speaker_prob
+        self.uncond_both_prob = config.uncond_both_prob
         self.is_causal = config.is_causal
         self.use_window_attention = config.use_window_attention
         self.use_group_bidirectional = config.use_group_bidirectional
@@ -47,6 +50,16 @@ class DiT(torch.nn.Module):
         if self.use_group_bidirectional:
             print(
                 f"Dicodec group_bidirectional: enabled (group_size will be set to expansion_factor)"
+            )
+        total_uncond_prob = (
+            self.uncond_prob
+            + self.uncond_context_prob
+            + self.uncond_speaker_prob
+            + self.uncond_both_prob
+        )
+        if total_uncond_prob > 1.0:
+            raise ValueError(
+                "Sum of decoder unconditional dropout probabilities must be <= 1.0."
             )
 
         # context vector upsampling layers
@@ -81,6 +94,8 @@ class DiT(torch.nn.Module):
             depth=self.dit_depth,
             out_dim=self.mel_dim,
             heads=self.dit_heads,
+            attn_dropout=config.dit_dropout_rate,
+            ff_dropout=config.dit_dropout_rate,
             use_conv_layer=self.use_conv_layer,
             is_causal=self.is_causal,
             attn_flash=True,
@@ -88,6 +103,9 @@ class DiT(torch.nn.Module):
             conv_pos_embed_kernel_size=config.kernel_size,
             conv_is_causal=self.causal_convolution,
             speaker_cond_dim=config.speaker_cond_dim,
+            speaker_film_hidden_dim=config.speaker_film_hidden_dim,
+            use_adaln_zero=config.use_adaln_zero,
+            adaln_cond_dim=config.adaln_cond_dim,
         )
 
     def _normalized_speaker_embedding(
@@ -182,7 +200,18 @@ class DiT(torch.nn.Module):
         x0: torch.FloatTensor,
         speaker_embedding: Optional[torch.FloatTensor] = None,
     ):
-        if random.random() < self.uncond_prob:
+        dropout_draw = random.random()
+        context_cutoff = self.uncond_context_prob
+        speaker_cutoff = context_cutoff + self.uncond_speaker_prob
+        both_cutoff = speaker_cutoff + self.uncond_both_prob
+        legacy_cutoff = both_cutoff + self.uncond_prob
+
+        if dropout_draw < context_cutoff:
+            context_vector = torch.zeros_like(context_vector)
+        elif dropout_draw < speaker_cutoff:
+            if speaker_embedding is not None:
+                speaker_embedding = torch.zeros_like(speaker_embedding)
+        elif dropout_draw < both_cutoff or dropout_draw < legacy_cutoff:
             context_vector = torch.zeros_like(context_vector)
             if speaker_embedding is not None:
                 speaker_embedding = torch.zeros_like(speaker_embedding)

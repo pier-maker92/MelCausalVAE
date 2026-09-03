@@ -4,7 +4,10 @@ import argparse
 import torchaudio
 import torchaudio.transforms as T
 from pathlib import Path
-from dicodec.modules.builder import load_pretrained_model
+from dicodec.modules.builder import (
+    load_external_semantic_quantizer,
+    load_pretrained_model,
+)
 
 
 def load_wav_mono_resampled(path: str, target_sr: int) -> torch.Tensor:
@@ -110,7 +113,9 @@ def resolve_semantic_quantizer_checkpoint(args) -> Path | None:
     step_label, step_count = normalize_quantized_step(args.semantic_quantizer_steps)
     quantized_dir = Path(args.checkpoint_dir) / "quantized" / f"{step_label}step"
     if not quantized_dir.is_dir():
-        raise FileNotFoundError(f"Quantized checkpoint directory not found: {quantized_dir}")
+        raise FileNotFoundError(
+            f"Quantized checkpoint directory not found: {quantized_dir}"
+        )
 
     variant = normalize_semantic_quantizer_variant(args.semantic_quantizer_variant)
     configured_dirs = configured_quantizer_dirs(
@@ -172,7 +177,9 @@ def resolve_semantic_quantizer_checkpoint(args) -> Path | None:
             f"codebook_size={args.semantic_codebook_size} in {quantized_dir}."
         )
     formatted = "\n".join(str(path) for path in candidates)
-    raise RuntimeError(f"Multiple matching semantic quantizer checkpoints:\n{formatted}")
+    raise RuntimeError(
+        f"Multiple matching semantic quantizer checkpoints:\n{formatted}"
+    )
 
 
 def main(args):
@@ -196,7 +203,8 @@ def main(args):
             args.semantic_quantizer_type,
         )
         print(f"Loading semantic quantizer from {semantic_quantizer_checkpoint}...")
-        model.load_external_semantic_quantizer(
+        load_external_semantic_quantizer(
+            model,
             checkpoint_path=str(semantic_quantizer_checkpoint),
             quantizer_type=args.semantic_quantizer_type,
             codebook_size=args.semantic_codebook_size,
@@ -236,6 +244,7 @@ def main(args):
                     "encoder."
                 )
             params["speaker_embedding"] = speaker_embedding
+            params["target_audios_srs_eval"] = [(target_wav, model.config.sample_rate)]
 
         if getattr(args, "zero_speaker", False):
             params["zero_speaker"] = True
@@ -269,8 +278,8 @@ if __name__ == "__main__":
     )
     parser.add_argument("-o", "--output_path", type=str, default=None)
     parser.add_argument("--num_steps", type=int, default=16)
-    parser.add_argument("--temperature", type=float, default=0.3)
-    parser.add_argument("--guidance_scale", type=float, default=1.3)
+    parser.add_argument("--temperature", type=float, default=0.8)
+    parser.add_argument("--guidance_scale", type=float, default=1.8)
     parser.add_argument(
         "--semantic_quantizer_checkpoint",
         type=str,

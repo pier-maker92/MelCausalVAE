@@ -31,12 +31,16 @@ class Transformer(Module):
         conv_pos_embed_kernel_size: int = 31,
         conv_is_causal: bool = False,
         speaker_cond_dim: Optional[int] = None,
+        speaker_film_hidden_dim: Optional[int] = None,
+        use_adaln_zero: bool = False,
+        adaln_cond_dim: Optional[int] = None,
     ):
         super().__init__()
         assert divisible_by(depth, 2)
         self.layers = nn.ModuleList([])
 
         self.use_conv_layer = use_conv_layer
+        self.use_adaln_zero = use_adaln_zero
         self.window_size = window_size
         self.rotary_emb = RotaryEmbedding(dim=dim_head)
 
@@ -48,7 +52,13 @@ class Transformer(Module):
 
         # time embedding
         time_hidden_dim = default(time_hidden_dim, dim * 4)
-        if adaptive_rmsnorm:
+        cond_dim = default(adaln_cond_dim, dim) if use_adaln_zero else time_hidden_dim
+        if use_adaln_zero:
+            rmsnorm_klass = partial(
+                AdaRMSNormZero,
+                cond_dim=cond_dim,
+            )
+        elif adaptive_rmsnorm:
             rmsnorm_klass = partial(
                 AdaptiveRMSNorm,
                 cond_dim=time_hidden_dim,
@@ -58,20 +68,26 @@ class Transformer(Module):
 
         self.sinu_pos_emb = nn.Sequential(
             LearnedSinusoidalPosEmb(dim),
-            nn.Linear(dim, time_hidden_dim),
+            nn.Linear(dim, cond_dim),
             nn.SiLU(),
         )
 
         if speaker_cond_dim is not None:
-            self.speaker_proj = nn.Linear(speaker_cond_dim, time_hidden_dim)
-            self.speaker_time_film = nn.Sequential(
-                nn.SiLU(),
-                nn.Linear(time_hidden_dim * 2, time_hidden_dim),
-                nn.SiLU(),
-                nn.Linear(time_hidden_dim, depth * 2 * time_hidden_dim),
-            )
-            nn.init.zeros_(self.speaker_time_film[-1].weight)
-            nn.init.zeros_(self.speaker_time_film[-1].bias)
+            self.speaker_proj = nn.Linear(speaker_cond_dim, cond_dim)
+            if use_adaln_zero:
+                self.speaker_time_film = None
+            else:
+                speaker_film_hidden_dim = default(
+                    speaker_film_hidden_dim, time_hidden_dim
+                )
+                self.speaker_time_film = nn.Sequential(
+                    nn.SiLU(),
+                    nn.Linear(time_hidden_dim * 2, speaker_film_hidden_dim),
+                    nn.SiLU(),
+                    nn.Linear(speaker_film_hidden_dim, depth * 2 * time_hidden_dim),
+                )
+                nn.init.zeros_(self.speaker_time_film[-1].weight)
+                nn.init.zeros_(self.speaker_time_film[-1].bias)
         else:
             self.speaker_proj = None
             self.speaker_time_film = None
@@ -137,12 +153,15 @@ class Transformer(Module):
         # time embedding
         time_emb = self.sinu_pos_emb(t)
         speaker_film = None
-        if self.speaker_time_film is not None and speaker_embedding is not None:
+        if self.speaker_proj is not None and speaker_embedding is not None:
             speaker_embedding = speaker_embedding.to(
                 device=x.device, dtype=time_emb.dtype
             )
             speaker_embedding = F.normalize(speaker_embedding, p=2, dim=-1)
             speaker_emb = self.speaker_proj(speaker_embedding)
+            if self.use_adaln_zero:
+                time_emb = time_emb + speaker_emb
+        if self.speaker_time_film is not None and speaker_embedding is not None:
             global_cond = self.speaker_time_film(
                 torch.cat([time_emb, speaker_emb], dim=-1)
             )
@@ -195,19 +214,28 @@ class Transformer(Module):
                 x = skip_combiner(x)
 
             attn_input = attn_prenorm(x, **rmsnorm_kwargs)
-            x = (
-                attn(
-                    attn_input,
-                    mask=attention_mask,
-                    rotary_emb=rotary_emb,
-                    causal=self.is_causal,
-                    group_size=group_size,
-                )
-                + x
+            attn_gate = None
+            if self.use_adaln_zero:
+                attn_input, attn_gate = attn_input
+            attn_output = attn(
+                attn_input,
+                mask=attention_mask,
+                rotary_emb=rotary_emb,
+                causal=self.is_causal,
+                group_size=group_size,
             )
+            if attn_gate is not None:
+                attn_output = attn_output * attn_gate
+            x = attn_output + x
 
             ff_input = ff_prenorm(x, **rmsnorm_kwargs)
-            x = ff(ff_input) + x
+            ff_gate = None
+            if self.use_adaln_zero:
+                ff_input, ff_gate = ff_input
+            ff_output = ff(ff_input)
+            if ff_gate is not None:
+                ff_output = ff_output * ff_gate
+            x = ff_output + x
 
         # remove the register tokens
         if self.has_register_tokens:

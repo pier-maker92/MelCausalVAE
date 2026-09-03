@@ -171,14 +171,19 @@ class WavLMFeatureExtractor(nn.Module):
             param.requires_grad_(False)
         return self
 
-    @torch.no_grad()
-    def _update_std_mean_with_momentum(
-        self, features: torch.Tensor, padding_mask: torch.BoolTensor
-    ):
-        valid_features = features[~padding_mask]
-        if valid_features.numel() > 0:
-            self.std.copy_(self.std * 0.99 + valid_features.std() * 0.01)
-            self.mean.copy_(self.mean * 0.99 + valid_features.mean() * 0.01)
+    @staticmethod
+    def _normalize_features_per_channel(
+        features: torch.Tensor,
+        padding_mask: torch.BoolTensor,
+        eps: float = 1e-8,
+    ) -> torch.Tensor:
+        valid = (~padding_mask).unsqueeze(-1).to(features.dtype)
+        valid_count = valid.sum(dim=1, keepdim=True).clamp_min(1.0)
+        mean = (features * valid).sum(dim=1, keepdim=True) / valid_count
+        variance = ((features - mean) ** 2 * valid).sum(dim=1, keepdim=True)
+        variance = variance / (valid_count - 1).clamp_min(1.0)
+        normalized = (features - mean) / (torch.sqrt(variance) + eps)
+        return normalized.masked_fill(padding_mask.unsqueeze(-1), 0.0)
 
     def forward(
         self,
@@ -259,13 +264,8 @@ class WavLMFeatureExtractor(nn.Module):
             .to(torch.bool)
         )
 
-        if self.training:
-            self._update_std_mean_with_momentum(features, feat_padding_mask)
-
         if self.normalize:
-            features = (
-                features - self.mean.to(device=features.device, dtype=features.dtype)
-            ) / self.std.to(device=features.device, dtype=features.dtype)
+            features = self._normalize_features_per_channel(features, feat_padding_mask)
 
         return FeatureExtractorOutput(
             audio_features=features,

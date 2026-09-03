@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from transformers.utils import ModelOutput
 import torch
 from typing import Optional
@@ -26,6 +28,7 @@ class EncoderOutput(ModelOutput):
     kl_loss: Optional[torch.FloatTensor] = None
     padding_mask: Optional[torch.BoolTensor] = None
     mu: Optional[torch.FloatTensor] = None
+    quantizer_output: Optional[QuantizeOutput] = None
 
 
 @dataclass
