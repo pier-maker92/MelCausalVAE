@@ -31,6 +31,59 @@ def _load_default_model_config() -> Dict[str, Any]:
     return OmegaConf.to_container(OmegaConf.load(defaults_path), resolve=True)
 
 
+def _normalize_quantizer_target(value: str | None) -> str:
+    if value is None:
+        return "z_sem"
+    value = str(value).strip()
+    if value not in {"z", "z_sem"}:
+        raise ValueError("target_source must be either 'z' or 'z_sem'.")
+    return value
+
+
+def load_external_semantic_quantizer(
+    model: Dicodec,
+    checkpoint_path: str,
+    quantizer_type: str = "std_vq",
+    codebook_size: int | None = None,
+    target_source: str | None = None,
+):
+    from .semantic_quantizer_ae import (
+        load_semantic_quantizer_ae,
+        read_semantic_quantizer_config,
+    )
+
+    quantizer_config = read_semantic_quantizer_config(checkpoint_path)
+    quantizer_type = quantizer_config.get("quantizer_type", quantizer_type)
+    codebook_size = quantizer_config.get(
+        "codebook_size",
+        quantizer_config.get(
+            "num_embeddings",
+            quantizer_config.get("num_codebooks", codebook_size),
+        ),
+    )
+    target_source = _normalize_quantizer_target(
+        target_source
+        or quantizer_config.get("target_source")
+        or quantizer_config.get("input_source")
+    )
+
+    quantizer = load_semantic_quantizer_ae(
+        checkpoint_path=checkpoint_path,
+        latent_dim=model.encoder.config.latent_dim,
+        quantizer_type=quantizer_type,
+        codebook_size=codebook_size,
+        device=model.device,
+    )
+    model.set_external_semantic_quantizer(
+        quantizer,
+        target_source=target_source,
+    )
+    model.config.external_semantic_quantizer_config.checkpoint_path = checkpoint_path
+    model.config.external_semantic_quantizer_config.quantizer_type = quantizer_type
+    model.config.external_semantic_quantizer_config.codebook_size = codebook_size
+    return quantizer
+
+
 def build_model(cfg_dict: Dict[str, Any]) -> Dicodec:
     """Builds a Dicodec model from a configuration dictionary."""
     # Handle both hydra config (encoder) and checkpoint config (encoder_config)
@@ -148,7 +201,21 @@ def build_model(cfg_dict: Dict[str, Any]) -> Dicodec:
         external_semantic_quantizer_config=external_quantizer_config,
     )
 
-    return Dicodec(config=dicodec_config)
+    model = Dicodec(config=dicodec_config)
+    if external_quantizer_config.enabled:
+        if external_quantizer_config.checkpoint_path is None:
+            raise ValueError(
+                "external_semantic_quantizer_config.enabled=true requires "
+                "checkpoint_path so the quantizer architecture can be initialized."
+            )
+        load_external_semantic_quantizer(
+            model,
+            checkpoint_path=external_quantizer_config.checkpoint_path,
+            quantizer_type=external_quantizer_config.quantizer_type,
+            codebook_size=external_quantizer_config.codebook_size,
+            target_source=external_quantizer_config.target_source,
+        )
+    return model
 
 
 def load_pretrained_model(checkpoint_dir: str):

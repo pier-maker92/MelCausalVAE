@@ -4,7 +4,10 @@ import argparse
 import torchaudio
 import torchaudio.transforms as T
 from pathlib import Path
-from dicodec.modules.builder import load_pretrained_model
+from dicodec.modules.builder import (
+    load_external_semantic_quantizer,
+    load_pretrained_model,
+)
 
 
 def load_wav_mono_resampled(path: str, target_sr: int) -> torch.Tensor:
@@ -49,17 +52,10 @@ def infer_quantizer_type_from_path(path: Path, fallback: str) -> str:
 def normalize_semantic_quantizer_variant(value: str | None) -> str | None:
     if value is None:
         return None
-    value = str(value).strip().lower().replace("-", "_")
-    aliases = {
-        "z": "z",
-        "z_sem": "z_sem",
-        "zsem": "z_sem",
-        "z_semantic": "z_sem",
-        "semantic": "z_sem",
-    }
-    if value not in aliases:
+    value = str(value).strip()
+    if value not in {"z", "z_sem"}:
         raise ValueError("--semantic_quantizer_variant must be either 'z' or 'z_sem'.")
-    return aliases[value]
+    return value
 
 
 def config_codebook_size(config: dict) -> int | None:
@@ -76,12 +72,8 @@ def configured_quantizer_dirs(
     variant: str | None,
 ) -> list[Path]:
     dirs = []
-    variant_aliases = {
-        "z": {"z"},
-        "z_sem": {"z_sem", "zsem", "z_semantic", "semantic"},
-    }
     for path in sorted(p for p in quantized_dir.iterdir() if p.is_dir()):
-        if variant is not None and path.name not in variant_aliases[variant]:
+        if variant is not None and path.name != variant:
             continue
         config_path = path / "config.json"
         if not config_path.exists():
@@ -196,7 +188,8 @@ def main(args):
             args.semantic_quantizer_type,
         )
         print(f"Loading semantic quantizer from {semantic_quantizer_checkpoint}...")
-        model.load_external_semantic_quantizer(
+        load_external_semantic_quantizer(
+            model,
             checkpoint_path=str(semantic_quantizer_checkpoint),
             quantizer_type=args.semantic_quantizer_type,
             codebook_size=args.semantic_codebook_size,
@@ -298,7 +291,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--semantic_quantizer_variant",
         type=str,
-        choices=["z", "z_sem", "zsem", "z_semantic", "semantic"],
+        choices=["z", "z_sem"],
         default=None,
         help="Choose which quantized/<step>step subfolder to load: z or z_sem.",
     )

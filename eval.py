@@ -369,7 +369,10 @@ def main(args):
             args.semantic_quantizer_type,
         )
         print(f"Loading semantic quantizer from {semantic_quantizer_checkpoint}...")
-        model.load_external_semantic_quantizer(
+        from dicodec.modules.builder import load_external_semantic_quantizer
+
+        load_external_semantic_quantizer(
+            model,
             checkpoint_path=str(semantic_quantizer_checkpoint),
             quantizer_type=args.semantic_quantizer_type,
             codebook_size=args.semantic_codebook_size,

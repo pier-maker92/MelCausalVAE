@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 class Dicodec(torch.nn.Module):
     _keys_to_ignore_on_save = None
 
-    def __init__(self, config: DicodecConfig, **kwargs):
+    def __init__(self, config: DicodecConfig):
         super().__init__()
         self.config = config
         self.feature_extractor = FeatureExtractor(config.mel_spectrogram_config)
@@ -66,18 +66,6 @@ class Dicodec(torch.nn.Module):
 
         self.external_semantic_quantizer = None
         self.external_semantic_quantizer_target = "z_sem"
-        if config.external_semantic_quantizer_config.enabled:
-            if config.external_semantic_quantizer_config.checkpoint_path is None:
-                raise ValueError(
-                    "external_semantic_quantizer_config.enabled=true requires "
-                    "checkpoint_path so the quantizer architecture can be initialized."
-                )
-            self.load_external_semantic_quantizer(
-                checkpoint_path=config.external_semantic_quantizer_config.checkpoint_path,
-                quantizer_type=config.external_semantic_quantizer_config.quantizer_type,
-                codebook_size=config.external_semantic_quantizer_config.codebook_size,
-                target_source=config.external_semantic_quantizer_config.target_source,
-            )
 
         count_parameters_by_module(self.encoder, "Encoder")
         count_parameters_by_module(self.decoder, "Decoder")
@@ -204,12 +192,41 @@ class Dicodec(torch.nn.Module):
             padding_mask=padding_mask,
             step=kwargs.get("training_step", None),
         )
+        if self.external_semantic_quantizer is not None:
+            encoder_output.quantizer_output = self.quantize(
+                encoder_output.z,
+                padding_mask=encoder_output.padding_mask,
+            )
         return encoder_output
 
-    @torch.no_grad()
-    def encode_attributes(self, z, padding_mask=None, plot: bool = False):
+    def encoder_context_vector(self, encoder_output, target_encoder_output=None):
+        quantizer_output = getattr(encoder_output, "quantizer_output", None)
+        if quantizer_output is None:
+            return encoder_output.z
+        if self.external_semantic_quantizer_target == "z_sem":
+            if target_encoder_output is not None:
+                target_quantizer_output = getattr(
+                    target_encoder_output,
+                    "quantizer_output",
+                    None,
+                )
+                if (
+                    target_quantizer_output is not None
+                    and target_quantizer_output.z_pros is not None
+                ):
+                    z_sem_source = quantizer_output.quantized
+                    z_pros_target = target_quantizer_output.z_pros
+                    z_pros_target = F.interpolate(
+                        z_pros_target.transpose(1, 2),
+                        size=z_sem_source.shape[1],
+                        mode="linear",
+                    ).transpose(1, 2)
+                    return z_sem_source + z_pros_target
+            return quantizer_output.quantized + quantizer_output.z_pros
+        return quantizer_output.quantized
 
-        z_original = z
+    @torch.no_grad()
+    def encode_attributes(self, z, padding_mask=None):
 
         if padding_mask is not None:
             if padding_mask.shape != z.shape[:2]:
@@ -375,57 +392,20 @@ class Dicodec(torch.nn.Module):
             reconstructed_mel = self.denormalize_mel(reconstructed_mel)
         return reconstructed_mel, reconstructed_padding_mask
 
-    def load_external_semantic_quantizer(
+    def set_external_semantic_quantizer(
         self,
-        checkpoint_path: str,
-        quantizer_type: str = "std_vq",
-        codebook_size: Optional[int] = None,
+        quantizer: torch.nn.Module,
         target_source: Optional[str] = None,
     ):
-        from .semantic_quantizer_ae import (
-            load_semantic_quantizer_ae,
-            read_semantic_quantizer_config,
-        )
-
         def normalize_source(value: Optional[str], field_name: str) -> Optional[str]:
             if value is None:
                 return None
-            value = str(value).strip().lower().replace("-", "_")
-            aliases = {
-                "z": "z",
-                "z_sem": "z_sem",
-                "zsem": "z_sem",
-                "z_semantic": "z_sem",
-                "semantic": "z_sem",
-            }
-            if value not in aliases:
+            value = str(value).strip()
+            if value not in {"z", "z_sem"}:
                 raise ValueError(f"{field_name} must be either 'z' or 'z_sem'.")
-            return aliases[value]
+            return value
 
-        quantizer_config = read_semantic_quantizer_config(checkpoint_path)
-        quantizer_type = quantizer_config.get("quantizer_type", quantizer_type)
-        codebook_size = quantizer_config.get(
-            "codebook_size",
-            quantizer_config.get(
-                "num_embeddings",
-                quantizer_config.get("num_codebooks", codebook_size),
-            ),
-        )
-        target_source = normalize_source(
-            target_source
-            or quantizer_config.get("target_source")
-            or quantizer_config.get("input_source")
-            or "z_sem",
-            "target_source",
-        )
-
-        quantizer = load_semantic_quantizer_ae(
-            checkpoint_path=checkpoint_path,
-            latent_dim=self.encoder.config.latent_dim,
-            quantizer_type=quantizer_type,
-            codebook_size=codebook_size,
-            device=self.device,
-        )
+        target_source = normalize_source(target_source or "z_sem", "target_source")
         quantizer.to(device=self.device, dtype=self.dtype)
         quantizer.eval()
         for parameter in quantizer.parameters():
@@ -433,11 +413,8 @@ class Dicodec(torch.nn.Module):
         self.external_semantic_quantizer = quantizer
         self.external_semantic_quantizer_target = target_source
         self.config.external_semantic_quantizer_config.enabled = True
-        self.config.external_semantic_quantizer_config.checkpoint_path = checkpoint_path
-        self.config.external_semantic_quantizer_config.quantizer_type = quantizer_type
-        self.config.external_semantic_quantizer_config.codebook_size = codebook_size
         self.config.external_semantic_quantizer_config.target_source = target_source
-        return quantizer
+        return self.external_semantic_quantizer
 
     @torch.no_grad()
     def quantize(
@@ -509,6 +486,19 @@ class Dicodec(torch.nn.Module):
         )
         encoder_output = self.encode(enc_features, enc_padding_mask, **kwargs)
 
+        target_encoder_output = None
+        if "target_audios_srs_eval" in kwargs:
+            t_enc_features, t_enc_padding_mask, _, _ = self.extract_features(
+                kwargs["target_audios_srs_eval"],
+                target_audios_srs=kwargs["target_audios_srs_eval"],
+                **kwargs,
+            )
+            target_encoder_output = self.encode(
+                t_enc_features,
+                t_enc_padding_mask,
+                **kwargs,
+            )
+
         # speaker embedding
         speaker_embedding = kwargs.get("speaker_embedding")
         if speaker_embedding is None:
@@ -516,18 +506,11 @@ class Dicodec(torch.nn.Module):
         if kwargs.get("zero_speaker", False) and speaker_embedding is not None:
             speaker_embedding = torch.zeros_like(speaker_embedding)
 
-        z = encoder_output.z
-        if self.external_semantic_quantizer is not None:
-            z = self.apply_external_semantic_quantizer(
-                z,
-                padding_mask=encoder_output.padding_mask,
-            )
-
         reconstructed_mel, reconstructed_padding_mask = self.sample(
             num_steps=num_steps,
             temperature=temperature,
             guidance_scale=guidance_scale,
-            z=z,
+            z=self.encoder_context_vector(encoder_output, target_encoder_output),
             generator=generator,
             padding_mask=encoder_output.padding_mask,
             speaker_embedding=speaker_embedding,
