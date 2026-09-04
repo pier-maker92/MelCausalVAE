@@ -34,6 +34,7 @@ class DiT(torch.nn.Module):
         self.normalize_context_vector = config.normalize_context_vector
         self.speaker_cond_dim = config.speaker_cond_dim
         self.local_speaker_conditioning = config.local_speaker_conditioning
+        self.noise_proj_input_order = config.noise_proj_input_order
         mel_fps = 93.75  # 24000 / 256 #FIXME hardcoded to 24kHz dataset
         self.window_size = (
             int(config.window_attention_seconds * mel_fps)
@@ -114,7 +115,10 @@ class DiT(torch.nn.Module):
         context_vector: torch.FloatTensor,
         speaker_embedding: Optional[torch.FloatTensor] = None,
     ) -> torch.FloatTensor:
-        parts = [x_t, context_vector]
+        if self.noise_proj_input_order == "context_first":
+            parts = [context_vector, x_t]
+        else:
+            parts = [x_t, context_vector]
         if self.local_speaker_conditioning and self.speaker_cond_dim is not None:
             speaker_embedding = self._normalized_speaker_embedding(
                 speaker_embedding, context_vector

@@ -184,6 +184,14 @@ class DiTConfig:
     speaker_cond_dim: Optional[int] = None
     local_speaker_conditioning: bool
     normalize_context_vector: bool
+    noise_proj_input_order: str = "state_first"
+
+    def __post_init__(self):
+        if self.noise_proj_input_order not in {"state_first", "context_first"}:
+            raise ValueError(
+                "decoder.noise_proj_input_order must be either "
+                "'state_first' or 'context_first'."
+            )
 
 
 #########################
