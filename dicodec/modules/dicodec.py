@@ -186,9 +186,17 @@ class Dicodec(torch.nn.Module):
             target_padding_mask,
         )
 
+    def _normalize_ssl_features(
+        self, features: torch.Tensor, eps: float = 1e-8
+    ) -> torch.Tensor:
+        # Compute mean and std across time steps for each sample and feature dimension
+        mean = torch.mean(features, dim=1, keepdim=True)  # (B, 1, C)
+        std = torch.std(features, dim=1, keepdim=True)  # (B, 1, C)
+        return (features - mean) / (std + eps)
+
     def encode(self, features, padding_mask, **kwargs):
         encoder_output = self.encoder(
-            x=features,
+            x=self._normalize_ssl_features(features),
             padding_mask=padding_mask,
             step=kwargs.get("training_step", None),
         )
