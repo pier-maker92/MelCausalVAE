@@ -71,9 +71,11 @@ decoder:
   dit_dim: 768
   dit_depth: 12
   dit_heads: 12
-  dit_dropout_rate: 0.0
+  dit_dropout_rate: 0.1
   use_conv_layer: true
   uncond_context_prob: 0.1
+  uncond_speaker_prob: 0.1
+  uncond_both_prob: 0.05
   is_causal: true
   use_window_attention: true
   window_attention_seconds: 3
@@ -81,26 +83,24 @@ decoder:
   causal_convolution: false
   normalize_context_vector: true
   speaker_cond_dim: 1024
-  local_speaker_conditioning: true
+  adaln_cond_dim: 768
+  local_speaker_conditioning: false
 
 wavlm_module_config:
   pretrained_model_name: microsoft/wavlm-large
   feature_extractor_config:
     layer: 18
     sampling_rate: 16000
-    normalize: false
+    normalize: true
   speaker_encoder_config:
     sampling_rate: 16000
     embedding_dim: 1024
     wavlm_layers:
     - 1
     - 2
-    - 3
-    - 4
-    - 5
-    - 6
     wavlm_layer_combine: weighted_sum
     wavlm_pooling: mean_std
     wavlm_layer_weights: null
+    wavlm_normalize_features: true
     wavlm_freeze: true
     wavlm_attention_channels: 128
