@@ -245,6 +245,16 @@ def main(args):
                 )
             params["speaker_embedding"] = speaker_embedding
 
+        if getattr(args, "qq", False):
+            if "speaker_embedding" not in params:
+                spk_emb = model.extract_speaker_embedding(audios_srs)
+                if spk_emb is not None:
+                    params["speaker_embedding"] = torch.zeros_like(spk_emb)
+            else:
+                params["speaker_embedding"] = torch.zeros_like(
+                    params["speaker_embedding"]
+                )
+
         out = model.encode_decode(**params)
         audio = out["audio_waveform"]
         output_path = args.output_path
@@ -260,19 +270,45 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "-c", "--checkpoint_dir", type=str, default="checkpoints/vq-refactored"
+        "-c",
+        "--checkpoint_dir",
+        type=str,
+        default="checkpoints/vq-refactored",
     )
-    parser.add_argument("-i", "--audio_path", type=str, default="audio_assets/male.wav")
     parser.add_argument(
+        "-i",
+        "--audio_path",
+        type=str,
+        default="audio_assets/male.wav",
+    )
+    parser.add_argument(
+        "-ta",
         "--target_audio",
         type=str,
         default=None,
         help="Audio file whose speaker embedding conditions the reconstruction",
     )
-    parser.add_argument("-o", "--output_path", type=str, default=None)
-    parser.add_argument("--num_steps", type=int, default=16)
-    parser.add_argument("--temperature", type=float, default=0.8)
-    parser.add_argument("--guidance_scale", type=float, default=17.3)
+    parser.add_argument(
+        "-o",
+        "--output_path",
+        type=str,
+        default=None,
+    )
+    parser.add_argument(
+        "--num_steps",
+        type=int,
+        default=12,
+    )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=0.5,
+    )
+    parser.add_argument(
+        "--guidance_scale",
+        type=float,
+        default=1.5,
+    )
     parser.add_argument(
         "--semantic_quantizer_checkpoint",
         type=str,
@@ -312,6 +348,9 @@ if __name__ == "__main__":
         choices=["z", "z_sem"],
         default=None,
         help="Override target_source from the quantizer config.",
+    )
+    parser.add_argument(
+        "-qq", action="store_true", help="Zero out the speaker embedding"
     )
     args = parser.parse_args()
     main(args)
