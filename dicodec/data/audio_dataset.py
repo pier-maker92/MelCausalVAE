@@ -100,9 +100,16 @@ class TrainDatasetWrapper(SimpleAudioDataset):
         if max_audio_len is not None:
             self.dataset = self.dataset.filter(
                 lambda x: (
-                    x.get("duration", x.get("duration_sec", len(x["audio"]["array"]) / x["audio"]["sampling_rate"]))
-                ) <= max_audio_len,
-                num_proc=os.cpu_count() or 1
+                    x.get(
+                        "duration",
+                        x.get(
+                            "duration_sec",
+                            len(x["audio"]["array"]) / x["audio"]["sampling_rate"],
+                        ),
+                    )
+                )
+                <= max_audio_len,
+                num_proc=8,
             )
 
     def __len__(self):
@@ -140,9 +147,16 @@ class TestDatasetWrapper(SimpleAudioDataset):
         if max_audio_len is not None:
             self.dataset = self.dataset.filter(
                 lambda x: (
-                    x.get("duration", x.get("duration_sec", len(x["audio"]["array"]) / x["audio"]["sampling_rate"]))
-                ) <= max_audio_len,
-                num_proc=os.cpu_count() or 1
+                    x.get(
+                        "duration",
+                        x.get(
+                            "duration_sec",
+                            len(x["audio"]["array"]) / x["audio"]["sampling_rate"],
+                        ),
+                    )
+                )
+                <= max_audio_len,
+                num_proc=8,
             )
 
     def __len__(self):
