@@ -244,13 +244,6 @@ def main(args):
                     "encoder."
                 )
             params["speaker_embedding"] = speaker_embedding
-            params["target_audios_srs_eval"] = [(target_wav, model.config.sample_rate)]
-
-        if getattr(args, "zero_speaker", False):
-            params["zero_speaker"] = True
-
-        if getattr(args, "guide_only_speaker", False):
-            params["guide_only_speaker"] = True
 
         out = model.encode_decode(**params)
         audio = out["audio_waveform"]
@@ -279,7 +272,7 @@ if __name__ == "__main__":
     parser.add_argument("-o", "--output_path", type=str, default=None)
     parser.add_argument("--num_steps", type=int, default=16)
     parser.add_argument("--temperature", type=float, default=0.8)
-    parser.add_argument("--guidance_scale", type=float, default=1.8)
+    parser.add_argument("--guidance_scale", type=float, default=17.3)
     parser.add_argument(
         "--semantic_quantizer_checkpoint",
         type=str,
@@ -320,14 +313,5 @@ if __name__ == "__main__":
         default=None,
         help="Override target_source from the quantizer config.",
     )
-    parser.add_argument(
-        "-qq", "--zero_speaker", action="store_true", help="Zero out speaker embedding"
-    )
-    parser.add_argument(
-        "--guide_only_speaker",
-        action="store_true",
-        help="Apply guidance scale only to speaker embedding",
-    )
-
     args = parser.parse_args()
     main(args)

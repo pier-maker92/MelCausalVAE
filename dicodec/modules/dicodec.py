@@ -199,28 +199,11 @@ class Dicodec(torch.nn.Module):
             )
         return encoder_output
 
-    def encoder_context_vector(self, encoder_output, target_encoder_output=None):
+    def encoder_context_vector(self, encoder_output):
         quantizer_output = getattr(encoder_output, "quantizer_output", None)
         if quantizer_output is None:
             return encoder_output.z
         if self.external_semantic_quantizer_target == "z_sem":
-            if target_encoder_output is not None:
-                target_quantizer_output = getattr(
-                    target_encoder_output, "quantizer_output", None
-                )
-                if (
-                    target_quantizer_output is not None
-                    and target_quantizer_output.z_pros is not None
-                ):
-                    import torch.nn.functional as F
-
-                    z_sem_source = quantizer_output.quantized
-                    z_pros_target = target_quantizer_output.z_pros
-                    T = z_sem_source.shape[1]
-                    z_pros_target_interp = F.interpolate(
-                        z_pros_target.transpose(1, 2), size=T, mode="linear"
-                    ).transpose(1, 2)
-                    return z_sem_source + z_pros_target_interp
             return quantizer_output.quantized + quantizer_output.z_pros
         return quantizer_output.quantized
 
@@ -372,7 +355,6 @@ class Dicodec(torch.nn.Module):
         generator: Optional[torch.Generator] = None,
         padding_mask: Optional[torch.BoolTensor] = None,
         speaker_embedding: Optional[torch.FloatTensor] = None,
-        guide_only_speaker: bool = False,
         **kwargs,
     ):
         decoder_output = self.decoder.generate(
@@ -383,7 +365,6 @@ class Dicodec(torch.nn.Module):
             context_vector=z,
             guidance_scale=guidance_scale,
             speaker_embedding=speaker_embedding,
-            guide_only_speaker=guide_only_speaker,
         )
         reconstructed_mel = decoder_output.audio_features
         reconstructed_padding_mask = decoder_output.padding_mask
@@ -492,33 +473,19 @@ class Dicodec(torch.nn.Module):
         )
         encoder_output = self.encode(enc_features, enc_padding_mask, **kwargs)
 
-        target_encoder_output = None
-        if "target_audios_srs_eval" in kwargs:
-            t_enc_features, t_enc_padding_mask, _, _ = self.extract_features(
-                kwargs["target_audios_srs_eval"],
-                target_audios_srs=kwargs["target_audios_srs_eval"],
-                **kwargs,
-            )
-            target_encoder_output = self.encode(
-                t_enc_features, t_enc_padding_mask, **kwargs
-            )
-
         # speaker embedding
         speaker_embedding = kwargs.get("speaker_embedding")
         if speaker_embedding is None:
             speaker_embedding = self.extract_speaker_embedding(audios_srs)
-        if kwargs.get("zero_speaker", False) and speaker_embedding is not None:
-            speaker_embedding = torch.zeros_like(speaker_embedding)
 
         reconstructed_mel, reconstructed_padding_mask = self.sample(
             num_steps=num_steps,
             temperature=temperature,
             guidance_scale=guidance_scale,
-            z=self.encoder_context_vector(encoder_output, target_encoder_output),
+            z=self.encoder_context_vector(encoder_output),
             generator=generator,
             padding_mask=encoder_output.padding_mask,
             speaker_embedding=speaker_embedding,
-            guide_only_speaker=kwargs.get("guide_only_speaker", False),
         )
 
         # Vocode the mel spectrogram

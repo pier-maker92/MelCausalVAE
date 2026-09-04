@@ -27,8 +27,6 @@ class DiT(torch.nn.Module):
         self.audio_latent_dim = config.audio_latent_dim
         self.expansion_factor = config.expansion_factor
         self.uncond_context_prob = config.uncond_context_prob
-        self.uncond_speaker_prob = config.uncond_speaker_prob
-        self.uncond_both_prob = config.uncond_both_prob
         self.is_causal = config.is_causal
         self.use_window_attention = config.use_window_attention
         self.use_group_bidirectional = config.use_group_bidirectional
@@ -50,15 +48,8 @@ class DiT(torch.nn.Module):
             print(
                 f"Dicodec group_bidirectional: enabled (group_size will be set to expansion_factor)"
             )
-        total_uncond_prob = (
-            self.uncond_context_prob
-            + self.uncond_speaker_prob
-            + self.uncond_both_prob
-        )
-        if total_uncond_prob > 1.0:
-            raise ValueError(
-                "Sum of decoder unconditional dropout probabilities must be <= 1.0."
-            )
+        if not 0.0 <= self.uncond_context_prob <= 1.0:
+            raise ValueError("decoder.uncond_context_prob must be between 0 and 1.")
 
         # context vector upsampling layers
         self.upsample = config.upsample
@@ -118,7 +109,8 @@ class DiT(torch.nn.Module):
                 f"Expected speaker embedding dim {self.speaker_cond_dim}, "
                 f"received {speaker_embedding.shape[-1]}."
             )
-        return F.normalize(speaker_embedding, p=2, dim=-1)
+        speaker_embedding = F.normalize(speaker_embedding, p=2, dim=-1)
+        return speaker_embedding * (self.speaker_cond_dim**0.5)
 
     def _noise_proj_input(
         self,
@@ -194,20 +186,8 @@ class DiT(torch.nn.Module):
         x0: torch.FloatTensor,
         speaker_embedding: Optional[torch.FloatTensor] = None,
     ):
-        dropout_draw = random.random()
-        context_cutoff = self.uncond_context_prob
-        speaker_cutoff = context_cutoff + self.uncond_speaker_prob
-        both_cutoff = speaker_cutoff + self.uncond_both_prob
-
-        if dropout_draw < context_cutoff:
+        if random.random() < self.uncond_context_prob:
             context_vector = torch.zeros_like(context_vector)
-        elif dropout_draw < speaker_cutoff:
-            if speaker_embedding is not None:
-                speaker_embedding = torch.zeros_like(speaker_embedding)
-        elif dropout_draw < both_cutoff:
-            context_vector = torch.zeros_like(context_vector)
-            if speaker_embedding is not None:
-                speaker_embedding = torch.zeros_like(speaker_embedding)
         # We need times
         times = torch.rand(
             (target.shape[0],),
@@ -305,7 +285,6 @@ class DiT(torch.nn.Module):
         generator: Optional[torch.Generator] = None,
         padding_mask: Optional[torch.BoolTensor] = None,
         speaker_embedding: Optional[torch.FloatTensor] = None,
-        guide_only_speaker: bool = False,
         **kwargs,
     ):
         cfg_scale = guidance_scale
@@ -332,7 +311,6 @@ class DiT(torch.nn.Module):
                 context_vector=context_vector,
                 attention_mask=~upsampled_padding_mask,
                 speaker_embedding=speaker_embedding,
-                guide_only_speaker=guide_only_speaker,
             )
             return features
 
@@ -354,7 +332,6 @@ class DiT(torch.nn.Module):
         context_vector: torch.FloatTensor,
         attention_mask: Optional[torch.BoolTensor] = None,
         speaker_embedding: Optional[torch.FloatTensor] = None,
-        guide_only_speaker: bool = False,
     ):
         times = times.repeat(state.shape[0])
         cond_state = self.noise_proj(
@@ -375,34 +352,20 @@ class DiT(torch.nn.Module):
         if cfg_scale == 1.0:
             return cond_out
 
-        if speaker_embedding is not None:
-            uncond_speaker_embedding = torch.zeros_like(speaker_embedding)
-        else:
-            uncond_speaker_embedding = None
-
-        if guide_only_speaker:
-            uncond_state = self.noise_proj(
-                self._noise_proj_input(
-                    x_t=state,
-                    context_vector=context_vector,
-                    speaker_embedding=uncond_speaker_embedding,
-                )
+        uncond_state = self.noise_proj(
+            self._noise_proj_input(
+                x_t=state,
+                context_vector=torch.zeros_like(context_vector),
+                speaker_embedding=speaker_embedding,
             )
-        else:
-            uncond_state = self.noise_proj(
-                self._noise_proj_input(
-                    x_t=state,
-                    context_vector=torch.zeros_like(context_vector),
-                    speaker_embedding=uncond_speaker_embedding,
-                )
-            )
+        )
 
         uncond_out = self.transformer(
             x=uncond_state,
             times=times,
             attention_mask=attention_mask,
             group_size=gs,
-            speaker_embedding=uncond_speaker_embedding,
+            speaker_embedding=speaker_embedding,
         )
 
         final = (cfg_scale * cond_out + (1 - cfg_scale) * uncond_out).to(

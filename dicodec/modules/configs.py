@@ -173,8 +173,6 @@ class DiTConfig:
     expansion_factor: int
     mel_dim: int
     uncond_context_prob: float = 0.0
-    uncond_speaker_prob: float = 0.0
-    uncond_both_prob: float = 0.0
     is_causal: bool
     use_window_attention: bool
     window_attention_seconds: float
@@ -184,7 +182,7 @@ class DiTConfig:
     sigma: float
     use_group_bidirectional: bool
     speaker_cond_dim: Optional[int] = None
-    local_speaker_conditioning: bool
+    local_speaker_conditioning: bool = True
     normalize_context_vector: bool
 
 

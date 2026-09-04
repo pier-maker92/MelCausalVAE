@@ -10,8 +10,6 @@ decoder:
   mel_dim: null
   sigma: 1.0e-5
   uncond_context_prob: 0.0
-  uncond_speaker_prob: 0.0
-  uncond_both_prob: 0.0
   is_causal: false
   upsample: repeat
   use_window_attention: false
@@ -20,7 +18,7 @@ decoder:
   causal_convolution: false
   use_group_bidirectional: false
   speaker_cond_dim: null
-  local_speaker_conditioning: false
+  local_speaker_conditioning: true
   normalize_context_vector: false
 
 # Set this to enable frozen WavLM speaker conditioning. Its embedding_dim must

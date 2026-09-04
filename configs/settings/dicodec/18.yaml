@@ -72,11 +72,9 @@ decoder:
   dit_dim: 768
   dit_depth: 12
   dit_heads: 12
-  dit_dropout_rate: 0.1
+  dit_dropout_rate: 0.0
   use_conv_layer: true
   uncond_context_prob: 0.1
-  uncond_speaker_prob: 0.1
-  uncond_both_prob: 0.05
   is_causal: true
   use_window_attention: true
   window_attention_seconds: 3
@@ -84,7 +82,7 @@ decoder:
   causal_convolution: false
   normalize_context_vector: true
   speaker_cond_dim: 1024
-  local_speaker_conditioning: false
+  local_speaker_conditioning: true
 
 wavlm_module_config:
   pretrained_model_name: microsoft/wavlm-large
