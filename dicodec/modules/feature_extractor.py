@@ -150,11 +150,15 @@ class WavLMFeatureExtractor(nn.Module):
         super().__init__()
         self.sampling_rate = config.sampling_rate
         self.layer = config.layer
+        self.normalize = config.normalize
 
         object.__setattr__(self, "_wavlm", wavlm)
         self.wavlm.eval()
         for param in self.wavlm.parameters():
             param.requires_grad_(False)
+
+        self.register_buffer("std", torch.tensor(1.0))
+        self.register_buffer("mean", torch.tensor(0.0))
 
     @property
     def wavlm(self) -> nn.Module:
@@ -166,6 +170,15 @@ class WavLMFeatureExtractor(nn.Module):
         for param in self.wavlm.parameters():
             param.requires_grad_(False)
         return self
+
+    @torch.no_grad()
+    def _update_std_mean_with_momentum(
+        self, features: torch.Tensor, padding_mask: torch.BoolTensor
+    ):
+        valid_features = features[~padding_mask]
+        if valid_features.numel() > 0:
+            self.std.copy_(self.std * 0.99 + valid_features.std() * 0.01)
+            self.mean.copy_(self.mean * 0.99 + valid_features.mean() * 0.01)
 
     def forward(
         self,
@@ -245,6 +258,14 @@ class WavLMFeatureExtractor(nn.Module):
             .squeeze(1)
             .to(torch.bool)
         )
+
+        if self.training:
+            self._update_std_mean_with_momentum(features, feat_padding_mask)
+
+        if self.normalize:
+            features = (
+                features - self.mean.to(device=features.device, dtype=features.dtype)
+            ) / self.std.to(device=features.device, dtype=features.dtype)
 
         return FeatureExtractorOutput(
             audio_features=features,

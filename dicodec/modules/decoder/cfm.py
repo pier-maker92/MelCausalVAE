@@ -100,7 +100,6 @@ class DiT(torch.nn.Module):
             conv_pos_embed_kernel_size=config.kernel_size,
             conv_is_causal=self.causal_convolution,
             speaker_cond_dim=config.speaker_cond_dim,
-            adaln_cond_dim=config.adaln_cond_dim,
         )
 
     def _normalized_speaker_embedding(

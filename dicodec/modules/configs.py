@@ -184,7 +184,6 @@ class DiTConfig:
     sigma: float
     use_group_bidirectional: bool
     speaker_cond_dim: Optional[int] = None
-    adaln_cond_dim: Optional[int] = None
     local_speaker_conditioning: bool
     normalize_context_vector: bool
 
@@ -208,6 +207,7 @@ class MelSpectrogramConfig:
 class WavLMConfig:
     layer: int
     sampling_rate: int
+    normalize: bool = False
 
 
 @dataclass(kw_only=True)

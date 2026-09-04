@@ -20,7 +20,6 @@ decoder:
   causal_convolution: false
   use_group_bidirectional: false
   speaker_cond_dim: null
-  adaln_cond_dim: null
   local_speaker_conditioning: false
   normalize_context_vector: false
 

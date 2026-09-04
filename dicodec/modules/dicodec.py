@@ -95,15 +95,6 @@ class Dicodec(torch.nn.Module):
         for parameter in self.wavlm.parameters():
             parameter.requires_grad_(False)
 
-    def _normalize_ssl_features(
-        self,
-        features: torch.Tensor,
-        eps: float = 1e-8,
-    ) -> torch.Tensor:
-        mean = torch.mean(features, dim=1, keepdim=True)
-        std = torch.std(features, dim=1, keepdim=True)
-        return (features - mean) / (std + eps)
-
     def train(self, mode: bool = True):
         super().train(mode)
         self._freeze_wavlm()
@@ -140,7 +131,6 @@ class Dicodec(torch.nn.Module):
 
         wavlm_output = extractor(audios_srs, audio_16khz=audio_16khz)
         wavlm_features = wavlm_output.audio_features.to(self.dtype)
-        wavlm_features = self._normalize_ssl_features(wavlm_features)
         wavlm_features = wavlm_features.repeat_interleave(2, dim=1)
         wavlm_features = (
             F.interpolate(
@@ -215,14 +205,20 @@ class Dicodec(torch.nn.Module):
             return encoder_output.z
         if self.external_semantic_quantizer_target == "z_sem":
             if target_encoder_output is not None:
-                target_quantizer_output = getattr(target_encoder_output, "quantizer_output", None)
-                if target_quantizer_output is not None and target_quantizer_output.z_pros is not None:
+                target_quantizer_output = getattr(
+                    target_encoder_output, "quantizer_output", None
+                )
+                if (
+                    target_quantizer_output is not None
+                    and target_quantizer_output.z_pros is not None
+                ):
                     import torch.nn.functional as F
+
                     z_sem_source = quantizer_output.quantized
                     z_pros_target = target_quantizer_output.z_pros
                     T = z_sem_source.shape[1]
                     z_pros_target_interp = F.interpolate(
-                        z_pros_target.transpose(1, 2), size=T, mode='linear'
+                        z_pros_target.transpose(1, 2), size=T, mode="linear"
                     ).transpose(1, 2)
                     return z_sem_source + z_pros_target_interp
             return quantizer_output.quantized + quantizer_output.z_pros
@@ -503,7 +499,9 @@ class Dicodec(torch.nn.Module):
                 target_audios_srs=kwargs["target_audios_srs_eval"],
                 **kwargs,
             )
-            target_encoder_output = self.encode(t_enc_features, t_enc_padding_mask, **kwargs)
+            target_encoder_output = self.encode(
+                t_enc_features, t_enc_padding_mask, **kwargs
+            )
 
         # speaker embedding
         speaker_embedding = kwargs.get("speaker_embedding")

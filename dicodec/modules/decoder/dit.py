@@ -28,7 +28,6 @@ class Transformer(Module):
         conv_pos_embed_kernel_size: int = 31,
         conv_is_causal: bool = False,
         speaker_cond_dim: Optional[int] = None,
-        adaln_cond_dim: Optional[int] = None,
     ):
         super().__init__()
         assert divisible_by(depth, 2)
@@ -45,9 +44,9 @@ class Transformer(Module):
             self.register_tokens = nn.Parameter(torch.randn(num_register_tokens, dim))
 
         # time embedding
-        cond_dim = default(adaln_cond_dim, dim)
+        cond_dim = dim
         rmsnorm_klass = partial(
-            AdaRMSNormZero,
+            AdaptiveRMSNorm,
             cond_dim=cond_dim,
         )
 
@@ -59,8 +58,17 @@ class Transformer(Module):
 
         if speaker_cond_dim is not None:
             self.speaker_proj = nn.Linear(speaker_cond_dim, cond_dim)
+            self.speaker_time_film = nn.Sequential(
+                nn.SiLU(),
+                nn.Linear(cond_dim * 2, cond_dim),
+                nn.SiLU(),
+                nn.Linear(cond_dim, depth * 2 * cond_dim),
+            )
+            nn.init.zeros_(self.speaker_time_film[-1].weight)
+            nn.init.zeros_(self.speaker_time_film[-1].bias)
         else:
             self.speaker_proj = None
+            self.speaker_time_film = None
 
         if use_conv_layer:
             self.conv_embed = ConvPositionEmbed(
@@ -122,13 +130,17 @@ class Transformer(Module):
 
         # time embedding
         time_emb = self.sinu_pos_emb(t)
-        if self.speaker_proj is not None and speaker_embedding is not None:
+        speaker_film = None
+        if self.speaker_time_film is not None and speaker_embedding is not None:
             speaker_embedding = speaker_embedding.to(
                 device=x.device, dtype=time_emb.dtype
             )
             speaker_embedding = F.normalize(speaker_embedding, p=2, dim=-1)
             speaker_emb = self.speaker_proj(speaker_embedding)
-            time_emb = time_emb + speaker_emb
+            speaker_film = self.speaker_time_film(
+                torch.cat((time_emb, speaker_emb), dim=-1)
+            )
+            speaker_film = speaker_film.view(batch, len(self.layers), 2, -1)
 
         # add register tokens to the left
         if self.has_register_tokens:
@@ -164,6 +176,9 @@ class Transformer(Module):
             ff,
         ) in enumerate(self.layers):
             layer_time_emb = time_emb
+            if speaker_film is not None:
+                gamma, beta = speaker_film[:, layer_index].unbind(dim=1)
+                layer_time_emb = layer_time_emb * (1 + gamma) + beta
             rmsnorm_kwargs = dict(cond=layer_time_emb)
 
             if not exists(skip_combiner):
@@ -173,23 +188,18 @@ class Transformer(Module):
                 x = torch.cat((x, skip_connect), dim=-1)
                 x = skip_combiner(x)
 
-            attn_input = attn_prenorm(x, **rmsnorm_kwargs)
-            attn_input, attn_gate = attn_input
-            attn_output = attn(
-                attn_input,
-                mask=attention_mask,
-                rotary_emb=rotary_emb,
-                causal=self.is_causal,
-                group_size=group_size,
+            x = (
+                attn(
+                    attn_prenorm(x, **rmsnorm_kwargs),
+                    mask=attention_mask,
+                    rotary_emb=rotary_emb,
+                    causal=self.is_causal,
+                    group_size=group_size,
+                )
+                + x
             )
-            attn_output = attn_output * attn_gate
-            x = attn_output + x
 
-            ff_input = ff_prenorm(x, **rmsnorm_kwargs)
-            ff_input, ff_gate = ff_input
-            ff_output = ff(ff_input)
-            ff_output = ff_output * ff_gate
-            x = ff_output + x
+            x = ff(ff_prenorm(x, **rmsnorm_kwargs)) + x
 
         # remove the register tokens
         if self.has_register_tokens:

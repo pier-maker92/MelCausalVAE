@@ -259,23 +259,24 @@ class RMSNorm(Module):
         return F.normalize(x, dim=-1) * self.scale * self.gamma
 
 
-class AdaRMSNormZero(Module):
+class AdaptiveRMSNorm(Module):
     def __init__(self, dim, cond_dim=None):
         super().__init__()
         cond_dim = default(cond_dim, dim)
         self.scale = dim**0.5
-        self.to_shift_scale_gate = nn.Linear(cond_dim, dim * 3)
-        nn.init.zeros_(self.to_shift_scale_gate.weight)
-        nn.init.zeros_(self.to_shift_scale_gate.bias)
+        self.to_gamma = nn.Linear(cond_dim, dim)
+        self.to_beta = nn.Linear(cond_dim, dim)
+        # init to identity
+        nn.init.zeros_(self.to_gamma.weight)
+        nn.init.ones_(self.to_gamma.bias)
+        nn.init.zeros_(self.to_beta.weight)
+        nn.init.zeros_(self.to_beta.bias)
 
     def forward(self, x, cond):
         normed = F.normalize(x, dim=-1) * self.scale
-        shift, scale, gate = self.to_shift_scale_gate(cond).chunk(3, dim=-1)
-        shift, scale, gate = map(
-            lambda t: rearrange(t, "b d -> b 1 d"),
-            (shift, scale, gate),
-        )
-        return normed * (1 + scale) + shift, gate
+        gamma, beta = self.to_gamma(cond), self.to_beta(cond)
+        gamma, beta = map(lambda t: rearrange(t, "b d -> b 1 d"), (gamma, beta))
+        return normed * gamma + beta
 
 
 # --------- feedforward ---------

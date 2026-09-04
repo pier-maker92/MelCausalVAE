@@ -6,12 +6,14 @@ sample_rate: 24000
 
 training:
   # dataset 
-  num_train_epochs: 10
+  num_train_epochs: 100
   dataset_name: libritts-r
+  max_audio_duration: 30
+  resume_from_checkpoint: /scratch/piermel/MelCausalVAE/checkpoints/exps/03-September-2026/10:24:47_lt-25_18.yaml/checkpoint-25000
 
   # bs
-  per_device_train_batch_size: 48
-  per_device_eval_batch_size: 8
+  per_device_train_batch_size: 10
+  per_device_eval_batch_size: 4
 
   # output 
   output_dir: checkpoints/exps/dicodec-18
@@ -21,8 +23,8 @@ training:
   learning_rate: 1e-4
   encoder_lr: 3e-4
   decoder_lr: 1e-4
-  encoder_warmup_ratio: 0.01
-  decoder_warmup_ratio: 0.05
+  encoder_warmup_ratio: 0.001
+  decoder_warmup_ratio: 0.005
   lr_scheduler_type: cosine
   encoder_min_lr: 0.0001
   decoder_min_lr: 5.0e-05
@@ -30,7 +32,7 @@ training:
   # logging
   report_to: wandb
   wandb_project: dicodec
-  wandb_run_name: dicodec-18
+  wandb_run_name: lt-25
 
   # precision
   fp16: false
@@ -52,13 +54,13 @@ training:
   dataloader_persistent_workers: true
 
 encoder:
-  d_model: 128
+  d_model: 512
   tf_heads: 8
   tf_layers: 4
-  n_residual_blocks: 3
+  n_residual_blocks: 1
   logvar_layer: false
   target_std: 1.0
-  kl_loss_warmup_ratio: 0.1
+  kl_loss_warmup_ratio: 0.01
   kl_loss_weight: 1e-5
   use_reparameterization_trick: false
   use_std_sweep: true
@@ -68,7 +70,7 @@ encoder:
 
 decoder:
   dit_dim: 768
-  dit_depth: 6
+  dit_depth: 12
   dit_heads: 12
   dit_dropout_rate: 0.1
   use_conv_layer: true
@@ -82,7 +84,6 @@ decoder:
   causal_convolution: false
   normalize_context_vector: true
   speaker_cond_dim: 1024
-  adaln_cond_dim: 768
   local_speaker_conditioning: false
 
 wavlm_module_config:
@@ -90,6 +91,7 @@ wavlm_module_config:
   feature_extractor_config:
     layer: 18
     sampling_rate: 16000
+    normalize: false
   speaker_encoder_config:
     sampling_rate: 16000
     embedding_dim: 1024
