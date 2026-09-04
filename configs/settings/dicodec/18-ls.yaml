@@ -34,7 +34,7 @@ training:
   wandb_run_name: lt-25
 
   # precision
-  fp16: false
+  fp16: fals
   bf16: true
 
   # eval
