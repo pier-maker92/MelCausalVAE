@@ -5,8 +5,10 @@ training:
   fp16: false
 
 encoding:
-  checkpoint: /scratch/piermel/MelCausalVAE/checkpoints/paper/v2/ls/6.25
-  model_version: v2-ls-6.25
+  # Selected by the launcher: 25, 12.5, or 6.25.
+  version: "25"
+  checkpoint: /scratch/piermel/MelCausalVAE/checkpoints/paper/v2/ls/${encoding.version}
+  model_version: v2-ls-${encoding.version}
   batch_size: 8
   output_root: /scratch/piermel/datasets/dicodec
   # null uses SLURM_TMPDIR/datasets/librispeech-aligned, staged by run_job.

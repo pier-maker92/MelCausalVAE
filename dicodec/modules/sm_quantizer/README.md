@@ -76,13 +76,3 @@ with torch.no_grad():
 and right padding are accepted. Forward outputs include each unweighted loss,
 quantized vectors, token IDs, reconstruction, causal contexts and the next-frame mask.
 Sampling supports `steps`, `temperature` (including zero), and a PyTorch `generator`.
-
-## Verification
-
-```bash
-python -m unittest dicodec.modules.sm_quantizer.test_sm_quantizer
-```
-
-Tests cover future-token isolation, shifted targets, flow gradients through the
-quantizer, padding exclusion from losses/EMA/gradients, frozen inference, YAML,
-and training/checkpoint resume equivalence with validation.

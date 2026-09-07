@@ -1,5 +1,0 @@
-# @package _global_
-# Default checkpoint alias; prefer the explicit per-checkpoint configs.
-defaults:
-  - /settings/dicodec/encode-librispeech-dicodec-v2-ls-25
-  - _self_
