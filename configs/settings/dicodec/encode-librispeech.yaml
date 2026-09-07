@@ -1,0 +1,4 @@
+# @package _global_
+# run_job passes the experiment path; its YAML owns partitions and encoding options.
+encoding:
+  experiment_config: ???

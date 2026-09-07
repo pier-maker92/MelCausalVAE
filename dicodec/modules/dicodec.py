@@ -205,16 +205,36 @@ class Dicodec(torch.nn.Module):
         )
 
     def _normalize_ssl_features(
-        self, features: torch.Tensor, eps: float = 1e-8
+        self,
+        features: torch.Tensor,
+        eps: float = 1e-8,
+        padding_mask: Optional[torch.BoolTensor] = None,
     ) -> torch.Tensor:
-        # Compute mean and std across time steps for each sample and feature dimension
-        mean = torch.mean(features, dim=1, keepdim=True)  # (B, 1, C)
-        std = torch.std(features, dim=1, keepdim=True)  # (B, 1, C)
-        return (features - mean) / (std + eps)
+        if padding_mask is None:
+            padding_mask = torch.zeros(
+                features.shape[:2], device=features.device, dtype=torch.bool
+            )
+        if padding_mask.shape != features.shape[:2] or padding_mask.dtype != torch.bool:
+            raise ValueError("padding_mask must be boolean with shape [batch, time].")
+        padding = padding_mask.to(device=features.device).unsqueeze(-1)
+        # Accumulate low-precision inputs in fp32; preserve fp64 when supplied.
+        values = features.float() if features.dtype in (torch.float16, torch.bfloat16) else features
+        values = values.masked_fill(padding, 0.0)
+        count = (~padding).sum(dim=1, keepdim=True)
+        mean = values.sum(dim=1, keepdim=True) / count.clamp_min(1)
+        centered = (values - mean).masked_fill(padding, 0.0)
+        # Match torch.std's original correction=1 on valid frames.
+        variance = centered.square().sum(dim=1, keepdim=True) / (count - 1).clamp_min(1)
+        # Avoid sqrt(0)'s undefined gradient for constant/single-frame inputs.
+        positive = variance > 0
+        std = torch.where(positive, variance, torch.ones_like(variance)).sqrt()
+        std = std.masked_fill(~positive, 0.0)
+        normalized = centered / (std + eps)
+        return normalized.masked_fill(padding, 0.0).to(features.dtype)
 
     def encode(self, features, padding_mask, **kwargs):
         encoder_output = self.encoder(
-            x=self._normalize_ssl_features(features),
+            x=self._normalize_ssl_features(features, padding_mask=padding_mask),
             padding_mask=padding_mask,
             step=kwargs.get("training_step", None),
         )

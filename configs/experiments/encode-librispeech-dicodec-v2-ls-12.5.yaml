@@ -1,0 +1,46 @@
+# Launch: sh /scratch/piermel/scripts/run_job.sh encode-librispeech-dicodec-v2-ls-12.5
+job_name: encode-ls-v2-12.5
+time: "12:00:00"
+gpu_mem: full
+num_gpus: 1
+ntasks: 1
+cpus_per_task: 8
+mem: 32G
+account: def-ravanelm
+
+repo_path: MelCausalVAE
+train_script: scripts/encode_dataset.py
+hydra_settings:
+  - dicodec/encode-librispeech
+extra_args: encoding.experiment_config=/scratch/piermel/experiments/encode-librispeech-dicodec-v2-ls-12.5.yaml
+sweep: null
+
+venv_path: /home/piermel/envs/vae
+email: pierfrancesco.melucci@gmail.com
+training:
+  bf16: false
+  fp16: false
+
+dataset_name: librispeech-aligned
+dataset_source: scratch
+dataset_extension: parquet
+dataset_path: librispeech-aligned
+dataset_filter: ""
+# This list controls BOTH copy_dataset.sh and the encoder. Keep only desired splits.
+dataset_partitions:
+  - train_clean_100
+  - train_clean_360
+  - train_other_500
+  - dev_clean
+  - dev_other
+  - test_clean
+  - test_other
+
+encoding:
+  checkpoint: /scratch/piermel/MelCausalVAE/checkpoints/paper/v2/ls/12.5
+  model_version: v2-ls-12.5
+  output_root: /scratch/piermel/datasets/dicodec
+  # null reads only the partitions staged by copy_dataset.sh in SLURM_TMPDIR.
+  input_root: null
+  # Maximum file size in MiB; final shards may be smaller. No audio duration filter.
+  shard_size_mb: 512
