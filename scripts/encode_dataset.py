@@ -34,6 +34,14 @@ PARTITIONS = {
 }
 
 
+def list_parquet_shards(directory):
+    # pathlib glob also matches hidden macOS AppleDouble files (._*.parquet).
+    return sorted(
+        path for path in Path(directory).glob("*.parquet")
+        if path.is_file() and not path.name.startswith(".")
+    )
+
+
 def read_config(cfg):
     config = OmegaConf.to_container(cfg, resolve=True, throw_on_missing=True)
     if config["training"]["dataset_name"] != "librispeech-aligned":
@@ -59,7 +67,7 @@ def read_config(cfg):
     partitions = encoding.get("partitions")
     if partitions is None:
         # copy_dataset.sh already staged only the requested partitions.
-        partitions = [part for part in sorted(PARTITIONS) if any((source / part).glob("*.parquet"))]
+        partitions = [part for part in sorted(PARTITIONS) if list_parquet_shards(source / part)]
     if not isinstance(partitions, list) or not partitions:
         raise ValueError("No partitions selected/found. Check encoding.partitions and the staged input directory.")
     if any(part not in PARTITIONS for part in partitions):
@@ -69,7 +77,7 @@ def read_config(cfg):
     destination = Path(encoding["output_root"]) / f"librispeech-dicodec-{label}"
     files = {}
     for part in partitions:
-        files[part] = sorted((source / part).glob("*.parquet"))
+        files[part] = list_parquet_shards(source / part)
         if not files[part]:
             raise FileNotFoundError(f"No input Parquet files for selected partition: {source / part}")
         if (destination / part).exists():
