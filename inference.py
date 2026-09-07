@@ -249,9 +249,9 @@ def main(args):
             if "speaker_embedding" not in params:
                 spk_emb = model.extract_speaker_embedding(audios_srs)
                 if spk_emb is not None:
-                    params["speaker_embedding"] = torch.zeros_like(spk_emb)
+                    params["speaker_embedding"] = torch.ones_like(spk_emb)
             else:
-                params["speaker_embedding"] = torch.zeros_like(
+                params["speaker_embedding"] = torch.ones_like(
                     params["speaker_embedding"]
                 )
 
@@ -294,21 +294,9 @@ if __name__ == "__main__":
         type=str,
         default=None,
     )
-    parser.add_argument(
-        "--num_steps",
-        type=int,
-        default=12,
-    )
-    parser.add_argument(
-        "--temperature",
-        type=float,
-        default=0.5,
-    )
-    parser.add_argument(
-        "--guidance_scale",
-        type=float,
-        default=1.5,
-    )
+    parser.add_argument("--num_steps", type=int, default=16)
+    parser.add_argument("--temperature", type=float, default=0.6)
+    parser.add_argument("--guidance_scale", type=float, default=1.2)
     parser.add_argument(
         "--semantic_quantizer_checkpoint",
         type=str,
