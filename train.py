@@ -138,7 +138,11 @@ class Dicodectrainer(Trainer):
             for n, p in self.model.named_parameters():
                 if not p.requires_grad:
                     continue
-                if "encoder" in n or "feature_extractor" in n:
+                if getattr(self.model, "decoder_finetuning", False) and n.startswith(
+                    ("speaker_encoder.", "decoder.")
+                ):
+                    decoder_params.append(p)
+                elif "encoder" in n or "feature_extractor" in n:
                     encoder_params.append(p)
                 elif "decoder" in n:
                     decoder_params.append(p)
@@ -511,6 +515,15 @@ def main(cfg: DictConfig):
     cfg_dict = OmegaConf.to_container(cfg, resolve=True)
 
     training_cfg = cfg_dict["training"]
+    finetune_decoder = training_cfg.pop("finetune_decoder", False)
+    if finetune_decoder and not (
+        training_cfg.get("from_pretrained")
+        or training_cfg.get("resume_from_checkpoint")
+    ):
+        raise ValueError(
+            "training.finetune_decoder=true requires training.from_pretrained "
+            "or training.resume_from_checkpoint."
+        )
 
     # Increase timeout to 2 hours for lengthy evaluation on Rank 0
     kwargs = InitProcessGroupKwargs(timeout=datetime.timedelta(seconds=7200))
@@ -547,6 +560,13 @@ def main(cfg: DictConfig):
     if from_pretrained:
         model.from_pretrained(from_pretrained)
         logger.info(f"Loaded pretrained model from {from_pretrained}")
+
+    if finetune_decoder:
+        model.configure_decoder_finetuning()
+        logger.info(
+            "Decoder fine-tuning: only speaker_encoder and decoder are trainable "
+            "with decoder_lr; all other modules remain in eval mode."
+        )
 
     # Setup training arguments
     training_cfg.pop("run_id", None)

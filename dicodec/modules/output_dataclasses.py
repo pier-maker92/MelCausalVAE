@@ -28,6 +28,7 @@ class EncoderOutput(ModelOutput):
     kl_loss: Optional[torch.FloatTensor] = None
     padding_mask: Optional[torch.BoolTensor] = None
     mu: Optional[torch.FloatTensor] = None
+    attributes: Optional[AttributesOutput] = None
     quantizer_output: Optional[QuantizeOutput] = None
 
 
@@ -51,8 +52,6 @@ class AttributesOutput(ModelOutput):
     z_sem: Optional[torch.FloatTensor] = None
     z_pros: Optional[torch.FloatTensor] = None
     z_mean: Optional[torch.FloatTensor] = None
-    z_lp: Optional[torch.FloatTensor] = None
-    z_hp: Optional[torch.FloatTensor] = None
 
 
 @dataclass

@@ -48,6 +48,7 @@ training:
   # Dataset / Dicodec specifics
   resume_from_checkpoint: null
   from_pretrained: null
+  finetune_decoder: false
   dataset_name: null
   max_audio_duration: null
   eval_num_samples: null

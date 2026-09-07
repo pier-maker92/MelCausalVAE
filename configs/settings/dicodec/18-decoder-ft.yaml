@@ -1,0 +1,17 @@
+# @package _global_
+defaults:
+  - /settings/dicodec/18
+  - _self_
+
+training:
+  finetune_decoder: true
+  # Required: pass training.from_pretrained=/path/to/checkpoint on the CLI.
+  from_pretrained: ???
+  resume_from_checkpoint: null
+  output_dir: checkpoints/exps/dicodec-18-decoder-ft
+  wandb_run_name: 18-decoder-ft
+
+  # Both speaker_encoder and decoder use the decoder LR and scheduler.
+  decoder_lr: 1e-4
+  decoder_min_lr: 5e-5
+  decoder_warmup_ratio: 0.005

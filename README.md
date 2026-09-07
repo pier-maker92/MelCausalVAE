@@ -34,6 +34,29 @@ python train.py settings=your_experiment_name
 accelerate launch train.py settings=your_experiment_name
 ```
 
+### Fine-tune the decoder and speaker encoder
+
+Start from a compatible checkpoint with the same model settings:
+
+```bash
+python train.py settings=dicodec/18 \
+  training.from_pretrained=/path/to/checkpoint \
+  training.finetune_decoder=true \
+  training.output_dir=checkpoints/decoder-finetune
+```
+
+Only `speaker_encoder` and `decoder` parameters receive gradients. Both use
+`decoder_lr`, `decoder_min_lr`, and `decoder_warmup_ratio`. Shared WavLM, the
+latent encoder, feature extractors, vocoder, and external quantizer stay frozen
+and in evaluation mode, including after Trainer switches back to training.
+Encoder sampling, dropout, and KL loss are therefore disabled in this mode.
+Training still uses audio for the speaker input and target mel spectrograms;
+the latent-only Parquet export is not a decoder fine-tuning dataset.
+
+Use `training.from_pretrained` to start this new training phase with a fresh
+optimizer. Use `training.resume_from_checkpoint` only to resume a run already
+started with `training.finetune_decoder=true`, keeping that flag enabled.
+
 ### DeepSpeed
 ```bash
 accelerate launch --config_file configs/deepspeed/ds_config.yaml train.py settings=your_experiment_name

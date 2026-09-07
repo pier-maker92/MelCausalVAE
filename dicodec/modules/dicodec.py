@@ -28,6 +28,7 @@ class Dicodec(torch.nn.Module):
     def __init__(self, config: DicodecConfig):
         super().__init__()
         self.config = config
+        self.decoder_finetuning = False
         self.feature_extractor = FeatureExtractor(config.mel_spectrogram_config)
 
         self.wavlm, self.wavlm_extractor, self.speaker_encoder = None, None, None
@@ -100,7 +101,24 @@ class Dicodec(torch.nn.Module):
         self._freeze_wavlm()
         if self.external_semantic_quantizer is not None:
             self.external_semantic_quantizer.eval()
+        if self.decoder_finetuning:
+            for name, module in self.named_children():
+                if name not in {"speaker_encoder", "decoder"}:
+                    module.eval()
         return self
+
+    def configure_decoder_finetuning(self):
+        """Train the speaker head and decoder; keep the shared WavLM frozen."""
+        if self.speaker_encoder is None:
+            raise ValueError("Decoder fine-tuning requires a speaker_encoder.")
+        self.requires_grad_(False)
+        # Clear any gradients left by an earlier training phase.
+        for parameter in self.parameters():
+            parameter.grad = None
+        self.speaker_encoder.requires_grad_(True)
+        self.decoder.requires_grad_(True)
+        self.decoder_finetuning = True
+        self.train(self.training)
 
     def from_pretrained(self, checkpoint_path: str):
         import os
@@ -205,6 +223,11 @@ class Dicodec(torch.nn.Module):
                 encoder_output.z,
                 padding_mask=encoder_output.padding_mask,
             )
+        if kwargs.get("compute_attributes", False):
+            encoder_output.attributes = self.encode_attributes(
+                z=encoder_output.z,
+                padding_mask=encoder_output.padding_mask,
+            )
         return encoder_output
 
     def encoder_context_vector(self, encoder_output):
@@ -269,8 +292,6 @@ class Dicodec(torch.nn.Module):
             z_sem=z_res_centered,
             z_pros=z_pros,
             z_mean=z_mean,
-            z_lp=z_lp,
-            z_hp=z_hp,
         )
 
     def extract_speaker_embedding(self, audios_srs):
