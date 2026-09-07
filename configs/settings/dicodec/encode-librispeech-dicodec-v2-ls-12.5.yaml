@@ -1,0 +1,18 @@
+# @package _global_
+training:
+  dataset_name: librispeech-aligned
+  bf16: false
+  fp16: false
+
+encoding:
+  checkpoint: /scratch/piermel/MelCausalVAE/checkpoints/paper/v2/ls/12.5
+  model_version: v2-ls-12.5
+  batch_size: 8
+  output_root: /scratch/piermel/datasets/dicodec
+  # null uses SLURM_TMPDIR/datasets/librispeech-aligned, staged by run_job.
+  input_root: null
+  # null encodes all staged partitions. An explicit list can narrow them further.
+  # Select dataset_partitions in the launcher experiment to limit copying as well.
+  partitions: null
+  # Hard file-size limit in MiB; final shards can be smaller.
+  shard_size_mb: 512

@@ -1,32 +1,29 @@
-# Launch: sh /scratch/piermel/scripts/run_job.sh encode-librispeech-dicodec-v2-ls-6.25
-job_name: encode-ls-v2-6.25
+# Slurm Resource Configuration
+job_name: "encode-ls-v2-6.25"
 time: "12:00:00"
-gpu_mem: full
-num_gpus: 1
+gpu_mem: "full"
+num_gpus: 1                 # Encoding uses one process/GPU with configurable batches.
 ntasks: 1
 cpus_per_task: 8
-mem: 32G
-account: def-ravanelm
+mem: "32G"
+account: "def-ravanelm"
 
-repo_path: MelCausalVAE
-train_script: scripts/encode_dataset.py
+# Experiment Configuration
+repo_path: "MelCausalVAE"
+train_script: "scripts/encode_dataset.py"
+extra_args: ""
 hydra_settings:
-  - dicodec/encode-librispeech
-extra_args: encoding.experiment_config=/scratch/piermel/experiments/encode-librispeech-dicodec-v2-ls-6.25.yaml
+  - "dicodec/encode-librispeech-dicodec-v2-ls-6.25.yaml"
+
+# Sweep Configuration (optional)
 sweep: null
 
-venv_path: /home/piermel/envs/vae
-email: pierfrancesco.melucci@gmail.com
-training:
-  bf16: false
-  fp16: false
-
-dataset_name: librispeech-aligned
-dataset_source: scratch
-dataset_extension: parquet
-dataset_path: librispeech-aligned
+dataset_name: "librispeech-aligned"
+dataset_source: "scratch"
+dataset_extension: "parquet"
+dataset_path: "librispeech-aligned"
 dataset_filter: ""
-# This list controls BOTH copy_dataset.sh and the encoder. Keep only desired splits.
+# Staging filter for copy_dataset.sh: keep only the partitions to copy/encode.
 dataset_partitions:
   - train_clean_100
   - train_clean_360
@@ -35,12 +32,7 @@ dataset_partitions:
   - dev_other
   - test_clean
   - test_other
+venv_path: "/home/piermel/envs/vae"
 
-encoding:
-  checkpoint: /scratch/piermel/MelCausalVAE/checkpoints/paper/v2/ls/6.25
-  model_version: v2-ls-6.25
-  output_root: /scratch/piermel/datasets/dicodec
-  # null reads only the partitions staged by copy_dataset.sh in SLURM_TMPDIR.
-  input_root: null
-  # Maximum file size in MiB; final shards may be smaller. No audio duration filter.
-  shard_size_mb: 512
+# Notification
+email: "pierfrancesco.melucci@gmail.com"

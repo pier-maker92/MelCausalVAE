@@ -1,9 +1,10 @@
 """Export selected audio partitions as Parquet containing only z and attributes.
 
-The run_job experiment is the source of truth for both dataset_partitions (copy)
-and encoding (checkpoint/output). No training dataset merging or filtering occurs.
+Hydra settings own encoding options. run_job only stages the selected input
+partitions; the encoder never reads the launcher experiment YAML.
 """
 import io
+from itertools import islice
 import json
 import logging
 import os
@@ -33,29 +34,17 @@ PARTITIONS = {
 }
 
 
-def read_experiment(path):
-    experiment = OmegaConf.to_container(OmegaConf.load(path), resolve=True)
-    if experiment.get("dataset_name") != "librispeech-aligned":
-        raise ValueError("This export requires dataset_name: librispeech-aligned.")
-    if experiment.get("num_gpus") != 1:
-        raise ValueError("Encoding requires num_gpus: 1 (one writer per partition).")
-    if experiment.get("dataset_extension") != "parquet":
-        raise ValueError("dataset_extension must be parquet.")
-    partitions = experiment.get("dataset_partitions")
-    if not isinstance(partitions, list) or not partitions:
-        raise ValueError("Set a non-empty dataset_partitions list in the experiment.")
-    if any(part not in PARTITIONS for part in partitions):
-        raise ValueError(f"Unknown partition; choose from {sorted(PARTITIONS)}.")
-    if len(set(partitions)) != len(partitions):
-        raise ValueError("dataset_partitions must not contain duplicates.")
-    if experiment.get("dataset_filter"):
-        raise ValueError("Use dataset_partitions, not dataset_filter.")
-    encoding = experiment["encoding"]
+def read_config(cfg):
+    config = OmegaConf.to_container(cfg, resolve=True, throw_on_missing=True)
+    if config["training"]["dataset_name"] != "librispeech-aligned":
+        raise ValueError("This export requires training.dataset_name: librispeech-aligned.")
+    encoding = config["encoding"]
+    for key in ("batch_size", "shard_size_mb"):
+        if type(encoding[key]) is not int or encoding[key] <= 0:
+            raise ValueError(f"encoding.{key} must be a positive integer.")
     label = encoding["model_version"]
     if not isinstance(label, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", label):
         raise ValueError("encoding.model_version must be a safe directory suffix.")
-    if not isinstance(encoding["shard_size_mb"], int) or encoding["shard_size_mb"] <= 0:
-        raise ValueError("encoding.shard_size_mb must be a positive integer (MiB).")
     checkpoint = Path(encoding["checkpoint"])
     for filename in ("config.json", "model.safetensors"):
         if not (checkpoint / filename).is_file():
@@ -66,7 +55,17 @@ def read_experiment(path):
         tmpdir = os.environ.get("SLURM_TMPDIR")
         if not tmpdir:
             raise ValueError("SLURM_TMPDIR is unset; set encoding.input_root for local runs.")
-        source = Path(tmpdir) / "datasets" / experiment.get("dataset_path", experiment["dataset_name"])
+        source = Path(tmpdir) / "datasets" / config["training"]["dataset_name"]
+    partitions = encoding.get("partitions")
+    if partitions is None:
+        # copy_dataset.sh already staged only the requested partitions.
+        partitions = [part for part in sorted(PARTITIONS) if any((source / part).glob("*.parquet"))]
+    if not isinstance(partitions, list) or not partitions:
+        raise ValueError("No partitions selected/found. Check encoding.partitions and the staged input directory.")
+    if any(part not in PARTITIONS for part in partitions):
+        raise ValueError(f"Unknown partition; choose from {sorted(PARTITIONS)}.")
+    if len(set(partitions)) != len(partitions):
+        raise ValueError("encoding.partitions must not contain duplicates.")
     destination = Path(encoding["output_root"]) / f"librispeech-dicodec-{label}"
     files = {}
     for part in partitions:
@@ -75,7 +74,7 @@ def read_experiment(path):
             raise FileNotFoundError(f"No input Parquet files for selected partition: {source / part}")
         if (destination / part).exists():
             raise FileExistsError(f"Output partition already exists: {destination / part}")
-    return experiment, files, destination
+    return encoding, files, destination
 
 
 class ShardWriter:
@@ -154,6 +153,12 @@ def iter_audio_rows(files):
                 yield row["audio"], path.parent
 
 
+def iter_audio_batches(files, batch_size):
+    rows = iter(iter_audio_rows(files))
+    while batch := list(islice(rows, batch_size)):
+        yield batch
+
+
 def prepare_audio(audio, source_directory, device, sample_rate):
     import soundfile as sf
     import torch
@@ -178,28 +183,30 @@ def prepare_audio(audio, source_directory, device, sample_rate):
     return [(resample(sample_rate), sample_rate)], [resample(16000)]
 
 
-def encoded_row(output):
+def encoded_row(output, index=0):
     import torch
 
-    z = output.z[0]
-    valid = ~output.padding_mask[0] if output.padding_mask is not None else torch.ones(
+    z = output.z[index]
+    valid = ~output.padding_mask[index] if output.padding_mask is not None else torch.ones(
         z.shape[0], dtype=torch.bool, device=z.device
     )
     if not valid.any():
         raise ValueError("Encoder returned no valid frames.")
-    tensors = {"z": z[valid], "z_sem": output.attributes.z_sem[0][valid],
-               "z_pros": output.attributes.z_pros[0][valid],
-               "z_mean": output.attributes.z_mean[0]}
+    tensors = {"z": z[valid], "z_sem": output.attributes.z_sem[index][valid],
+               "z_pros": output.attributes.z_pros[index][valid],
+               "z_mean": output.attributes.z_mean[index]}
     if any(not torch.isfinite(tensor).all() for tensor in tensors.values()):
         raise ValueError("Encoder returned non-finite latents or attributes.")
     values = {key: tensor.detach().float().cpu().tolist() for key, tensor in tensors.items()}
     return {"z": values.pop("z"), "attributes": values}
 
 
-def encode_partitions(model, files, destination, size_limit):
+def encode_partitions(model, files, destination, size_limit, batch_size=1):
     import torch
     from tqdm import tqdm
 
+    if type(batch_size) is not int or batch_size <= 0:
+        raise ValueError("batch_size must be a positive integer.")
     destination.mkdir(parents=True, exist_ok=True)
     with torch.inference_mode():
         for part, paths in files.items():
@@ -212,11 +219,22 @@ def encode_partitions(model, files, destination, size_limit):
             # Publish the partition only after every row has been written successfully.
             with tempfile.TemporaryDirectory(prefix=f".{part}-", dir=destination) as staging:
                 writer = ShardWriter(staging, size_limit)
-                for audio, parent in tqdm(iter_audio_rows(paths), total=count, desc=part):
-                    audios, audio16 = prepare_audio(audio, parent, model.device, model.config.sample_rate)
-                    features, mask, _, _ = model.extract_features(audios, audio_16khz=audio16)
-                    output = model.encode(features, mask, compute_attributes=True)
-                    writer.append(encoded_row(output))
+                with tqdm(total=count, desc=part) as progress:
+                    for batch in iter_audio_batches(paths, batch_size):
+                        audios, audio16 = [], []
+                        for audio, parent in batch:
+                            prepared, prepared16 = prepare_audio(
+                                audio, parent, model.device, model.config.sample_rate
+                            )
+                            audios.extend(prepared)
+                            audio16.extend(prepared16)
+                        features, mask, _, _ = model.extract_features(audios, audio_16khz=audio16)
+                        output = model.encode(features, mask, compute_attributes=True)
+                        if output.z.shape[0] != len(batch):
+                            raise RuntimeError("Encoder output batch size does not match the input.")
+                        for index in range(len(batch)):
+                            writer.append(encoded_row(output, index))
+                        progress.update(len(batch))
                 writer.close()
                 if writer.rows_written != count:
                     raise RuntimeError(f"Row count mismatch for {part}: {writer.rows_written} != {count}")
@@ -232,8 +250,7 @@ def main(cfg: DictConfig):
 
     if int(os.environ.get("WORLD_SIZE", "1")) != 1:
         raise ValueError("Launch encoding with one process/GPU to avoid duplicate writers.")
-    experiment, files, destination = read_experiment(cfg.encoding.experiment_config)
-    encoding = experiment["encoding"]
+    encoding, files, destination = read_config(cfg)
     checkpoint = Path(encoding["checkpoint"])
     with (checkpoint / "config.json").open() as stream:
         model_config = json.load(stream)
@@ -250,9 +267,12 @@ def main(cfg: DictConfig):
     del state
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model.to(device).eval()
-    # Encode one utterance at a time: normalization must not depend on batch padding.
     logger.info("Checkpoint: %s; partitions: %s; destination: %s", checkpoint, list(files), destination)
-    encode_partitions(model, files, destination, encoding["shard_size_mb"] * 1024 * 1024)
+    logger.info("Encoding batch size: %d", encoding["batch_size"])
+    encode_partitions(
+        model, files, destination, encoding["shard_size_mb"] * 1024 * 1024,
+        batch_size=encoding["batch_size"],
+    )
 
 
 if __name__ == "__main__":

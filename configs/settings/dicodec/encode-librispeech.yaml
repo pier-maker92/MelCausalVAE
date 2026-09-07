@@ -1,4 +1,5 @@
 # @package _global_
-# run_job passes the experiment path; its YAML owns partitions and encoding options.
-encoding:
-  experiment_config: ???
+# Default checkpoint alias; prefer the explicit per-checkpoint configs.
+defaults:
+  - /settings/dicodec/encode-librispeech-dicodec-v2-ls-25
+  - _self_
