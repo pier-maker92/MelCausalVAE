@@ -4,6 +4,9 @@ defaults:
   - _self_
 
 training:
+  dataset_name: libritts-r
+  max_audio_duration: 30
+  num_train_epochs: 100
   finetune_decoder: true
   # Required: pass training.from_pretrained=/path/to/checkpoint on the CLI.
   from_pretrained: ???
