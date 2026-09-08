@@ -3,6 +3,7 @@
 import argparse
 import json
 import random
+import sys
 from dataclasses import asdict
 from pathlib import Path
 
@@ -155,6 +156,10 @@ def train(config: Config):
 
 
 def main():
+    if any(argument.startswith("settings=") for argument in sys.argv[1:]):
+        from .hydra_training import main as hydra_main
+
+        return hydra_main()
     parser = argparse.ArgumentParser(description="Train an online speech quantizer by next-latent flow matching.")
     parser.add_argument("--config", type=Path, default=Path(__file__).with_name("default.yaml"))
     parser.add_argument("--resume", type=str, help="Override training.resume from YAML.")

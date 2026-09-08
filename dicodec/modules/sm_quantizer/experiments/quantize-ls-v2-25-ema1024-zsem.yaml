@@ -1,0 +1,30 @@
+# Narval: sh /scratch/piermel/scripts/run_job.sh quantize-ls-v2-25-ema1024-zsem
+job_name: "quantize-ls-v2-25-ema1024-zsem"
+time: "9:00:00"
+gpu_mem: "10"
+num_gpus: 1
+ntasks: 1
+cpus_per_task: 8
+mem: "16G"
+account: "rrg-ravanelm"
+
+repo_path: "MelCausalVAE"
+train_script: "scripts/train_sm_quantizer.py"
+hydra_settings:
+  - "dicodec/quantize/ema1024-zsem"
+# Keep this training selection aligned with dataset_partitions below.
+extra_args: "sm_quantizer.data.train_partitions=[train_clean_100]"
+sweep: null
+
+dataset_name: "librispeech-dicodec-v2-ls-25"
+dataset_source: "scratch"
+dataset_extension: "parquet"
+dataset_path: "dicodec/librispeech-dicodec-v2-ls-25"
+dataset_filter: ""
+# Add partitions here AND to the train_partitions override in extra_args.
+dataset_partitions: [train_clean_100]
+venv_path: "/home/piermel/envs/vae"
+training:
+  bf16: false
+  fp16: false
+email: "pierfrancesco.melucci@gmail.com"

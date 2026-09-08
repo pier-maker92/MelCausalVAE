@@ -112,6 +112,40 @@ return items with the same contract. Factory mode ignores format/path/partition 
 
 ## Training and resume
 
+### Narval run_job preset
+
+`configs/settings/dicodec/quantize/ema1024-zsem.yaml` is the Hydra preset for
+EMA 1024, semantic input/target, and `train_clean_100` at 25 fps. The corresponding
+launcher YAML is mirrored in `sm_quantizer/experiments/quantize-ls-v2-25-ema1024-zsem.yaml`
+and installed at `/scratch/piermel/experiments/quantize-ls-v2-25-ema1024-zsem.yaml`.
+After updating the repository on Narval, launch with:
+
+```bash
+sh /scratch/piermel/scripts/run_job.sh quantize-ls-v2-25-ema1024-zsem
+```
+
+The launcher stages `dicodec/librispeech-dicodec-v2-ls-25` under the job's
+`SLURM_TMPDIR/datasets`; the trainer reads that copy and caches Arrow on the same
+local disk. Checkpoints use the unique `training.output_dir` supplied by run_job.
+The Hydra adapter consumes only the `sm_quantizer` namespace; shared DiCodec
+settings and launcher metadata are not passed into the standalone dataclasses.
+
+To select multiple partitions, update both `dataset_partitions` (staging) and
+`extra_args` (training) in the experiment YAML, for example:
+
+```yaml
+dataset_partitions: [train_clean_100, train_clean_360]
+extra_args: "sm_quantizer.data.train_partitions=[train_clean_100,train_clean_360]"
+```
+
+Keep `num_gpus: 1` and precision flags false; this trainer uses one process and
+full precision. Resource defaults follow the existing Narval encoding experiment:
+one 10 GB GPU slice, 8 CPUs, 16 GB RAM and 9 hours. They have not been benchmarked
+on a full training run. `training.wandb_run_name` is accepted as launcher metadata;
+the SM trainer writes JSONL metrics, not WandB events.
+
+### Standalone CLI
+
 ```bash
 python scripts/train_sm_quantizer.py --config dicodec/modules/sm_quantizer/default.yaml
 python scripts/train_sm_quantizer.py --config my_config.yaml --resume outputs/sm_quantizer/last.pt
