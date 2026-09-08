@@ -19,6 +19,8 @@ class QuantizerOutput:
     indices: torch.Tensor
     commitment_loss: torch.Tensor
     bsq_regularization_loss: torch.Tensor
+    perplexity: torch.Tensor
+    codebook_utilization_pct: torch.Tensor
 
 
 @dataclass
@@ -41,8 +43,10 @@ class SMQuantizerOutput:
     context: torch.Tensor
     next_frame_mask: torch.Tensor
     bsq_regularization_loss: torch.Tensor
+    perplexity: torch.Tensor
+    codebook_utilization_pct: torch.Tensor
 
     def metrics(self) -> dict[str, float]:
         names = ("loss", "flow_loss", "reconstruction_l1", "reconstruction_l2",
-                 "commitment_loss", "bsq_regularization_loss")
+                 "commitment_loss", "bsq_regularization_loss", "perplexity", "codebook_utilization_pct")
         return {name: getattr(self, name).detach().item() for name in names}

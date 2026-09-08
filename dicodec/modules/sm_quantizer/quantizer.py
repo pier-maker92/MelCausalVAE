@@ -9,6 +9,7 @@ from ..quantizer.bsq import BinarySphericalQuantizer
 from ..quantizer.fsq import FiniteScalarQuantizer
 from .configs import QuantizerConfig
 from .fsq_levels import FSQ_LEVELS
+from .metrics import batch_codebook_metrics
 from .output_dataclasses import QuantizerOutput
 
 
@@ -71,4 +72,5 @@ class OnlineQuantizer(nn.Module):
         codes[valid] = straight_through
         tokens = torch.full(valid.shape, -1, dtype=torch.long, device=x.device)
         tokens[valid] = indices
-        return QuantizerOutput(codes, tokens, commitment, regularization)
+        perplexity, utilization = batch_codebook_metrics(indices, self.codebook.codebook_size)
+        return QuantizerOutput(codes, tokens, commitment, regularization, perplexity, utilization)

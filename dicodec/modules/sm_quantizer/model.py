@@ -73,6 +73,7 @@ class SMQuantizer(nn.Module):
             loss, flow.loss, l1, l2, quantized.commitment_loss, quantized.indices,
             quantized.codes, reconstruction.masked_fill(~valid.unsqueeze(-1), 0), context, pairs,
             quantized.bsq_regularization_loss,
+            quantized.perplexity, quantized.codebook_utilization_pct,
         )
 
     @torch.no_grad()

@@ -23,6 +23,14 @@ in the output dataclass and metrics. Only the applicable quantizer losses are ac
 No continuous features bypass the quantizer. Downstream TTS quality requires
 validation on actual speech tasks.
 
+Perplexity and `codebook_utilization_pct` pool token IDs over all valid frames of
+the current batch, across sequences, excluding padding. With empirical frequencies
+`p[k]` and vocabulary size `K`, perplexity is `exp(-sum(p * log(p)))` and utilization
+is `100 * number_of_used_codes / K`. These are codebook assignment statistics,
+not language-model likelihood perplexity. They are detached from gradients and
+logged to JSONL and WandB at the configured logging interval. Validation summaries
+report the arithmetic mean of per-batch statistics, not dataset-wide code usage.
+
 ## Quantizers
 
 Select `model.quantizer.type: vq_ema | bsq | fsq` and `codebook_size` in YAML.

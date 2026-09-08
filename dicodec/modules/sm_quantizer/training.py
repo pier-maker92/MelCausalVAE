@@ -62,15 +62,22 @@ def validate(model, loader, device) -> dict[str, float]:
     sums = {name: 0.0 for name in ("flow_loss", "reconstruction_l1", "reconstruction_l2",
                                   "commitment_loss", "bsq_regularization_loss")}
     frames = pairs = 0
+    batch_statistics = {"perplexity": 0.0, "codebook_utilization_pct": 0.0}
+    num_batches = 0
     for batch in loader:
         batch = batch.to(device)
         output = model(batch.inputs, batch.valid_mask, target=batch.targets)
+        num_batches += 1
+        for name in batch_statistics:
+            batch_statistics[name] += getattr(output, name).item()
         n_frames, n_pairs = int(batch.valid_mask.sum()), int(output.next_frame_mask.sum())
         frames += n_frames
         pairs += n_pairs
         for name in sums:
             sums[name] += getattr(output, name).item() * (n_pairs if name == "flow_loss" else n_frames)
     metrics = {name: total / (pairs if name == "flow_loss" else frames) for name, total in sums.items()}
+    # Epoch summary is the mean of batch metrics, not a dataset-wide histogram.
+    metrics.update({name: total / num_batches for name, total in batch_statistics.items()})
     weights = model.config.loss
     metrics["loss"] = (weights.flow * metrics["flow_loss"]
                        + weights.reconstruction_l1 * metrics["reconstruction_l1"]

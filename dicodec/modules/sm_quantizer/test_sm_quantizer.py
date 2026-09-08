@@ -19,6 +19,7 @@ from .configs import Config, DataConfig, QuantizerConfig, from_dict, load_config
 from .data import LatentCollator, build_dataset, parquet_files
 from .fsq_levels import FSQ_LEVELS
 from .model import SMQuantizer
+from .metrics import batch_codebook_metrics
 from .quantizer import OnlineQuantizer
 from .training import train
 
@@ -54,6 +55,25 @@ def write_shard(path, rows):
 
 
 class SMQuantizerTests(unittest.TestCase):
+    def test_codebook_metrics_pool_batch_and_ignore_padding(self):
+        # Each sequence alone has perplexity 1; pooling the batch gives 2.
+        indices = torch.tensor([[0, 0, -1], [1, 1, -1]])
+        perplexity, utilization = batch_codebook_metrics(indices, 8)
+        self.assertAlmostEqual(perplexity.item(), 2)
+        self.assertAlmostEqual(utilization.item(), 25)
+        skewed = torch.tensor([[0, 0, 0], [1, -1, -1]])
+        perplexity, utilization = batch_codebook_metrics(skewed, 8)
+        self.assertAlmostEqual(perplexity.item(), math.exp(-.75 * math.log(.75) - .25 * math.log(.25)), places=6)
+        self.assertAlmostEqual(utilization.item(), 25)
+        perplexity, utilization = batch_codebook_metrics(torch.zeros(2, 3, dtype=torch.long), 8)
+        self.assertAlmostEqual(perplexity.item(), 1)
+        self.assertAlmostEqual(utilization.item(), 12.5)
+        perplexity, utilization = batch_codebook_metrics(torch.arange(8), 8)
+        self.assertAlmostEqual(perplexity.item(), 8)
+        self.assertAlmostEqual(utilization.item(), 100)
+        with self.assertRaises(ValueError):
+            batch_codebook_metrics(torch.full((2, 3), -1), 8)
+
     def setUp(self):
         torch.manual_seed(17)
         torch.set_num_threads(1)
@@ -75,6 +95,9 @@ class SMQuantizerTests(unittest.TestCase):
                 torch.testing.assert_close(out.reconstruction_l2,
                     (out.reconstruction[batch.valid_mask] - batch.targets[batch.valid_mask]).square().mean())
                 self.assertEqual(out.indices[~batch.valid_mask].tolist(), [-1, -1])
+                expected_perplexity, expected_utilization = batch_codebook_metrics(out.indices, 512)
+                self.assertEqual(out.metrics()["perplexity"], expected_perplexity.item())
+                self.assertEqual(out.metrics()["codebook_utilization_pct"], expected_utilization.item())
                 self.assertTrue(((out.indices[batch.valid_mask] >= 0) & (out.indices[batch.valid_mask] < 512)).all())
                 # Isolate the next-frame task: task gradients must pass through quantization.
                 out.flow_loss.backward()
@@ -121,11 +144,15 @@ class SMQuantizerTests(unittest.TestCase):
                 other = copy.deepcopy(model)
                 corrupted = batch.inputs.clone()
                 corrupted[~batch.valid_mask] = float("nan")
+                target = batch.targets + 2
+                corrupted_target = target.clone()
+                corrupted_target[~batch.valid_mask] = float("nan")
                 torch.manual_seed(2)
-                out = model(batch.inputs, batch.valid_mask)
+                out = model(batch.inputs, batch.valid_mask, target=target)
                 torch.manual_seed(2)
-                alt = other(corrupted, batch.valid_mask)
+                alt = other(corrupted, batch.valid_mask, target=corrupted_target)
                 torch.testing.assert_close(out.loss, alt.loss)
+                self.assertEqual(out.metrics(), alt.metrics())
                 out.loss.backward()
                 alt.loss.backward()
                 torch.testing.assert_close(model.encoder[0].weight.grad, other.encoder[0].weight.grad)
