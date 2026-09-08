@@ -9,13 +9,7 @@ from .encoder.encoder import Encoder
 from .utils import count_parameters_by_module
 from .feature_extractor import FeatureExtractor, WavLMFeatureExtractor
 from .speaker_encoder import WavLMSpeakerEncoder
-from .output_dataclasses import (
-    AttributesOutput,
-    DicodecOutput,
-    DecoderOutput,
-    FeatureExtractorOutput,
-    QuantizeOutput,
-)
+from .output_dataclasses import AttributesOutput, DicodecOutput, DecoderOutput, FeatureExtractorOutput, QuantizeOutput
 from .lp_filter import LowPassFilter
 from vocos import Vocos
 
@@ -36,29 +30,16 @@ class Dicodec(torch.nn.Module):
             from transformers import WavLMModel
 
             model_name = config.wavlm_module_config.pretrained_model_name
-            self.wavlm = WavLMModel.from_pretrained(
-                model_name,
-                use_safetensors=False,
-            )
+            self.wavlm = WavLMModel.from_pretrained(model_name, use_safetensors=False)
             self._freeze_wavlm()
             if config.wavlm_module_config.feature_extractor_config:
-                self.wavlm_extractor = WavLMFeatureExtractor(
-                    config.wavlm_module_config.feature_extractor_config,
-                    wavlm=self.wavlm,
-                )
+                self.wavlm_extractor = WavLMFeatureExtractor(config.wavlm_module_config.feature_extractor_config, wavlm=self.wavlm)
             if config.wavlm_module_config.speaker_encoder_config:
-                self.speaker_encoder = WavLMSpeakerEncoder(
-                    config.wavlm_module_config.speaker_encoder_config,
-                    wavlm=self.wavlm,
-                )
+                self.speaker_encoder = WavLMSpeakerEncoder(config.wavlm_module_config.speaker_encoder_config, wavlm=self.wavlm)
 
         self.encoder = Encoder(config.encoder_config)
         self.decoder = DiT(config.decoder_config)
-        self.lowpass_filter = LowPassFilter(
-            cutoff_hz=config.lowpass_filter_config.cutoff_hz,
-            sample_rate=config.lowpass_filter_config.sample_rate,
-            order=config.lowpass_filter_config.order,
-        )
+        self.lowpass_filter = LowPassFilter(cutoff_hz=config.lowpass_filter_config.cutoff_hz, sample_rate=config.lowpass_filter_config.sample_rate, order=config.lowpass_filter_config.order)
 
         self.vocoder = Vocos.from_pretrained("charactr/vocos-mel-24khz")
         self.vocoder.eval()
@@ -128,21 +109,13 @@ class Dicodec(torch.nn.Module):
         else:
             checkpoint_file = checkpoint_path
 
-        state_dict = safetensors.torch.load_file(
-            checkpoint_file, device=str(self.device)
-        )
+        state_dict = safetensors.torch.load_file(checkpoint_file, device=str(self.device))
         print(f"Safetensors file loaded to {self.device}. Applying state dict...")
         self.load_state_dict(state_dict, strict=False)
         print(f"Loaded checkpoint from {checkpoint_file}")
 
     @torch.no_grad()
-    def extract_wavlm_features(
-        self,
-        target_length: int,
-        audios_srs,
-        audio_16khz=None,
-        extractor: Optional[WavLMFeatureExtractor] = None,
-    ):
+    def extract_wavlm_features(self, target_length: int, audios_srs, audio_16khz=None, extractor: Optional[WavLMFeatureExtractor] = None):
         extractor = self.wavlm_extractor if extractor is None else extractor
         if extractor is None:
             return None, None
@@ -150,32 +123,13 @@ class Dicodec(torch.nn.Module):
         wavlm_output = extractor(audios_srs, audio_16khz=audio_16khz)
         wavlm_features = wavlm_output.audio_features.to(self.dtype)
         wavlm_features = wavlm_features.repeat_interleave(2, dim=1)
-        wavlm_features = (
-            F.interpolate(
-                wavlm_features.float().transpose(1, 2),
-                size=target_length,
-                mode="linear",
-                align_corners=False,
-            )
-            .transpose(1, 2)
-            .to(wavlm_features.dtype)
-        )
-        wavlm_padding_mask = (
-            F.interpolate(
-                wavlm_output.padding_mask.float().unsqueeze(1),
-                size=target_length,
-                mode="nearest",
-            )
-            .squeeze(1)
-            .bool()
-        )
+        wavlm_features = F.interpolate(wavlm_features.float().transpose(1, 2), size=target_length, mode="linear", align_corners=False).transpose(1, 2).to(wavlm_features.dtype)
+        wavlm_padding_mask = F.interpolate(wavlm_output.padding_mask.float().unsqueeze(1), size=target_length, mode="nearest").squeeze(1).bool()
         return wavlm_features, wavlm_padding_mask
 
     @torch.no_grad()
     def extract_features(self, audios_srs, target_audios_srs=None, **kwargs):
-        target_audios_srs = (
-            audios_srs if target_audios_srs is None else target_audios_srs
-        )
+        target_audios_srs = audios_srs if target_audios_srs is None else target_audios_srs
         audio_16khz = kwargs.get("audio_16khz")
 
         target_output = self.feature_extractor(target_audios_srs)
@@ -183,26 +137,12 @@ class Dicodec(torch.nn.Module):
         target_padding_mask = target_output.padding_mask
         target_length = target_features.shape[1]
 
-        wavlm_features, wavlm_padding_mask = self.extract_wavlm_features(
-            target_length=target_length,
-            audios_srs=audios_srs,
-            audio_16khz=audio_16khz,
-        )
+        wavlm_features, wavlm_padding_mask = self.extract_wavlm_features(target_length=target_length, audios_srs=audios_srs, audio_16khz=audio_16khz)
         if wavlm_features is not None:
-            return (
-                wavlm_features,
-                wavlm_padding_mask,
-                target_features,
-                target_padding_mask,
-            )
+            return (wavlm_features, wavlm_padding_mask, target_features, target_padding_mask)
 
         encoder_output = self.feature_extractor(audios_srs)
-        return (
-            encoder_output.audio_features.to(self.dtype),
-            encoder_output.padding_mask,
-            target_features,
-            target_padding_mask,
-        )
+        return (encoder_output.audio_features.to(self.dtype), encoder_output.padding_mask, target_features, target_padding_mask)
 
     def _normalize_ssl_features(
         self,
@@ -211,9 +151,7 @@ class Dicodec(torch.nn.Module):
         padding_mask: Optional[torch.BoolTensor] = None,
     ) -> torch.Tensor:
         if padding_mask is None:
-            padding_mask = torch.zeros(
-                features.shape[:2], device=features.device, dtype=torch.bool
-            )
+            padding_mask = torch.zeros(features.shape[:2], device=features.device, dtype=torch.bool)
         if padding_mask.shape != features.shape[:2] or padding_mask.dtype != torch.bool:
             raise ValueError("padding_mask must be boolean with shape [batch, time].")
         padding = padding_mask.to(device=features.device).unsqueeze(-1)
@@ -233,21 +171,11 @@ class Dicodec(torch.nn.Module):
         return normalized.masked_fill(padding, 0.0).to(features.dtype)
 
     def encode(self, features, padding_mask, **kwargs):
-        encoder_output = self.encoder(
-            x=self._normalize_ssl_features(features, padding_mask=padding_mask),
-            padding_mask=padding_mask,
-            step=kwargs.get("training_step", None),
-        )
+        encoder_output = self.encoder(x=self._normalize_ssl_features(features, padding_mask=padding_mask), padding_mask=padding_mask, step=kwargs.get("training_step", None))
         if self.external_semantic_quantizer is not None:
-            encoder_output.quantizer_output = self.quantize(
-                encoder_output.z,
-                padding_mask=encoder_output.padding_mask,
-            )
+            encoder_output.quantizer_output = self.quantize(encoder_output.z, padding_mask=encoder_output.padding_mask)
         if kwargs.get("compute_attributes", False):
-            encoder_output.attributes = self.encode_attributes(
-                z=encoder_output.z,
-                padding_mask=encoder_output.padding_mask,
-            )
+            encoder_output.attributes = self.encode_attributes(z=encoder_output.z, padding_mask=encoder_output.padding_mask)
         return encoder_output
 
     def encoder_context_vector(self, encoder_output):
@@ -263,13 +191,8 @@ class Dicodec(torch.nn.Module):
 
         if padding_mask is not None:
             if padding_mask.shape != z.shape[:2]:
-                raise ValueError(
-                    "padding_mask must have shape [batch, time], got "
-                    f"{tuple(padding_mask.shape)} for z shape {tuple(z.shape)}."
-                )
-            valid_mask = (
-                (~padding_mask).to(device=z.device, dtype=z.dtype).unsqueeze(-1)
-            )
+                raise ValueError("padding_mask must have shape [batch, time], got " f"{tuple(padding_mask.shape)} for z shape {tuple(z.shape)}.")
+            valid_mask = (~padding_mask).to(device=z.device, dtype=z.dtype).unsqueeze(-1)
             valid_count = valid_mask.sum(dim=1, keepdim=True).clamp_min(1.0)
         else:
             valid_mask = None
@@ -287,17 +210,9 @@ class Dicodec(torch.nn.Module):
         z_lp = self.lowpass_filter(z_centered, valid_mask=valid_mask)
         z_hp = z_centered - z_lp
 
-        dot_product = torch.sum(
-            z_centered * z_lp,
-            dim=1,
-            keepdim=True,
-        )
+        dot_product = torch.sum(z_centered * z_lp, dim=1, keepdim=True)
 
-        norm_sq = torch.sum(
-            z_lp.square(),
-            dim=1,
-            keepdim=True,
-        )
+        norm_sq = torch.sum(z_lp.square(), dim=1, keepdim=True)
 
         beta = dot_product / (norm_sq + 1e-8)
 
@@ -360,20 +275,12 @@ class Dicodec(torch.nn.Module):
             z=z,
             target_features=dec_features,
             target_padding_mask=dec_padding_mask,
-            speaker_embedding=(
-                speaker_embedding
-                if speaker_embedding is not None
-                else getattr(encoder_output, "speaker_embedding", None)
-            ),
+            speaker_embedding=(speaker_embedding if speaker_embedding is not None else getattr(encoder_output, "speaker_embedding", None)),
         )
         audio_loss = decoder_output.loss
 
-        mu_mean = encoder_output.mu[
-            ~encoder_output.padding_mask
-        ].mean()  # whatever is not quantized
-        mu_var = encoder_output.mu[
-            ~encoder_output.padding_mask
-        ].var()  # whatever is not quantized
+        mu_mean = encoder_output.mu[~encoder_output.padding_mask].mean()  # whatever is not quantized
+        mu_var = encoder_output.mu[~encoder_output.padding_mask].var()  # whatever is not quantized
         out = {
             "audio_loss": audio_loss,
             "kl_loss": encoder_output.kl_loss,
@@ -479,9 +386,7 @@ class Dicodec(torch.nn.Module):
             residual = attrs.z_sem - quantized
             z_pros = attrs.z_pros + attrs.z_mean
         else:
-            raise ValueError(
-                "external semantic quantizer target_source must be either 'z' or 'z_sem'."
-            )
+            raise ValueError("external semantic quantizer target_source must be either 'z' or 'z_sem'.")
 
         return QuantizeOutput(
             quantized=quantized,
@@ -513,12 +418,10 @@ class Dicodec(torch.nn.Module):
         """
 
         # Encode audio to mel spectrogram
-        enc_features, enc_padding_mask, dec_features, dec_padding_mask = (
-            self.extract_features(
-                audios_srs,
-                target_audios_srs=audios_srs,
-                **kwargs,
-            )
+        enc_features, enc_padding_mask, dec_features, dec_padding_mask = self.extract_features(
+            audios_srs,
+            target_audios_srs=audios_srs,
+            **kwargs,
         )
         encoder_output = self.encode(enc_features, enc_padding_mask, **kwargs)
 

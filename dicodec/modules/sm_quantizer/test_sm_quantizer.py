@@ -4,11 +4,13 @@ import copy
 import io
 import itertools
 import math
+import json
 import tempfile
 import unittest
 from contextlib import redirect_stdout
 from dataclasses import asdict
 from pathlib import Path
+from unittest.mock import patch
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -21,7 +23,7 @@ from .fsq_levels import FSQ_LEVELS
 from .model import SMQuantizer
 from .metrics import batch_codebook_metrics
 from .quantizer import OnlineQuantizer
-from .training import train
+from .training import train, save_checkpoint
 
 
 def tiny_config(kind="vq_ema"):
@@ -55,6 +57,34 @@ def write_shard(path, rows):
 
 
 class SMQuantizerTests(unittest.TestCase):
+    def test_periodic_checkpoints_and_epoch_logs(self):
+        with tempfile.TemporaryDirectory() as directory, redirect_stdout(io.StringIO()):
+            root = Path(directory)
+            data = root / "data"
+            data.mkdir()
+            for index in range(6):
+                torch.save(row(3), data / f"{index}.pt")
+            config = tiny_config()
+            config.data.train_path = str(data)
+            config.data.validation_path = str(data)
+            config.training.output_dir = str(root / "output")
+            config.training.save_every_steps = 2
+            saved = []
+
+            def capture(*args):
+                saved.append(args[-3:])  # epoch, next batch index, global step
+                save_checkpoint(*args)
+
+            with patch("dicodec.modules.sm_quantizer.training.save_checkpoint", side_effect=capture):
+                train(config)
+            self.assertEqual(saved, [(0, 2, 2), (1, 0, 3), (1, 1, 4), (2, 0, 6)])
+            records = [json.loads(line) for line in (root / "output" / "metrics.jsonl").read_text().splitlines()]
+            self.assertEqual([(r["step"], r["epoch"]) for r in records if r["split"] == "train"], [(1, 1), (4, 2)])
+            self.assertEqual([r["epoch"] for r in records if r["split"] == "validation"], [1, 2])
+        for value in (0, -1, 1.5, True):
+            with self.assertRaises(ValueError):
+                from_dict(Config, {"training": {"save_every_steps": value}})
+
     def test_codebook_metrics_pool_batch_and_ignore_padding(self):
         # Each sequence alone has perplexity 1; pooling the batch gives 2.
         indices = torch.tensor([[0, 0, -1], [1, 1, -1]])

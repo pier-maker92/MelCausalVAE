@@ -177,7 +177,42 @@ training; stochastic external datasets must manage their own RNG/worker state.
 BSQ validation regularization is a frame-weighted average of batch statistics, so it
 can depend on batch composition. This trainer does not implement distributed EMA.
 
+`training.save_every_steps` also saves `last.pt` every N global optimizer steps,
+including across resume. Both shipped YAML presets set it to 1000; `null` disables
+periodic saves and preserves epoch-end/max-step saving. Each save atomically replaces
+`last.pt`, without accumulating checkpoint history. In Hydra overrides use
+`sm_quantizer.training.save_every_steps=500`, for example.
+The console announces each epoch; logged metrics include the one-based `epoch`
+(`train/epoch` and `validation/epoch` in WandB), including the first batch of an
+epoch or a resumed run regardless of `log_every`.
+
 ## Python API and tests
+
+### Listening with the trained SLM checkpoint
+
+The root `inference_slm.py` follows the DiCodec audio inference pipeline with fixed
+DiCodec checkpoint `checkpoints/paper/v2/ls/25` and quantizer checkpoint
+`checkpoints/paper/slm/25/<type>/last.pt` selected by `--type vq_ema|fsq|bsq` (default `fsq`),
+resolved relative to the repository. It loads the quantizer architecture from the
+checkpoint config and requires semantic input and target. FSQ codes are projected
+back to 64-D `q_sem` by the trained reconstruction head; neither the SLM transformer
+nor its next-frame diffusion head participates in this same-frame experiment.
+
+```bash
+python inference_slm.py -i audio_assets/male.wav
+python inference_slm.py -i audio_assets/male.wav --type vq_ema -q
+python inference_slm.py -i audio_assets/male.wav -r
+python inference_slm.py -i audio_assets/male.wav -ta audio_assets/female.wav
+```
+
+Default decoding uses `q_sem + z_pros + z_mean`; `-q` uses only `q_sem`; `-r` uses
+the full residual `z - q_sem`, including prosody and mean. The two switches are
+mutually exclusive. Quantization starts from `encode(..., compute_attributes=True)`'s
+`attributes.z_sem`. Speaker conditioning always comes from the input unless `-ta`
+provides a different reference. Decoder sampling matches `inference.py` defaults:
+12 steps, temperature 0.2 and guidance scale 1.5. Output WAV files are saved next
+to the input as `<stem>_slm_<type>_full.wav`, `<stem>_slm_<type>_quantized.wav` or
+`<stem>_slm_<type>_residual.wav`, with `_speaker_<reference>` when using `-ta`.
 
 ```python
 from dicodec.modules.sm_quantizer import SMQuantizer, load_config

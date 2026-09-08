@@ -105,17 +105,12 @@ def resolve_semantic_quantizer_checkpoint(args) -> Path | None:
     if args.semantic_quantizer_steps is None and args.semantic_codebook_size is None:
         return None
     if args.semantic_quantizer_steps is None or args.semantic_codebook_size is None:
-        raise ValueError(
-            "Pass both --semantic_quantizer_steps and --semantic_codebook_size, "
-            "or pass --semantic_quantizer_checkpoint explicitly."
-        )
+        raise ValueError("Pass both --semantic_quantizer_steps and --semantic_codebook_size, " "or pass --semantic_quantizer_checkpoint explicitly.")
 
     step_label, step_count = normalize_quantized_step(args.semantic_quantizer_steps)
     quantized_dir = Path(args.checkpoint_dir) / "quantized" / f"{step_label}step"
     if not quantized_dir.is_dir():
-        raise FileNotFoundError(
-            f"Quantized checkpoint directory not found: {quantized_dir}"
-        )
+        raise FileNotFoundError(f"Quantized checkpoint directory not found: {quantized_dir}")
 
     variant = normalize_semantic_quantizer_variant(args.semantic_quantizer_variant)
     configured_dirs = configured_quantizer_dirs(
@@ -127,16 +122,10 @@ def resolve_semantic_quantizer_checkpoint(args) -> Path | None:
         return configured_dirs[0]
     if len(configured_dirs) > 1:
         formatted = "\n".join(str(path) for path in configured_dirs)
-        raise RuntimeError(
-            "Multiple matching semantic quantizer variants found. "
-            "Pass --semantic_quantizer_variant z or --semantic_quantizer_variant z_sem.\n"
-            f"{formatted}"
-        )
+        raise RuntimeError("Multiple matching semantic quantizer variants found. " "Pass --semantic_quantizer_variant z or --semantic_quantizer_variant z_sem.\n" f"{formatted}")
     if variant is not None:
         raise FileNotFoundError(
-            "No semantic quantizer checkpoint found for "
-            f"variant={variant}, steps={args.semantic_quantizer_steps}, "
-            f"codebook_size={args.semantic_codebook_size} in {quantized_dir}."
+            "No semantic quantizer checkpoint found for " f"variant={variant}, steps={args.semantic_quantizer_steps}, " f"codebook_size={args.semantic_codebook_size} in {quantized_dir}."
         )
 
     candidates = sorted(
@@ -150,19 +139,11 @@ def resolve_semantic_quantizer_checkpoint(args) -> Path | None:
             if path.is_dir() or path.suffix == ".pt"
         }
     )
-    configured_dirs = [
-        path for path in candidates if path.is_dir() and (path / "config.json").exists()
-    ]
+    configured_dirs = [path for path in candidates if path.is_dir() and (path / "config.json").exists()]
     if configured_dirs:
         candidates = configured_dirs
     if step_count is not None:
-        exact = [
-            path
-            for path in candidates
-            if f"step_{step_count}_" in path.name
-            or (step_count == 1000 and "model_epoch_1_" in path.name)
-            or path.is_dir()
-        ]
+        exact = [path for path in candidates if f"step_{step_count}_" in path.name or (step_count == 1000 and "model_epoch_1_" in path.name) or path.is_dir()]
         if len(exact) == 1:
             return exact[0]
         if len(exact) > 1:
@@ -171,15 +152,9 @@ def resolve_semantic_quantizer_checkpoint(args) -> Path | None:
     if len(candidates) == 1:
         return candidates[0]
     if not candidates:
-        raise FileNotFoundError(
-            "No semantic quantizer checkpoint found for "
-            f"steps={args.semantic_quantizer_steps}, "
-            f"codebook_size={args.semantic_codebook_size} in {quantized_dir}."
-        )
+        raise FileNotFoundError("No semantic quantizer checkpoint found for " f"steps={args.semantic_quantizer_steps}, " f"codebook_size={args.semantic_codebook_size} in {quantized_dir}.")
     formatted = "\n".join(str(path) for path in candidates)
-    raise RuntimeError(
-        f"Multiple matching semantic quantizer checkpoints:\n{formatted}"
-    )
+    raise RuntimeError(f"Multiple matching semantic quantizer checkpoints:\n{formatted}")
 
 
 def main(args):
@@ -189,9 +164,7 @@ def main(args):
     elif torch.backends.mps.is_available():
         device = torch.device("mps")
     else:
-        raise RuntimeError(
-            "No CUDA or MPS device is available. CPU inference is not supported."
-        )
+        raise RuntimeError("No CUDA or MPS device is available. CPU inference is not supported.")
 
     print(f"Loading model from {checkpoint_dir}...")
     model = load_pretrained_model(checkpoint_dir)
@@ -211,10 +184,7 @@ def main(args):
             target_source=args.semantic_quantizer_target_override,
         )
     assert not model.training, "Model must be in eval mode"
-    assert not model.encoder.training, (
-        "Encoder must be in eval mode: reparameterization trick and "
-        "dropout regularizer are only disabled when training=False"
-    )
+    assert not model.encoder.training, "Encoder must be in eval mode: reparameterization trick and " "dropout regularizer are only disabled when training=False"
 
     audio_path = args.audio_path
     print(f"Processing audio: {audio_path}")
@@ -232,17 +202,10 @@ def main(args):
             "guidance_scale": args.guidance_scale,
         }
         if args.target_audio is not None:
-            target_wav = load_wav_mono_resampled(
-                args.target_audio, model.config.sample_rate
-            ).to(device)
-            speaker_embedding = model.extract_speaker_embedding(
-                [(target_wav, model.config.sample_rate)]
-            )
+            target_wav = load_wav_mono_resampled(args.target_audio, model.config.sample_rate).to(device)
+            speaker_embedding = model.extract_speaker_embedding([(target_wav, model.config.sample_rate)])
             if speaker_embedding is None:
-                raise RuntimeError(
-                    "Speaker embedding swapping requires a checkpoint with a speaker "
-                    "encoder."
-                )
+                raise RuntimeError("Speaker embedding swapping requires a checkpoint with a speaker " "encoder.")
             params["speaker_embedding"] = speaker_embedding
 
         if getattr(args, "qq", False):
@@ -251,9 +214,7 @@ def main(args):
                 if spk_emb is not None:
                     params["speaker_embedding"] = torch.ones_like(spk_emb)
             else:
-                params["speaker_embedding"] = torch.ones_like(
-                    params["speaker_embedding"]
-                )
+                params["speaker_embedding"] = torch.ones_like(params["speaker_embedding"])
 
         out = model.encode_decode(**params)
         audio = out["audio_waveform"]
@@ -337,8 +298,6 @@ if __name__ == "__main__":
         default=None,
         help="Override target_source from the quantizer config.",
     )
-    parser.add_argument(
-        "-qq", action="store_true", help="Zero out the speaker embedding"
-    )
+    parser.add_argument("-qq", action="store_true", help="Zero out the speaker embedding")
     args = parser.parse_args()
     main(args)

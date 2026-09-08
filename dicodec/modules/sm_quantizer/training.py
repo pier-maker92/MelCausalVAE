@@ -151,19 +151,26 @@ def train(config: Config):
             return
         for current_epoch in range(epoch, settings.epochs):
             loader = make_loader(train_data, config, current_epoch, shuffle=True)
+            print(f"Epoch {current_epoch + 1}/{settings.epochs} (global step {step})", flush=True)
             for index, batch in enumerate(loader):
                 if current_epoch == epoch and index < batch_index:
                     continue
                 metrics = train_step(model, optimizer, batch, device, settings.grad_clip)
+                metrics["epoch"] = current_epoch + 1
                 step += 1
-                if step == 1 or step % settings.log_every == 0:
+                if index == 0 or (current_epoch == epoch and index == batch_index) or step % settings.log_every == 0:
                     log_metrics(metrics_path, "train", step, metrics, run)
-                if settings.max_steps is not None and step >= settings.max_steps:
+                stopping = settings.max_steps is not None and step >= settings.max_steps
+                periodic_save = settings.save_every_steps is not None and step % settings.save_every_steps == 0
+                # At epoch end, save after validation instead of writing twice.
+                if stopping or (periodic_save and index + 1 < len(loader)):
                     save_checkpoint(checkpoint_path, model, optimizer, config, current_epoch, index + 1, step)
+                if stopping:
                     return
             if validation_data is not None:
                 validation_loader = make_loader(validation_data, config, current_epoch, shuffle=False)
                 metrics = validate(model, validation_loader, device)
+                metrics["epoch"] = current_epoch + 1
                 log_metrics(metrics_path, "validation", step, metrics, run)
             save_checkpoint(checkpoint_path, model, optimizer, config, current_epoch + 1, 0, step)
 

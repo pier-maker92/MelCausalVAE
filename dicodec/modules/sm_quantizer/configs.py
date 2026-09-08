@@ -142,6 +142,7 @@ class TrainingConfig:
     seed: int = 42
     device: str = "auto"
     log_every: int = 10
+    save_every_steps: int | None = None
     max_steps: int | None = None
     resume: str | None = None
     wandb_mode: str = "disabled"
@@ -152,6 +153,10 @@ class TrainingConfig:
     def __post_init__(self):
         if self.wandb_mode not in {"online", "offline", "disabled"}:
             raise ValueError("wandb_mode must be online, offline or disabled.")
+        if self.save_every_steps is not None and (
+            type(self.save_every_steps) is not int or self.save_every_steps <= 0
+        ):
+            raise ValueError("save_every_steps must be a positive integer or null.")
 
 
 @dataclass
