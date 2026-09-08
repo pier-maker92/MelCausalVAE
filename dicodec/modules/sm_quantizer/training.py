@@ -14,6 +14,7 @@ from torch.utils.data import DataLoader
 from .configs import Config, from_dict, load_config
 from .data import LatentCollator, build_dataset
 from .model import SMQuantizer
+from .tracking import init_wandb
 
 
 def resolve_device(name: str) -> torch.device:
@@ -107,14 +108,18 @@ def restore_checkpoint(path, model, optimizer, config) -> tuple[int, int, int]:
     random.setstate(checkpoint["python_rng"])
     if torch.cuda.is_available() and checkpoint["cuda_rng"] is not None:
         torch.cuda.set_rng_state_all(checkpoint["cuda_rng"])
+    if config.training.wandb_id is None:
+        config.training.wandb_id = old["training"]["wandb_id"]
     return checkpoint["epoch"], checkpoint["batch_index"], checkpoint["step"]
 
 
-def log_metrics(path: Path, split: str, step: int, metrics: dict):
+def log_metrics(path: Path, split: str, step: int, metrics: dict, run=None):
     line = json.dumps({"split": split, "step": step, **metrics})
     print(line, flush=True)
     with path.open("a") as handle:
         handle.write(line + "\n")
+    if run is not None:
+        run.log({"global_step": step, **{f"{split}/{name}": value for name, value in metrics.items()}})
 
 
 def train(config: Config):
@@ -130,29 +135,30 @@ def train(config: Config):
         epoch, batch_index, step = restore_checkpoint(settings.resume, model, optimizer, config)
     output_dir = Path(settings.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    with (output_dir / "config.yaml").open("w") as handle:
-        yaml.safe_dump(asdict(config), handle, sort_keys=False)
-    metrics_path = output_dir / "metrics.jsonl"
-    checkpoint_path = output_dir / "last.pt"
-    if settings.max_steps is not None and step >= settings.max_steps:
-        return
-    for current_epoch in range(epoch, settings.epochs):
-        loader = make_loader(train_data, config, current_epoch, shuffle=True)
-        for index, batch in enumerate(loader):
-            if current_epoch == epoch and index < batch_index:
-                continue
-            metrics = train_step(model, optimizer, batch, device, settings.grad_clip)
-            step += 1
-            if step == 1 or step % settings.log_every == 0:
-                log_metrics(metrics_path, "train", step, metrics)
-            if settings.max_steps is not None and step >= settings.max_steps:
-                save_checkpoint(checkpoint_path, model, optimizer, config, current_epoch, index + 1, step)
-                return
-        if validation_data is not None:
-            validation_loader = make_loader(validation_data, config, current_epoch, shuffle=False)
-            metrics = validate(model, validation_loader, device)
-            log_metrics(metrics_path, "validation", step, metrics)
-        save_checkpoint(checkpoint_path, model, optimizer, config, current_epoch + 1, 0, step)
+    with init_wandb(config) as run:
+        with (output_dir / "config.yaml").open("w") as handle:
+            yaml.safe_dump(asdict(config), handle, sort_keys=False)
+        metrics_path = output_dir / "metrics.jsonl"
+        checkpoint_path = output_dir / "last.pt"
+        if settings.max_steps is not None and step >= settings.max_steps:
+            return
+        for current_epoch in range(epoch, settings.epochs):
+            loader = make_loader(train_data, config, current_epoch, shuffle=True)
+            for index, batch in enumerate(loader):
+                if current_epoch == epoch and index < batch_index:
+                    continue
+                metrics = train_step(model, optimizer, batch, device, settings.grad_clip)
+                step += 1
+                if step == 1 or step % settings.log_every == 0:
+                    log_metrics(metrics_path, "train", step, metrics, run)
+                if settings.max_steps is not None and step >= settings.max_steps:
+                    save_checkpoint(checkpoint_path, model, optimizer, config, current_epoch, index + 1, step)
+                    return
+            if validation_data is not None:
+                validation_loader = make_loader(validation_data, config, current_epoch, shuffle=False)
+                metrics = validate(model, validation_loader, device)
+                log_metrics(metrics_path, "validation", step, metrics, run)
+            save_checkpoint(checkpoint_path, model, optimizer, config, current_epoch + 1, 0, step)
 
 
 def main():

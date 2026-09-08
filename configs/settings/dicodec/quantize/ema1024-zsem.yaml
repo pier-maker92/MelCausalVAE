@@ -61,3 +61,7 @@ sm_quantizer:
     log_every: 10
     max_steps: null
     resume: null
+    wandb_mode: online
+    wandb_project: dicodec-sm-quantizer
+    wandb_run_name: ${training.wandb_run_name}
+    wandb_id: null

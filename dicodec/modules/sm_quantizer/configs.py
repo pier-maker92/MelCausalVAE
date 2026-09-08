@@ -144,6 +144,14 @@ class TrainingConfig:
     log_every: int = 10
     max_steps: int | None = None
     resume: str | None = None
+    wandb_mode: str = "disabled"
+    wandb_project: str = "dicodec-sm-quantizer"
+    wandb_run_name: str | None = None
+    wandb_id: str | None = None
+
+    def __post_init__(self):
+        if self.wandb_mode not in {"online", "offline", "disabled"}:
+            raise ValueError("wandb_mode must be online, offline or disabled.")
 
 
 @dataclass

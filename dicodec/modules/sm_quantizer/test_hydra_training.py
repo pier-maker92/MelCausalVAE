@@ -31,6 +31,7 @@ class HydraLauncherTests(unittest.TestCase):
                        f"hydra.run.dir={root / 'hydra'}", "training.run_id=smoke",
                        "training.wandb_run_name=smoke", f"training.output_dir={output}",
                        "sm_quantizer.training.device=cpu", "sm_quantizer.training.max_steps=1",
+                       "sm_quantizer.training.wandb_mode=offline",
                        "sm_quantizer.model.latent_dim=4", "sm_quantizer.model.projection_hidden_dim=8",
                        "sm_quantizer.model.transformer.dim=8", "sm_quantizer.model.transformer.heads=2",
                        "sm_quantizer.model.transformer.layers=1", "sm_quantizer.model.transformer.ff_dim=16",
@@ -48,6 +49,9 @@ class HydraLauncherTests(unittest.TestCase):
             self.assertEqual(config["training"]["output_dir"], str(output))
             self.assertEqual(config["model"]["quantizer"]["type"], "vq_ema")
             self.assertEqual(config["model"]["quantizer"]["codebook_size"], 1024)
+            self.assertEqual(config["training"]["wandb_run_name"], "smoke")
+            self.assertTrue(config["training"]["wandb_id"])
+            self.assertTrue(list((output / "wandb").glob("offline-run-*/run-*.wandb")))
 
 
 if __name__ == "__main__":

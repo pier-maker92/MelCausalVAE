@@ -141,8 +141,13 @@ extra_args: "sm_quantizer.data.train_partitions=[train_clean_100,train_clean_360
 Keep `num_gpus: 1` and precision flags false; this trainer uses one process and
 full precision. Resource defaults follow the existing Narval encoding experiment:
 one 10 GB GPU slice, 8 CPUs, 16 GB RAM and 9 hours. They have not been benchmarked
-on a full training run. `training.wandb_run_name` is accepted as launcher metadata;
-the SM trainer writes JSONL metrics, not WandB events.
+on a full training run. WandB is enabled in this preset via
+`sm_quantizer.training.wandb_mode: online`, with project `dicodec-sm-quantizer`
+and the run name supplied by the launcher. Set the mode to `offline` or `disabled`
+as needed. Standalone YAML exposes the same fields under `training`, disabled by
+default. Train/validation losses are logged alongside JSONL metrics. The run ID
+is saved in checkpoints and reused on online resume unless explicitly overridden.
+The WandB context is closed on completion, early return or training failure.
 
 ### Standalone CLI
 
