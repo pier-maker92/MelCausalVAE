@@ -10,7 +10,7 @@ import torch
 import yaml
 from torch.utils.data import DataLoader
 
-from .configs import Config, load_config
+from .configs import Config, from_dict, load_config
 from .data import LatentCollator, build_dataset
 from .model import SMQuantizer
 
@@ -34,15 +34,16 @@ def make_loader(dataset, config: Config, epoch: int, shuffle: bool) -> DataLoade
     return DataLoader(
         dataset, batch_size=config.training.batch_size, shuffle=shuffle,
         num_workers=config.training.num_workers, generator=generator,
-        collate_fn=LatentCollator(config.model.latent_dim, config.data.max_frames, config.data.key),
+        collate_fn=LatentCollator(config.model.latent_dim, config.data.max_frames, config.data.key,
+                                 config.data.input, config.data.target),
     )
 
 
 def train_step(model, optimizer, batch, device, grad_clip: float):
     model.train()
     optimizer.zero_grad(set_to_none=True)
-    z, valid = (item.to(device) for item in batch)
-    output = model(z, valid)
+    batch = batch.to(device)
+    output = model(batch.inputs, batch.valid_mask, target=batch.targets)
     if not torch.isfinite(output.loss):
         raise FloatingPointError("Nonfinite training loss.")
     output.loss.backward()
@@ -56,12 +57,13 @@ def train_step(model, optimizer, batch, device, grad_clip: float):
 @torch.no_grad()
 def validate(model, loader, device) -> dict[str, float]:
     model.eval()
-    sums = {name: 0.0 for name in ("flow_loss", "reconstruction_l1", "reconstruction_l2", "commitment_loss")}
+    sums = {name: 0.0 for name in ("flow_loss", "reconstruction_l1", "reconstruction_l2",
+                                  "commitment_loss", "bsq_regularization_loss")}
     frames = pairs = 0
     for batch in loader:
-        z, valid = (item.to(device) for item in batch)
-        output = model(z, valid)
-        n_frames, n_pairs = int(valid.sum()), int(output.next_frame_mask.sum())
+        batch = batch.to(device)
+        output = model(batch.inputs, batch.valid_mask, target=batch.targets)
+        n_frames, n_pairs = int(batch.valid_mask.sum()), int(output.next_frame_mask.sum())
         frames += n_frames
         pairs += n_pairs
         for name in sums:
@@ -71,7 +73,8 @@ def validate(model, loader, device) -> dict[str, float]:
     metrics["loss"] = (weights.flow * metrics["flow_loss"]
                        + weights.reconstruction_l1 * metrics["reconstruction_l1"]
                        + weights.reconstruction_l2 * metrics["reconstruction_l2"]
-                       + weights.commitment * metrics["commitment_loss"])
+                       + weights.commitment * metrics["commitment_loss"]
+                       + weights.bsq_regularization * metrics["bsq_regularization_loss"])
     return metrics
 
 
@@ -89,9 +92,10 @@ def save_checkpoint(path, model, optimizer, config, epoch, batch_index, step):
 
 def restore_checkpoint(path, model, optimizer, config) -> tuple[int, int, int]:
     checkpoint = torch.load(path, map_location="cpu", weights_only=True)
-    if checkpoint["config"]["model"] != asdict(config.model):
+    # Populate added fields with their legacy-compatible defaults before comparing.
+    old = asdict(from_dict(Config, checkpoint["config"]))
+    if old["model"] != asdict(config.model):
         raise ValueError("Resume requires the same model configuration.")
-    old = checkpoint["config"]
     if old["data"] != asdict(config.data) or any(
         old["training"][key] != getattr(config.training, key) for key in ("batch_size", "seed")
     ):

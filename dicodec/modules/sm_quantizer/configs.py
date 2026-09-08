@@ -5,15 +5,37 @@ from pathlib import Path
 
 import yaml
 
+from .fsq_levels import FSQ_LEVELS
+
 
 @dataclass
 class QuantizerConfig:
+    type: str = "vq_ema"
     dim: int = 64
     codebook_size: int = 1024
     decay: float = 0.99
     eps: float = 1e-5
     reset_dead_codes: bool = True
     reset_every_forward: int = 10
+    entropy_temperature: float = 1.0
+
+    def __post_init__(self):
+        if self.type not in {"vq_ema", "bsq", "fsq"}:
+            raise ValueError("quantizer.type must be vq_ema, bsq or fsq.")
+        if self.entropy_temperature <= 0:
+            raise ValueError("entropy_temperature must be positive.")
+        if self.type == "bsq" and (self.codebook_size < 2 or self.codebook_size & (self.codebook_size - 1)):
+            raise ValueError("BSQ codebook_size must be a power of two >= 2.")
+        if self.type == "fsq" and self.codebook_size not in FSQ_LEVELS:
+            raise ValueError(f"FSQ codebook_size must be one of {list(FSQ_LEVELS)}.")
+
+    @property
+    def resolved_dim(self) -> int:
+        if self.type == "bsq":
+            return self.codebook_size.bit_length() - 1
+        if self.type == "fsq":
+            return len(FSQ_LEVELS[self.codebook_size])
+        return self.dim
 
 
 @dataclass
@@ -42,6 +64,7 @@ class LossConfig:
     reconstruction_l1: float = 1.0
     reconstruction_l2: float = 1.0
     commitment: float = 0.25
+    bsq_regularization: float = 0.1
 
 
 @dataclass
@@ -54,7 +77,7 @@ class ModelConfig:
     loss: LossConfig = field(default_factory=LossConfig)
 
     def __post_init__(self):
-        positive = [self.latent_dim, self.projection_hidden_dim, self.quantizer.dim,
+        positive = [self.latent_dim, self.projection_hidden_dim, self.quantizer.resolved_dim,
                     self.quantizer.codebook_size, self.transformer.dim,
                     self.transformer.heads, self.transformer.layers,
                     self.transformer.ff_dim, self.transformer.max_length,
@@ -80,11 +103,31 @@ class DataConfig:
     train_path: str = "data/latents/train"
     validation_path: str | None = None
     key: str = "z"
+    format: str = "pt"
+    input: str = "z"
+    target: str = "z"
+    train_partitions: list[str] = field(default_factory=list)
+    validation_partitions: list[str] = field(default_factory=list)
+    cache_dir: str | None = None
     max_frames: int = 2048
     # Optional importable callable returning a map-style Dataset.
     factory: str | None = None
     train_kwargs: dict = field(default_factory=dict)
     validation_kwargs: dict | None = None
+
+    def __post_init__(self):
+        if self.format not in {"pt", "parquet"}:
+            raise ValueError("data.format must be pt or parquet.")
+        if self.input not in {"z", "z_sem"} or self.target not in {"z", "z_sem"}:
+            raise ValueError("data.input and data.target must be z or z_sem.")
+        for partitions in (self.train_partitions, self.validation_partitions):
+            if not isinstance(partitions, list) or any(
+                not isinstance(p, str) or not p or p in {".", ".."} or Path(p).name != p
+                for p in partitions
+            ):
+                raise ValueError("Partitions must be a list of directory names.")
+            if len(set(partitions)) != len(partitions):
+                raise ValueError("Partitions must not contain duplicates.")
 
 
 @dataclass

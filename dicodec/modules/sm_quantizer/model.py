@@ -17,10 +17,13 @@ class SMQuantizer(nn.Module):
     def __init__(self, config: ModelConfig):
         super().__init__()
         self.config = config
-        self.encoder = projection(config.latent_dim, config.projection_hidden_dim, config.quantizer.dim)
+        # Resolve fixed BSQ/FSQ dimensions before constructing any projections.
+        # Keep EMA's parameter initialization order compatible with old runs.
+        quant_dim = config.quantizer.resolved_dim
+        self.encoder = projection(config.latent_dim, config.projection_hidden_dim, quant_dim)
         self.quantizer = OnlineQuantizer(config.quantizer)
-        self.reconstruction_head = projection(config.quantizer.dim, config.projection_hidden_dim, config.latent_dim)
-        self.decoder = CausalDecoder(config.quantizer.dim, config.transformer)
+        self.reconstruction_head = projection(quant_dim, config.projection_hidden_dim, config.latent_dim)
+        self.decoder = CausalDecoder(quant_dim, config.transformer)
         self.diffusion_head = DiffusionHead(config.latent_dim, config.transformer.dim, config.diffusion)
 
     def validate_input(self, z: torch.Tensor, valid_mask: torch.Tensor | None) -> torch.Tensor:
@@ -43,8 +46,13 @@ class SMQuantizer(nn.Module):
         z = z.detach().masked_fill(~valid.unsqueeze(-1), 0)
         return self.quantizer(self.encoder(z), valid)
 
-    def forward(self, z: torch.Tensor, valid_mask: torch.Tensor | None = None) -> SMQuantizerOutput:
+    def forward(self, z: torch.Tensor, valid_mask: torch.Tensor | None = None,
+                *, target: torch.Tensor | None = None) -> SMQuantizerOutput:
         valid = self.validate_input(z, valid_mask)
+        target = z if target is None else target
+        if target.shape != z.shape or target.device != z.device or target.dtype != z.dtype:
+            raise ValueError("Target must match input shape, device and dtype.")
+        self.validate_input(target, valid)
         pairs = valid[:, :-1] & valid[:, 1:]
         if not pairs.any():
             raise ValueError("Training requires at least one consecutive pair of latent frames.")
@@ -52,22 +60,24 @@ class SMQuantizer(nn.Module):
             raise ValueError("Sequence exceeds transformer.max_length.")
         quantized = self.encode(z, valid)
         reconstruction = self.reconstruction_head(quantized.codes)
-        l1 = F.l1_loss(reconstruction[valid], z[valid].detach())
-        l2 = F.mse_loss(reconstruction[valid], z[valid].detach())
-        # Context at t sees only q[0:t+1]; its target is the next original frame.
+        l1 = F.l1_loss(reconstruction[valid], target[valid].detach())
+        l2 = F.mse_loss(reconstruction[valid], target[valid].detach())
+        # Context at t sees only q[0:t+1]; its target is the next selected frame.
         context = self.decoder(quantized.codes[:, :-1], valid[:, :-1])
-        flow = self.diffusion_head(z[:, 1:], context, pairs)
+        flow = self.diffusion_head(target[:, 1:], context, pairs)
         weights = self.config.loss
         loss = (weights.flow * flow.loss + weights.reconstruction_l1 * l1
-                + weights.reconstruction_l2 * l2 + weights.commitment * quantized.commitment_loss)
+                + weights.reconstruction_l2 * l2 + weights.commitment * quantized.commitment_loss
+                + weights.bsq_regularization * quantized.bsq_regularization_loss)
         return SMQuantizerOutput(
             loss, flow.loss, l1, l2, quantized.commitment_loss, quantized.indices,
             quantized.codes, reconstruction.masked_fill(~valid.unsqueeze(-1), 0), context, pairs,
+            quantized.bsq_regularization_loss,
         )
 
     @torch.no_grad()
     def predict_next(self, z: torch.Tensor, valid_mask: torch.Tensor | None = None, **sampling_kwargs) -> torch.Tensor:
-        """Sample one next frame [B, D] from a latent prefix; call eval() first."""
+        """Sample one frame [B, D] in target space from an input prefix; call eval() first."""
         if self.training:
             raise RuntimeError("Call eval() before prediction to freeze the EMA codebook and dropout.")
         valid = self.validate_input(z, valid_mask)

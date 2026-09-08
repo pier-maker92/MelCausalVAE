@@ -2,12 +2,14 @@ model:
   latent_dim: 64
   projection_hidden_dim: 256
   quantizer:
+    type: vq_ema  # vq_ema | bsq | fsq
     dim: 64
     codebook_size: 1024
     decay: 0.99
     eps: 0.00001
     reset_dead_codes: true
     reset_every_forward: 10
+    entropy_temperature: 1.0
   transformer:
     dim: 256
     heads: 4
@@ -27,9 +29,16 @@ model:
     reconstruction_l1: 1.0
     reconstruction_l2: 1.0
     commitment: 0.25
+    bsq_regularization: 0.1
 data:
-  train_path: data/latents/train
+  format: parquet
+  train_path: /scratch/piermel/datasets/dicodec/librispeech-dicodec-v2-ls-25
+  train_partitions: [train_clean_100, train_clean_360]
   validation_path: null
+  validation_partitions: []
+  input: z  # z | z_sem (attributes.z_sem in Parquet)
+  target: z  # same-frame reconstruction and next-frame prediction
+  cache_dir: null
   key: z
   max_frames: 2048
   factory: null
