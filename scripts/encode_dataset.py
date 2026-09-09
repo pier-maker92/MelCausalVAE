@@ -23,6 +23,8 @@ logger = logging.getLogger(__name__)
 
 MATRIX = pa.list_(pa.list_(pa.float32()))
 SCHEMA = pa.schema([
+    ("id", pa.string()),
+    ("transcript", pa.string()),
     ("z", MATRIX),
     ("attributes", pa.struct([
         ("z_sem", MATRIX), ("z_pros", MATRIX), ("z_mean", MATRIX),
@@ -156,9 +158,9 @@ class ShardWriter:
 def iter_audio_rows(files):
     for path in files:
         parquet = pq.ParquetFile(path)
-        for batch in parquet.iter_batches(batch_size=16, columns=["audio"]):
+        for batch in parquet.iter_batches(batch_size=16, columns=["id", "transcript", "audio"]):
             for row in batch.to_pylist():
-                yield row["audio"], path.parent
+                yield row["audio"], row["id"], row["transcript"], path.parent
 
 
 def iter_audio_batches(files, batch_size):
@@ -191,7 +193,7 @@ def prepare_audio(audio, source_directory, device, sample_rate):
     return [(resample(sample_rate), sample_rate)], [resample(16000)]
 
 
-def encoded_row(output, index=0):
+def encoded_row(output, index, audio_id, transcript):
     import torch
 
     z = output.z[index]
@@ -206,7 +208,7 @@ def encoded_row(output, index=0):
     if any(not torch.isfinite(tensor).all() for tensor in tensors.values()):
         raise ValueError("Encoder returned non-finite latents or attributes.")
     values = {key: tensor.detach().float().cpu().tolist() for key, tensor in tensors.items()}
-    return {"z": values.pop("z"), "attributes": values}
+    return {"id": audio_id, "transcript": transcript, "z": values.pop("z"), "attributes": values}
 
 
 def encode_partitions(model, files, destination, size_limit, batch_size=1):
@@ -230,18 +232,21 @@ def encode_partitions(model, files, destination, size_limit, batch_size=1):
                 with tqdm(total=count, desc=part) as progress:
                     for batch in iter_audio_batches(paths, batch_size):
                         audios, audio16 = [], []
-                        for audio, parent in batch:
+                        ids, transcripts = [], []
+                        for audio, audio_id, transcript, parent in batch:
                             prepared, prepared16 = prepare_audio(
                                 audio, parent, model.device, model.config.sample_rate
                             )
                             audios.extend(prepared)
                             audio16.extend(prepared16)
+                            ids.append(audio_id)
+                            transcripts.append(transcript)
                         features, mask, _, _ = model.extract_features(audios, audio_16khz=audio16)
                         output = model.encode(features, mask, compute_attributes=True)
                         if output.z.shape[0] != len(batch):
                             raise RuntimeError("Encoder output batch size does not match the input.")
                         for index in range(len(batch)):
-                            writer.append(encoded_row(output, index))
+                            writer.append(encoded_row(output, index, ids[index], transcripts[index]))
                         progress.update(len(batch))
                 writer.close()
                 if writer.rows_written != count:

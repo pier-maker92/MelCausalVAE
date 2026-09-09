@@ -17,7 +17,7 @@ sm_quantizer:
       decay: 0.99
       eps: 0.00001
       reset_dead_codes: true
-      reset_every_forward: 10
+      reset_every_forward: 100
     transformer:
       dim: 256
       heads: 4
@@ -50,7 +50,7 @@ sm_quantizer:
     cache_dir: ${oc.env:SLURM_TMPDIR}/sm_quantizer_arrow_cache
   training:
     output_dir: ${training.output_dir}
-    batch_size: 128
+    batch_size: 64
     epochs: 100
     learning_rate: 0.0003
     weight_decay: 0.01
@@ -59,7 +59,6 @@ sm_quantizer:
     seed: 42
     device: cuda
     log_every: 10
-    save_every_steps: 1000
     max_steps: null
     resume: null
     wandb_mode: online
