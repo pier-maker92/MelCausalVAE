@@ -1,19 +1,98 @@
 # @package _global_
-defaults:
-- /settings/dicodec/quantize/ema1024-zsem
-- _self_
-training:
-  output_dir: outputs/sm_quantizer/lm
+# Self-contained experiment: edit all model, data and training parameters here.
+# run_job supplies a unique training.output_dir and training.wandb_run_name.
 sm_quantizer:
   model:
-    simple_reconstruction: false
+    latent_dim: 64
+    projection_hidden_dim: 256
+    encoder:
+      type: mlp
+      hidden_dim: 256
+      layers: 1
+      kernel_size: 3
+      dropout: 0.0
     language_modeling: true
+    simple_reconstruction: false
     asr:
       enabled: false
+      hidden_size: 512
+      layers: 2
+      dropout: 0.1
+      embedding_dim: 256
+      upsample_factor: 1
+      tokenizer: char
+      characters: 'abcdefghijklmnopqrstuvwxyz'' '
+      tokenizer_model: null
+      vocab_size: 1000
+    quantizer:
+      type: vq_ema
+      dim: 64
+      codebook_size: 1024
+      decay: 0.99
+      eps: 1.0e-05
+      reset_dead_codes: true
+      reset_every_forward: 100
+      entropy_temperature: 100.0
+    transformer:
+      dim: 256
+      heads: 4
+      layers: 4
+      ff_dim: 1024
+      dropout: 0.1
+      max_length: 2048
+    diffusion:
+      hidden_dim: 256
+      layers: 3
+      time_dim: 64
+      sigma_min: 0.0
+      sampling_steps: 20
+      temperature: 1.0
     loss:
+      flow: 1.0
       reconstruction_l1: 0.0
       reconstruction_l2: 0.0
-      flow: 1.0
-      asr: 0.0
       commitment: 0.25
       bsq_regularization: 0.1
+      asr: 0.0
+  data:
+    train_path: ${oc.env:SLURM_TMPDIR}/datasets/dicodec/${training.dataset_name}
+    validation_path: null
+    key: z
+    format: parquet
+    input: z_sem
+    target: z_sem
+    text_key: transcript
+    train_partitions:
+    - train_clean_100
+    - train_clean_360
+    validation_partitions: []
+    cache_dir: ${oc.env:SLURM_TMPDIR}/sm_quantizer_arrow_cache
+    max_frames: 2048
+    factory: null
+    train_kwargs: {}
+    validation_kwargs: null
+  training:
+    bf16: ${training.bf16}
+    output_dir: ${training.output_dir}
+    batch_size: 64
+    epochs: 100
+    learning_rate: 0.0003
+    weight_decay: 0.01
+    grad_clip: 1.0
+    num_workers: 0
+    seed: 42
+    device: cuda
+    log_every: 10
+    save_every_steps: 1000
+    max_save_limit: 3
+    max_steps: null
+    resume: null
+    wandb_mode: online
+    wandb_project: dicodec-sm-quantizer
+    wandb_run_name: ${training.wandb_run_name}
+    wandb_id: null
+training:
+  dataset_name: librispeech-dicodec-v2-ls-25
+  output_dir: outputs/sm_quantizer/lm
+  bf16: true
+  fp16: false
