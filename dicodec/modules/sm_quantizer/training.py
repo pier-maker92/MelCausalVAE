@@ -3,6 +3,7 @@
 import argparse
 import json
 import random
+import shutil
 import sys
 from dataclasses import asdict
 from pathlib import Path
@@ -15,6 +16,7 @@ from .configs import Config, from_dict, load_config
 from .data import LatentCollator, build_dataset
 from .model import SMQuantizer
 from .tracking import init_wandb
+from .wer import word_error_rate
 
 
 def resolve_device(name: str) -> torch.device:
@@ -37,7 +39,8 @@ def make_loader(dataset, config: Config, epoch: int, shuffle: bool) -> DataLoade
         dataset, batch_size=config.training.batch_size, shuffle=shuffle,
         num_workers=config.training.num_workers, generator=generator,
         collate_fn=LatentCollator(config.model.latent_dim, config.data.max_frames, config.data.key,
-                                 config.data.input, config.data.target),
+                                 config.data.input, config.data.target, config.model.asr,
+                                 config.data.text_key, config.model.language_modeling),
     )
 
 
@@ -45,7 +48,8 @@ def train_step(model, optimizer, batch, device, grad_clip: float):
     model.train()
     optimizer.zero_grad(set_to_none=True)
     batch = batch.to(device)
-    output = model(batch.inputs, batch.valid_mask, target=batch.targets)
+    output = model(batch.inputs, batch.valid_mask, target=batch.targets,
+                   text_targets=batch.text_targets, text_lengths=batch.text_lengths)
     if not torch.isfinite(output.loss):
         raise FloatingPointError("Nonfinite training loss.")
     output.loss.backward()
@@ -60,13 +64,20 @@ def train_step(model, optimizer, batch, device, grad_clip: float):
 def validate(model, loader, device) -> dict[str, float]:
     model.eval()
     sums = {name: 0.0 for name in ("flow_loss", "reconstruction_l1", "reconstruction_l2",
-                                  "commitment_loss", "bsq_regularization_loss")}
+                                  "commitment_loss", "bsq_regularization_loss", "asr_loss")}
     frames = pairs = 0
     batch_statistics = {"perplexity": 0.0, "codebook_utilization_pct": 0.0}
     num_batches = 0
+    examples = 0
+    wer_errors = wer_words = 0
     for batch in loader:
         batch = batch.to(device)
-        output = model(batch.inputs, batch.valid_mask, target=batch.targets)
+        output = model(batch.inputs, batch.valid_mask, target=batch.targets,
+                       text_targets=batch.text_targets, text_lengths=batch.text_lengths)
+        examples += batch.inputs.shape[0]
+        if output.wer_errors is not None:
+            wer_errors += output.wer_errors
+            wer_words += output.wer_words
         num_batches += 1
         for name in batch_statistics:
             batch_statistics[name] += getattr(output, name).item()
@@ -74,16 +85,23 @@ def validate(model, loader, device) -> dict[str, float]:
         frames += n_frames
         pairs += n_pairs
         for name in sums:
-            sums[name] += getattr(output, name).item() * (n_pairs if name == "flow_loss" else n_frames)
-    metrics = {name: total / (pairs if name == "flow_loss" else frames) for name, total in sums.items()}
+            count = batch.inputs.shape[0] if name == "asr_loss" else n_pairs if name == "flow_loss" else n_frames
+            sums[name] += getattr(output, name).item() * count
+    metrics = {name: total / max(1, examples if name == "asr_loss" else pairs if name == "flow_loss" else frames)
+               for name, total in sums.items()}
     # Epoch summary is the mean of batch metrics, not a dataset-wide histogram.
     metrics.update({name: total / num_batches for name, total in batch_statistics.items()})
+    if model.config.asr.enabled and model.config.loss.asr > 0:
+        metrics["wer"] = word_error_rate(wer_errors, wer_words)
     weights = model.config.loss
     metrics["loss"] = (weights.flow * metrics["flow_loss"]
                        + weights.reconstruction_l1 * metrics["reconstruction_l1"]
                        + weights.reconstruction_l2 * metrics["reconstruction_l2"]
                        + weights.commitment * metrics["commitment_loss"]
-                       + weights.bsq_regularization * metrics["bsq_regularization_loss"])
+                       + weights.bsq_regularization * metrics["bsq_regularization_loss"]
+                       + weights.asr * metrics["asr_loss"])
+    if model.config.quantizer.type != "bsq":
+        metrics.pop("bsq_regularization_loss")
     return metrics
 
 
@@ -120,6 +138,18 @@ def restore_checkpoint(path, model, optimizer, config) -> tuple[int, int, int]:
     return checkpoint["epoch"], checkpoint["batch_index"], checkpoint["step"]
 
 
+def retain_step_checkpoint(path: Path, step: int, limit: int):
+    """Archive the completed last.pt, then prune only our numbered snapshots."""
+    destination = path.parent / f"step_{step}.pt"
+    temporary = destination.with_suffix(".tmp")
+    shutil.copyfile(path, temporary)
+    temporary.replace(destination)
+    snapshots = [p for p in path.parent.glob("step_*.pt") if p.stem[5:].isdigit()]
+    snapshots.sort(key=lambda p: int(p.stem[5:]))
+    for obsolete in snapshots[:-limit]:
+        obsolete.unlink()
+
+
 def log_metrics(path: Path, split: str, step: int, metrics: dict, run=None):
     line = json.dumps({"split": split, "step": step, **metrics})
     print(line, flush=True)
@@ -133,8 +163,8 @@ def train(config: Config):
     settings = config.training
     seed_everything(settings.seed)
     device = resolve_device(settings.device)
-    train_data = build_dataset(config.data)
-    validation_data = build_dataset(config.data, validation=True)
+    train_data = build_dataset(config.data, asr_enabled=config.model.asr.enabled)
+    validation_data = build_dataset(config.data, validation=True, asr_enabled=config.model.asr.enabled)
     model = SMQuantizer(config.model).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=settings.learning_rate, weight_decay=settings.weight_decay)
     epoch, batch_index, step = (0, 0, 0)
@@ -157,6 +187,7 @@ def train(config: Config):
                     continue
                 metrics = train_step(model, optimizer, batch, device, settings.grad_clip)
                 metrics["epoch"] = current_epoch + 1
+                metrics["total_epochs"] = settings.epochs
                 step += 1
                 if index == 0 or (current_epoch == epoch and index == batch_index) or step % settings.log_every == 0:
                     log_metrics(metrics_path, "train", step, metrics, run)
@@ -165,14 +196,19 @@ def train(config: Config):
                 # At epoch end, save after validation instead of writing twice.
                 if stopping or (periodic_save and index + 1 < len(loader)):
                     save_checkpoint(checkpoint_path, model, optimizer, config, current_epoch, index + 1, step)
+                    if periodic_save:
+                        retain_step_checkpoint(checkpoint_path, step, settings.max_save_limit)
                 if stopping:
                     return
             if validation_data is not None:
                 validation_loader = make_loader(validation_data, config, current_epoch, shuffle=False)
                 metrics = validate(model, validation_loader, device)
                 metrics["epoch"] = current_epoch + 1
+                metrics["total_epochs"] = settings.epochs
                 log_metrics(metrics_path, "validation", step, metrics, run)
             save_checkpoint(checkpoint_path, model, optimizer, config, current_epoch + 1, 0, step)
+            if settings.save_every_steps is not None and step % settings.save_every_steps == 0:
+                retain_step_checkpoint(checkpoint_path, step, settings.max_save_limit)
 
 
 def main():

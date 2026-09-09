@@ -1,0 +1,19 @@
+# @package _global_
+defaults:
+- /settings/dicodec/quantize/ema1024-zsem
+- _self_
+training:
+  output_dir: outputs/sm_quantizer/asr
+sm_quantizer:
+  model:
+    simple_reconstruction: false
+    language_modeling: false
+    asr:
+      enabled: true
+    loss:
+      reconstruction_l1: 0.0
+      reconstruction_l2: 0.0
+      flow: 0.0
+      asr: 1.0
+      commitment: 0.25
+      bsq_regularization: 0.1

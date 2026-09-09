@@ -55,6 +55,8 @@ def select_latents(z: torch.Tensor, q_sem: torch.Tensor, attributes, mode: str) 
 
 @torch.inference_mode()
 def reconstruct(model, quantizer: SMQuantizer, waveform: torch.Tensor, target_waveform: torch.Tensor | None = None, mode: str = "full") -> torch.Tensor:
+    if quantizer.reconstruction_head is None:
+        raise ValueError("This checkpoint has no reconstruction head: audio reconstruction requires a reconstruction-trained model.")
     sample_rate = model.config.sample_rate
     audios = [(waveform, sample_rate)]
     features, padding, _, _ = model.extract_features(audios)

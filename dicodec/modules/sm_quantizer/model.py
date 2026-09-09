@@ -3,6 +3,8 @@ from torch import nn
 from torch.nn import functional as F
 
 from .configs import ModelConfig
+from .asr import ASRHead
+from .encoder import build_encoder
 from .diffusion import DiffusionHead
 from .output_dataclasses import QuantizerOutput, SMQuantizerOutput
 from .quantizer import OnlineQuantizer
@@ -20,11 +22,16 @@ class SMQuantizer(nn.Module):
         # Resolve fixed BSQ/FSQ dimensions before constructing any projections.
         # Keep EMA's parameter initialization order compatible with old runs.
         quant_dim = config.quantizer.resolved_dim
-        self.encoder = projection(config.latent_dim, config.projection_hidden_dim, quant_dim)
+        self.encoder = build_encoder(config.latent_dim, quant_dim, config.projection_hidden_dim, config.encoder)
         self.quantizer = OnlineQuantizer(config.quantizer)
-        self.reconstruction_head = projection(quant_dim, config.projection_hidden_dim, config.latent_dim)
-        self.decoder = CausalDecoder(quant_dim, config.transformer)
-        self.diffusion_head = DiffusionHead(config.latent_dim, config.transformer.dim, config.diffusion)
+        self.reconstruction_head = (
+            projection(quant_dim, config.projection_hidden_dim, config.latent_dim)
+            if config.loss.reconstruction_l1 > 0 or config.loss.reconstruction_l2 > 0 else None
+        )
+        self.decoder = CausalDecoder(quant_dim, config.transformer) if config.language_modeling else None
+        self.diffusion_head = (DiffusionHead(config.latent_dim, config.transformer.dim, config.diffusion)
+                               if config.language_modeling else None)
+        self.asr_head = ASRHead(quant_dim, config.asr) if config.asr.enabled else None
 
     def validate_input(self, z: torch.Tensor, valid_mask: torch.Tensor | None) -> torch.Tensor:
         if z.ndim != 3 or z.shape[-1] != self.config.latent_dim or min(z.shape[:2]) < 1:
@@ -47,33 +54,56 @@ class SMQuantizer(nn.Module):
         return self.quantizer(self.encoder(z), valid)
 
     def forward(self, z: torch.Tensor, valid_mask: torch.Tensor | None = None,
-                *, target: torch.Tensor | None = None) -> SMQuantizerOutput:
+                *, target: torch.Tensor | None = None, text_targets: torch.Tensor | None = None,
+                text_lengths: torch.Tensor | None = None) -> SMQuantizerOutput:
         valid = self.validate_input(z, valid_mask)
         target = z if target is None else target
         if target.shape != z.shape or target.device != z.device or target.dtype != z.dtype:
             raise ValueError("Target must match input shape, device and dtype.")
         self.validate_input(target, valid)
         pairs = valid[:, :-1] & valid[:, 1:]
-        if not pairs.any():
+        if self.config.language_modeling and not pairs.any():
             raise ValueError("Training requires at least one consecutive pair of latent frames.")
-        if z.shape[1] > self.config.transformer.max_length:
+        if self.config.language_modeling and z.shape[1] > self.config.transformer.max_length:
             raise ValueError("Sequence exceeds transformer.max_length.")
+        if self.asr_head is not None:
+            # Fail before quantization to avoid updating EMA on an invalid batch.
+            self.asr_head.validate_targets(text_targets, text_lengths, valid.sum(1) * self.config.asr.upsample_factor)
         quantized = self.encode(z, valid)
-        reconstruction = self.reconstruction_head(quantized.codes)
-        l1 = F.l1_loss(reconstruction[valid], target[valid].detach())
-        l2 = F.mse_loss(reconstruction[valid], target[valid].detach())
+        reconstruction = None
+        l1, l2 = z.new_zeros(()), z.new_zeros(())
+        if self.reconstruction_head is not None:
+            reconstruction = self.reconstruction_head(quantized.codes)
+            if self.config.loss.reconstruction_l1 > 0:
+                l1 = F.l1_loss(reconstruction[valid], target[valid].detach())
+            if self.config.loss.reconstruction_l2 > 0:
+                l2 = F.mse_loss(reconstruction[valid], target[valid].detach())
+            reconstruction = reconstruction.masked_fill(~valid.unsqueeze(-1), 0)
         # Context at t sees only q[0:t+1]; its target is the next selected frame.
-        context = self.decoder(quantized.codes[:, :-1], valid[:, :-1])
-        flow = self.diffusion_head(target[:, 1:], context, pairs)
+        context = None
+        flow_loss = z.new_zeros(())
+        if self.config.language_modeling:
+            context = self.decoder(quantized.codes[:, :-1], valid[:, :-1])
+            flow_loss = self.diffusion_head(target[:, 1:], context, pairs).loss
+        asr_loss = z.new_zeros(())
+        asr_logits = None
+        wer_errors = wer_words = None
+        if self.asr_head is not None:
+            asr = self.asr_head(quantized.codes, valid, text_targets, text_lengths)
+            asr_loss, asr_logits = asr.loss, asr.logits
+            if self.config.loss.asr > 0:
+                wer_errors, wer_words = self.asr_head.word_error_counts(
+                    asr.logits, asr.input_lengths, text_targets, text_lengths)
         weights = self.config.loss
-        loss = (weights.flow * flow.loss + weights.reconstruction_l1 * l1
+        loss = (weights.flow * flow_loss + weights.reconstruction_l1 * l1
                 + weights.reconstruction_l2 * l2 + weights.commitment * quantized.commitment_loss
-                + weights.bsq_regularization * quantized.bsq_regularization_loss)
+                + weights.bsq_regularization * quantized.bsq_regularization_loss + weights.asr * asr_loss)
         return SMQuantizerOutput(
-            loss, flow.loss, l1, l2, quantized.commitment_loss, quantized.indices,
-            quantized.codes, reconstruction.masked_fill(~valid.unsqueeze(-1), 0), context, pairs,
+            loss, flow_loss, l1, l2, quantized.commitment_loss, quantized.indices,
+            quantized.codes, reconstruction, context, pairs,
             quantized.bsq_regularization_loss,
             quantized.perplexity, quantized.codebook_utilization_pct,
+            asr_loss, asr_logits, wer_errors, wer_words, self.config.quantizer.type == "bsq",
         )
 
     @torch.no_grad()
@@ -81,6 +111,8 @@ class SMQuantizer(nn.Module):
         """Sample one frame [B, D] in target space from an input prefix; call eval() first."""
         if self.training:
             raise RuntimeError("Call eval() before prediction to freeze the EMA codebook and dropout.")
+        if not self.config.language_modeling:
+            raise RuntimeError("predict_next requires language_modeling=true.")
         valid = self.validate_input(z, valid_mask)
         codes = self.encode(z, valid).codes
         context = self.decoder(codes, valid)

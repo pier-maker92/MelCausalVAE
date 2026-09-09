@@ -1,6 +1,25 @@
 model:
   latent_dim: 64
   projection_hidden_dim: 256
+  encoder:
+    type: mlp  # mlp | causal_conv
+    hidden_dim: null  # fallback to projection_hidden_dim; increase independently
+    layers: 1
+    kernel_size: 3
+    dropout: 0.0
+  simple_reconstruction: false  # true selects only L1 + L2
+  language_modeling: true
+  asr:
+    enabled: false
+    embedding_dim: 256
+    hidden_size: 512
+    layers: 2
+    dropout: 0.1
+    upsample_factor: 1
+    tokenizer: char  # char | sentencepiece
+    characters: "abcdefghijklmnopqrstuvwxyz' "
+    tokenizer_model: null
+    vocab_size: 1000  # SentencePiece vocabulary, excluding CTC blank
   quantizer:
     type: vq_ema  # vq_ema | bsq | fsq
     dim: 64
@@ -25,12 +44,14 @@ model:
     sampling_steps: 20
     temperature: 1.0
   loss:
+    asr: 1.0
     flow: 1.0
     reconstruction_l1: 1.0
     reconstruction_l2: 1.0
     commitment: 0.25
     bsq_regularization: 0.1
 data:
+  text_key: transcript
   format: parquet
   train_path: /scratch/piermel/datasets/dicodec/librispeech-dicodec-v2-ls-25
   train_partitions: [train_clean_100, train_clean_360]
@@ -56,6 +77,7 @@ training:
   device: auto
   log_every: 10
   save_every_steps: 1000  # null disables periodic saving; epoch-end saves remain
+  max_save_limit: 3  # periodic snapshots; last.pt is retained separately
   max_steps: null
   resume: null
   wandb_mode: disabled  # online | offline | disabled

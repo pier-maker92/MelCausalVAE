@@ -17,7 +17,7 @@ class QuantizerConfig:
     eps: float = 1e-5
     reset_dead_codes: bool = True
     reset_every_forward: int = 10
-    entropy_temperature: float = 1.0
+    entropy_temperature: float = 100.0
 
     def __post_init__(self):
         if self.type not in {"vq_ema", "bsq", "fsq"}:
@@ -59,30 +59,96 @@ class DiffusionConfig:
 
 
 @dataclass
+class EncoderConfig:
+    type: str = "mlp"
+    hidden_dim: int | None = None  # null preserves projection_hidden_dim for old checkpoints
+    layers: int = 1
+    kernel_size: int = 3
+    dropout: float = 0.0
+
+    def __post_init__(self):
+        if self.type not in {"mlp", "causal_conv"}:
+            raise ValueError("encoder.type must be mlp or causal_conv.")
+        if self.layers < 1 or self.kernel_size < 1 or (self.hidden_dim is not None and self.hidden_dim < 1):
+            raise ValueError("Encoder dimensions and depths must be positive.")
+        if not 0 <= self.dropout < 1:
+            raise ValueError("encoder.dropout must be in [0, 1).")
+
+
+@dataclass
+class ASRConfig:
+    enabled: bool = False
+    hidden_size: int = 512
+    layers: int = 2
+    dropout: float = 0.1
+    embedding_dim: int = 256
+    upsample_factor: int = 1
+    tokenizer: str = "char"  # char or sentencepiece (BPE/unigram model)
+    characters: str = "abcdefghijklmnopqrstuvwxyz' "
+    tokenizer_model: str | None = None
+    vocab_size: int = 1000  # SentencePiece vocabulary, excluding the added CTC blank
+
+    @property
+    def num_tokens(self) -> int:
+        return len(self.characters) if self.tokenizer == "char" else self.vocab_size
+
+    def __post_init__(self):
+        if min(self.hidden_size, self.layers, self.embedding_dim, self.upsample_factor, self.vocab_size) < 1:
+            raise ValueError("ASR dimensions and upsample_factor must be positive.")
+        if not 0 <= self.dropout < 1 or self.tokenizer not in {"char", "sentencepiece"}:
+            raise ValueError("Invalid ASR dropout or tokenizer.")
+        if not self.characters or len(set(self.characters)) != len(self.characters):
+            raise ValueError("ASR characters must be nonempty and unique.")
+        if self.enabled and self.tokenizer == "sentencepiece" and not self.tokenizer_model:
+            raise ValueError("ASR sentencepiece requires tokenizer_model.")
+
+
+@dataclass
 class LossConfig:
     flow: float = 1.0
     reconstruction_l1: float = 1.0
     reconstruction_l2: float = 1.0
     commitment: float = 0.25
     bsq_regularization: float = 0.1
+    asr: float = 1.0
 
 
 @dataclass
 class ModelConfig:
     latent_dim: int = 64
     projection_hidden_dim: int = 256
+    encoder: EncoderConfig = field(default_factory=EncoderConfig)
+    language_modeling: bool = True
+    simple_reconstruction: bool = False
+    asr: ASRConfig = field(default_factory=ASRConfig)
     quantizer: QuantizerConfig = field(default_factory=QuantizerConfig)
     transformer: TransformerConfig = field(default_factory=TransformerConfig)
     diffusion: DiffusionConfig = field(default_factory=DiffusionConfig)
     loss: LossConfig = field(default_factory=LossConfig)
 
     def __post_init__(self):
-        positive = [self.latent_dim, self.projection_hidden_dim, self.quantizer.resolved_dim,
-                    self.quantizer.codebook_size, self.transformer.dim,
-                    self.transformer.heads, self.transformer.layers,
-                    self.transformer.ff_dim, self.transformer.max_length,
-                    self.diffusion.hidden_dim, self.diffusion.layers,
-                    self.diffusion.time_dim, self.diffusion.sampling_steps]
+        if self.simple_reconstruction:
+            self.language_modeling = False
+            self.asr.enabled = False
+            self.loss.flow = 0.0
+            self.loss.asr = 0.0
+            self.loss.commitment = 0.0
+            self.loss.bsq_regularization = 0.0
+        positive = [
+            self.latent_dim,
+            self.projection_hidden_dim,
+            self.quantizer.resolved_dim,
+            self.quantizer.codebook_size,
+            self.transformer.dim,
+            self.transformer.heads,
+            self.transformer.layers,
+            self.transformer.ff_dim,
+            self.transformer.max_length,
+            self.diffusion.hidden_dim,
+            self.diffusion.layers,
+            self.diffusion.time_dim,
+            self.diffusion.sampling_steps,
+        ]
         if any(value <= 0 for value in positive):
             raise ValueError("Model dimensions, depths and sampling_steps must be positive.")
         if self.transformer.dim % self.transformer.heads:
@@ -106,6 +172,7 @@ class DataConfig:
     format: str = "pt"
     input: str = "z"
     target: str = "z"
+    text_key: str = "transcript"
     train_partitions: list[str] = field(default_factory=list)
     validation_partitions: list[str] = field(default_factory=list)
     cache_dir: str | None = None
@@ -121,10 +188,7 @@ class DataConfig:
         if self.input not in {"z", "z_sem"} or self.target not in {"z", "z_sem"}:
             raise ValueError("data.input and data.target must be z or z_sem.")
         for partitions in (self.train_partitions, self.validation_partitions):
-            if not isinstance(partitions, list) or any(
-                not isinstance(p, str) or not p or p in {".", ".."} or Path(p).name != p
-                for p in partitions
-            ):
+            if not isinstance(partitions, list) or any(not isinstance(p, str) or not p or p in {".", ".."} or Path(p).name != p for p in partitions):
                 raise ValueError("Partitions must be a list of directory names.")
             if len(set(partitions)) != len(partitions):
                 raise ValueError("Partitions must not contain duplicates.")
@@ -143,6 +207,7 @@ class TrainingConfig:
     device: str = "auto"
     log_every: int = 10
     save_every_steps: int | None = None
+    max_save_limit: int = 3
     max_steps: int | None = None
     resume: str | None = None
     wandb_mode: str = "disabled"
@@ -151,11 +216,11 @@ class TrainingConfig:
     wandb_id: str | None = None
 
     def __post_init__(self):
+        if type(self.max_save_limit) is not int or self.max_save_limit < 1:
+            raise ValueError("max_save_limit must be a positive integer.")
         if self.wandb_mode not in {"online", "offline", "disabled"}:
             raise ValueError("wandb_mode must be online, offline or disabled.")
-        if self.save_every_steps is not None and (
-            type(self.save_every_steps) is not int or self.save_every_steps <= 0
-        ):
+        if self.save_every_steps is not None and (type(self.save_every_steps) is not int or self.save_every_steps <= 0):
             raise ValueError("save_every_steps must be a positive integer or null.")
 
 
@@ -169,7 +234,7 @@ class Config:
         t = self.training
         if min(t.batch_size, t.epochs, t.log_every, self.data.max_frames) <= 0:
             raise ValueError("Batch size, epochs, log_every and max_frames must be positive.")
-        if self.data.max_frames < 2 or self.data.max_frames > self.model.transformer.max_length:
+        if self.model.language_modeling and (self.data.max_frames < 2 or self.data.max_frames > self.model.transformer.max_length):
             raise ValueError("data.max_frames must be in [2, transformer.max_length].")
         if t.num_workers < 0 or t.learning_rate <= 0 or t.weight_decay < 0 or t.grad_clip < 0:
             raise ValueError("Invalid optimizer or worker settings.")
