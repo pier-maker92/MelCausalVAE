@@ -6,9 +6,9 @@ sm_quantizer:
     latent_dim: 64
     projection_hidden_dim: 256
     encoder:
-      type: mlp
-      hidden_dim: 256
-      layers: 1
+      type: causal_conv
+      hidden_dim: 512
+      layers: 4
       kernel_size: 3
       dropout: 0.0
     language_modeling: false
@@ -72,10 +72,9 @@ sm_quantizer:
     train_kwargs: {}
     validation_kwargs: null
   training:
-    bf16: ${training.bf16}
     output_dir: ${training.output_dir}
     batch_size: 64
-    epochs: 100
+    epochs: 10
     learning_rate: 0.0003
     weight_decay: 0.01
     grad_clip: 1.0
