@@ -88,7 +88,7 @@ wavlm_module_config:
   feature_extractor_config:
     layer: 18
     sampling_rate: 16000
-    normalize: false
+    normalize: true
   speaker_encoder_config:
     sampling_rate: 16000
     embedding_dim: 1024

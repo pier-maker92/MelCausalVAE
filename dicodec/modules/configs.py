@@ -205,7 +205,7 @@ class MelSpectrogramConfig:
 class WavLMConfig:
     layer: int
     sampling_rate: int
-    normalize: bool = False
+    normalize: bool = True
 
 
 @dataclass(kw_only=True)

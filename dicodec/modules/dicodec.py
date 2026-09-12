@@ -171,7 +171,19 @@ class Dicodec(torch.nn.Module):
         return normalized.masked_fill(padding, 0.0).to(features.dtype)
 
     def encode(self, features, padding_mask, **kwargs):
-        encoder_output = self.encoder(x=self._normalize_ssl_features(features, padding_mask=padding_mask), padding_mask=padding_mask, step=kwargs.get("training_step", None))
+        normalize_ssl_features = kwargs.get("normalize_ssl_features")
+        if normalize_ssl_features is None:
+            normalize_ssl_features = self.wavlm_extractor is None
+        encoder_input = (
+            self._normalize_ssl_features(features, padding_mask=padding_mask)
+            if normalize_ssl_features
+            else features
+        )
+        encoder_output = self.encoder(
+            x=encoder_input,
+            padding_mask=padding_mask,
+            step=kwargs.get("training_step", None),
+        )
         if self.external_semantic_quantizer is not None:
             encoder_output.quantizer_output = self.quantize(encoder_output.z, padding_mask=encoder_output.padding_mask)
         if kwargs.get("compute_attributes", False):
