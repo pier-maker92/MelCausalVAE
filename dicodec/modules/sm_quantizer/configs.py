@@ -81,6 +81,7 @@ class ASRConfig:
     curriculum: bool = False
     curriculum_start_pct: float = 70.0
     curriculum_end_pct: float = 0.0
+    # Multiplier of the regular L1/L2 weights, independent of the ASR bypass.
     curriculum_reconstruction_start_weight: float = 1.0
     curriculum_reconstruction_end_weight: float = 0.0
     hidden_size: int = 512
@@ -135,14 +136,14 @@ class ModelConfig:
     diffusion: DiffusionConfig = field(default_factory=DiffusionConfig)
     loss: LossConfig = field(default_factory=LossConfig)
 
+    @property
+    def reconstruction_enabled(self) -> bool:
+        # ASR explicitly opts in; preserve weighted reconstruction in legacy LM configs.
+        return (self.simple_reconstruction or not self.asr.enabled) and (
+            self.loss.reconstruction_l1 > 0 or self.loss.reconstruction_l2 > 0
+        )
+
     def __post_init__(self):
-        if self.simple_reconstruction:
-            self.language_modeling = False
-            self.asr.enabled = False
-            self.loss.flow = 0.0
-            self.loss.asr = 0.0
-            self.loss.commitment = 0.0
-            self.loss.bsq_regularization = 0.0
         positive = [
             self.latent_dim,
             self.projection_hidden_dim,

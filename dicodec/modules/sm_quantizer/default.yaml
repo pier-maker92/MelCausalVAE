@@ -7,14 +7,14 @@ model:
     layers: 1
     kernel_size: 3
     dropout: 0.0
-  simple_reconstruction: false  # true selects only L1 + L2
+  simple_reconstruction: false  # opt in to L1 + L2 alongside ASR; does not disable other tasks
   language_modeling: true
   asr:
     enabled: false
     curriculum: false
     curriculum_start_pct: 70.0
     curriculum_end_pct: 0.0
-    curriculum_reconstruction_start_weight: 1.0
+    curriculum_reconstruction_start_weight: 1.0  # recon multiplier, independent of curriculum bypass
     curriculum_reconstruction_end_weight: 0.0
     embedding_dim: 256
     hidden_size: 512

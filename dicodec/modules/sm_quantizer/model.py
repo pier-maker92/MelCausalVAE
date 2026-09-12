@@ -26,18 +26,7 @@ class SMQuantizer(nn.Module):
         self.quantizer = OnlineQuantizer(config.quantizer)
         self.reconstruction_head = (
             projection(quant_dim, config.projection_hidden_dim, config.latent_dim)
-            if (
-                config.loss.reconstruction_l1 > 0
-                or config.loss.reconstruction_l2 > 0
-                or (
-                    config.asr.enabled
-                    and config.asr.curriculum
-                    and max(
-                        config.asr.curriculum_reconstruction_start_weight,
-                        config.asr.curriculum_reconstruction_end_weight,
-                    ) > 0
-                )
-            ) else None
+            if config.reconstruction_enabled else None
         )
         self.decoder = CausalDecoder(quant_dim, config.transformer) if config.language_modeling else None
         self.diffusion_head = (DiffusionHead(config.latent_dim, config.transformer.dim, config.diffusion)
@@ -87,7 +76,7 @@ class SMQuantizer(nn.Module):
                 *, target: torch.Tensor | None = None, text_targets: torch.Tensor | None = None,
                 text_lengths: torch.Tensor | None = None,
                 asr_curriculum_ratio: float = 0.0,
-                asr_curriculum_reconstruction_weight: float = 0.0) -> SMQuantizerOutput:
+                asr_curriculum_reconstruction_weight: float | None = None) -> SMQuantizerOutput:
         valid = self.validate_input(z, valid_mask)
         target = z if target is None else target
         if target.shape != z.shape or target.device != z.device or target.dtype != z.dtype:
@@ -106,6 +95,7 @@ class SMQuantizer(nn.Module):
         quantized = self.quantizer(encoded, valid)
         reconstruction = None
         l1, l2 = z.new_zeros(()), z.new_zeros(())
+        reconstruction_weight = self.reconstruction_weight(asr_curriculum_reconstruction_weight)
         if self.reconstruction_head is not None:
             reconstruction = self.reconstruction_head(quantized.codes)
             if self.config.loss.reconstruction_l1 > 0:
@@ -133,10 +123,8 @@ class SMQuantizer(nn.Module):
                 wer_errors, wer_words = self.asr_head.word_error_counts(
                     asr.logits, asr.input_lengths, text_targets, text_lengths)
         weights = self.config.loss
-        curriculum_reconstruction = l1 + l2
-        loss = (weights.flow * flow_loss + weights.reconstruction_l1 * l1
-                + weights.reconstruction_l2 * l2
-                + asr_curriculum_reconstruction_weight * curriculum_reconstruction
+        loss = (weights.flow * flow_loss
+                + reconstruction_weight * (weights.reconstruction_l1 * l1 + weights.reconstruction_l2 * l2)
                 + weights.commitment * quantized.commitment_loss
                 + weights.bsq_regularization * quantized.bsq_regularization_loss + weights.asr * asr_loss)
         return SMQuantizerOutput(
@@ -146,8 +134,16 @@ class SMQuantizer(nn.Module):
             quantized.perplexity, quantized.codebook_utilization_pct,
             asr_loss, asr_logits, wer_errors, wer_words, self.config.quantizer.type == "bsq",
             asr_curriculum_pct,
-            asr_curriculum_reconstruction_weight,
+            reconstruction_weight,
         )
+
+    def reconstruction_weight(self, scheduled_weight: float | None = None) -> float:
+        if self.reconstruction_head is None:
+            return 0.0
+        if not self.config.asr.enabled:
+            return 1.0
+        return (self.config.asr.curriculum_reconstruction_start_weight
+                if scheduled_weight is None else scheduled_weight)
 
     @torch.no_grad()
     def predict_next(self, z: torch.Tensor, valid_mask: torch.Tensor | None = None, **sampling_kwargs) -> torch.Tensor:

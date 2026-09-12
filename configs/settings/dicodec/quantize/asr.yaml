@@ -12,13 +12,13 @@ sm_quantizer:
       kernel_size: 3
       dropout: 0.0
     language_modeling: false
-    simple_reconstruction: false
+    simple_reconstruction: true  # false disables reconstruction without changing ASR
     asr:
       enabled: true
-      curriculum: true
+      curriculum: false  # optional continuous-code bypass; independent of recon decay
       curriculum_start_pct: 70.0
       curriculum_end_pct: 0.0
-      curriculum_reconstruction_start_weight: 1.0
+      curriculum_reconstruction_start_weight: 1.0  # linear L1/L2 multiplier over training epochs
       curriculum_reconstruction_end_weight: 0.0
       hidden_size: 512
       layers: 2
@@ -54,8 +54,8 @@ sm_quantizer:
       temperature: 1.0
     loss:
       flow: 0.0
-      reconstruction_l1: 0.0
-      reconstruction_l2: 0.0
+      reconstruction_l1: 1.0
+      reconstruction_l2: 1.0
       commitment: 0.25
       bsq_regularization: 0.1
       asr: 1.0

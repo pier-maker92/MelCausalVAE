@@ -70,8 +70,7 @@ class SMQuantizerOutput:
         metrics = {name: getattr(self, name).detach().item() for name in names}
         if self.asr_curriculum_pct:
             metrics["asr_curriculum_pct"] = self.asr_curriculum_pct
-        if self.asr_curriculum_reconstruction_weight:
-            metrics["asr_curriculum_reconstruction_weight"] = self.asr_curriculum_reconstruction_weight
+        metrics["asr_curriculum_reconstruction_weight"] = self.asr_curriculum_reconstruction_weight
         if not self.bsq_active:
             metrics.pop("bsq_regularization_loss")
         if self.wer_errors is not None:

@@ -56,8 +56,10 @@ def asr_curriculum_ratio(config: Config, epoch: int, batch_index: int, batches_p
 
 def asr_curriculum_reconstruction_weight(config: Config, epoch: int, batch_index: int, batches_per_epoch: int) -> float:
     asr = config.model.asr
-    if not asr.enabled or not asr.curriculum:
+    if not config.model.reconstruction_enabled:
         return 0.0
+    if not asr.enabled:
+        return 1.0
     progress = asr_curriculum_progress(config, epoch, batch_index, batches_per_epoch)
     start = asr.curriculum_reconstruction_start_weight
     end = asr.curriculum_reconstruction_end_weight
@@ -77,7 +79,7 @@ def train_step(
     device,
     grad_clip: float,
     asr_curriculum_ratio_value: float = 0.0,
-    asr_curriculum_reconstruction_weight_value: float = 0.0,
+    asr_curriculum_reconstruction_weight_value: float | None = None,
 ):
     model.train()
     optimizer.zero_grad(set_to_none=True)
@@ -97,8 +99,9 @@ def train_step(
 
 
 @torch.no_grad()
-def validate(model, loader, device) -> dict[str, float]:
+def validate(model, loader, device, asr_curriculum_reconstruction_weight_value: float | None = None) -> dict[str, float]:
     model.eval()
+    reconstruction_weight = model.reconstruction_weight(asr_curriculum_reconstruction_weight_value)
     sums = {name: 0.0 for name in ("flow_loss", "reconstruction_l1", "reconstruction_l2",
                                   "commitment_loss", "bsq_regularization_loss", "asr_loss")}
     frames = pairs = 0
@@ -109,7 +112,8 @@ def validate(model, loader, device) -> dict[str, float]:
     for batch in loader:
         batch = batch.to(device)
         output = model(batch.inputs, batch.valid_mask, target=batch.targets,
-                       text_targets=batch.text_targets, text_lengths=batch.text_lengths)
+                       text_targets=batch.text_targets, text_lengths=batch.text_lengths,
+                       asr_curriculum_reconstruction_weight=reconstruction_weight)
         examples += batch.inputs.shape[0]
         if output.wer_errors is not None:
             wer_errors += output.wer_errors
@@ -131,11 +135,12 @@ def validate(model, loader, device) -> dict[str, float]:
         metrics["wer"] = word_error_rate(wer_errors, wer_words)
     weights = model.config.loss
     metrics["loss"] = (weights.flow * metrics["flow_loss"]
-                       + weights.reconstruction_l1 * metrics["reconstruction_l1"]
-                       + weights.reconstruction_l2 * metrics["reconstruction_l2"]
+                       + reconstruction_weight * (weights.reconstruction_l1 * metrics["reconstruction_l1"]
+                                                  + weights.reconstruction_l2 * metrics["reconstruction_l2"])
                        + weights.commitment * metrics["commitment_loss"]
                        + weights.bsq_regularization * metrics["bsq_regularization_loss"]
                        + weights.asr * metrics["asr_loss"])
+    metrics["asr_curriculum_reconstruction_weight"] = reconstruction_weight
     if model.config.quantizer.type != "bsq":
         metrics.pop("bsq_regularization_loss")
     return metrics
@@ -240,7 +245,9 @@ def train(config: Config):
                     return
             if validation_data is not None:
                 validation_loader = make_loader(validation_data, config, current_epoch, shuffle=False)
-                metrics = validate(model, validation_loader, device)
+                reconstruction_weight = asr_curriculum_reconstruction_weight(
+                    config, current_epoch, len(loader) - 1, len(loader))
+                metrics = validate(model, validation_loader, device, reconstruction_weight)
                 metrics["epoch"] = current_epoch + 1
                 metrics["total_epochs"] = settings.epochs
                 log_metrics(metrics_path, "validation", step, metrics, run)
