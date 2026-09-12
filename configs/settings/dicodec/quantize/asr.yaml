@@ -15,6 +15,9 @@ sm_quantizer:
     simple_reconstruction: false
     asr:
       enabled: true
+      curriculum: true
+      curriculum_start_pct: 50.0
+      curriculum_end_pct: 0.0
       hidden_size: 512
       layers: 2
       dropout: 0.1

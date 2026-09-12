@@ -11,6 +11,9 @@ model:
   language_modeling: true
   asr:
     enabled: false
+    curriculum: false
+    curriculum_start_pct: 50.0
+    curriculum_end_pct: 0.0
     embedding_dim: 256
     hidden_size: 512
     layers: 2

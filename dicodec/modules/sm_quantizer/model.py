@@ -53,9 +53,29 @@ class SMQuantizer(nn.Module):
         z = z.detach().masked_fill(~valid.unsqueeze(-1), 0)
         return self.quantizer(self.encoder(z), valid)
 
+    def _asr_curriculum_codes(
+        self,
+        encoded: torch.Tensor,
+        quantized: torch.Tensor,
+        ratio: float,
+    ) -> tuple[torch.Tensor, float]:
+        if self.asr_head is None or not self.config.asr.curriculum or ratio <= 0:
+            return quantized, 0.0
+        ratio = min(max(float(ratio), 0.0), 1.0)
+        batch_size = encoded.shape[0]
+        num_bypass = min(batch_size, max(0, int(batch_size * ratio + 0.5)))
+        if num_bypass == 0:
+            return quantized, 0.0
+        selected = torch.randperm(batch_size, device=encoded.device)[:num_bypass]
+        sample_mask = torch.zeros(batch_size, dtype=torch.bool, device=encoded.device)
+        sample_mask[selected] = True
+        codes = torch.where(sample_mask[:, None, None], encoded, quantized)
+        return codes, 100.0 * num_bypass / batch_size
+
     def forward(self, z: torch.Tensor, valid_mask: torch.Tensor | None = None,
                 *, target: torch.Tensor | None = None, text_targets: torch.Tensor | None = None,
-                text_lengths: torch.Tensor | None = None) -> SMQuantizerOutput:
+                text_lengths: torch.Tensor | None = None,
+                asr_curriculum_ratio: float = 0.0) -> SMQuantizerOutput:
         valid = self.validate_input(z, valid_mask)
         target = z if target is None else target
         if target.shape != z.shape or target.device != z.device or target.dtype != z.dtype:
@@ -69,7 +89,9 @@ class SMQuantizer(nn.Module):
         if self.asr_head is not None:
             # Fail before quantization to avoid updating EMA on an invalid batch.
             self.asr_head.validate_targets(text_targets, text_lengths, valid.sum(1) * self.config.asr.upsample_factor)
-        quantized = self.encode(z, valid)
+        encoder_input = z.detach().masked_fill(~valid.unsqueeze(-1), 0)
+        encoded = self.encoder(encoder_input)
+        quantized = self.quantizer(encoded, valid)
         reconstruction = None
         l1, l2 = z.new_zeros(()), z.new_zeros(())
         if self.reconstruction_head is not None:
@@ -88,8 +110,12 @@ class SMQuantizer(nn.Module):
         asr_loss = z.new_zeros(())
         asr_logits = None
         wer_errors = wer_words = None
+        asr_curriculum_pct = 0.0
         if self.asr_head is not None:
-            asr = self.asr_head(quantized.codes, valid, text_targets, text_lengths)
+            asr_codes, asr_curriculum_pct = self._asr_curriculum_codes(
+                encoded, quantized.codes, asr_curriculum_ratio,
+            )
+            asr = self.asr_head(asr_codes, valid, text_targets, text_lengths)
             asr_loss, asr_logits = asr.loss, asr.logits
             if self.config.loss.asr > 0:
                 wer_errors, wer_words = self.asr_head.word_error_counts(
@@ -104,6 +130,7 @@ class SMQuantizer(nn.Module):
             quantized.bsq_regularization_loss,
             quantized.perplexity, quantized.codebook_utilization_pct,
             asr_loss, asr_logits, wer_errors, wer_words, self.config.quantizer.type == "bsq",
+            asr_curriculum_pct,
         )
 
     @torch.no_grad()

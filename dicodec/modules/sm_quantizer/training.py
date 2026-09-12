@@ -44,12 +44,25 @@ def make_loader(dataset, config: Config, epoch: int, shuffle: bool) -> DataLoade
     )
 
 
-def train_step(model, optimizer, batch, device, grad_clip: float):
+def asr_curriculum_ratio(config: Config, epoch: int, batch_index: int, batches_per_epoch: int) -> float:
+    asr = config.model.asr
+    if not asr.enabled or not asr.curriculum:
+        return 0.0
+    total_batches = max(1, config.training.epochs * batches_per_epoch)
+    current_batch = min(total_batches - 1, max(0, epoch * batches_per_epoch + batch_index))
+    progress = 1.0 if total_batches == 1 else current_batch / (total_batches - 1)
+    start = asr.curriculum_start_pct / 100.0
+    end = asr.curriculum_end_pct / 100.0
+    return start + (end - start) * progress
+
+
+def train_step(model, optimizer, batch, device, grad_clip: float, asr_curriculum_ratio_value: float = 0.0):
     model.train()
     optimizer.zero_grad(set_to_none=True)
     batch = batch.to(device)
     output = model(batch.inputs, batch.valid_mask, target=batch.targets,
-                   text_targets=batch.text_targets, text_lengths=batch.text_lengths)
+                   text_targets=batch.text_targets, text_lengths=batch.text_lengths,
+                   asr_curriculum_ratio=asr_curriculum_ratio_value)
     if not torch.isfinite(output.loss):
         raise FloatingPointError("Nonfinite training loss.")
     output.loss.backward()
@@ -185,7 +198,8 @@ def train(config: Config):
             for index, batch in enumerate(loader):
                 if current_epoch == epoch and index < batch_index:
                     continue
-                metrics = train_step(model, optimizer, batch, device, settings.grad_clip)
+                ratio = asr_curriculum_ratio(config, current_epoch, index, len(loader))
+                metrics = train_step(model, optimizer, batch, device, settings.grad_clip, ratio)
                 metrics["epoch"] = current_epoch + 1
                 metrics["total_epochs"] = settings.epochs
                 step += 1

@@ -78,6 +78,9 @@ class EncoderConfig:
 @dataclass
 class ASRConfig:
     enabled: bool = False
+    curriculum: bool = False
+    curriculum_start_pct: float = 50.0
+    curriculum_end_pct: float = 0.0
     hidden_size: int = 512
     layers: int = 2
     dropout: float = 0.1
@@ -95,6 +98,8 @@ class ASRConfig:
     def __post_init__(self):
         if min(self.hidden_size, self.layers, self.embedding_dim, self.upsample_factor, self.vocab_size) < 1:
             raise ValueError("ASR dimensions and upsample_factor must be positive.")
+        if not 0 <= self.curriculum_start_pct <= 100 or not 0 <= self.curriculum_end_pct <= 100:
+            raise ValueError("ASR curriculum percentages must be in [0, 100].")
         if not 0 <= self.dropout < 1 or self.tokenizer not in {"char", "sentencepiece"}:
             raise ValueError("Invalid ASR dropout or tokenizer.")
         if not self.characters or len(set(self.characters)) != len(self.characters):
