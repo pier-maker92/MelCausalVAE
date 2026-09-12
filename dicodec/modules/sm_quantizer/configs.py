@@ -79,8 +79,10 @@ class EncoderConfig:
 class ASRConfig:
     enabled: bool = False
     curriculum: bool = False
-    curriculum_start_pct: float = 50.0
+    curriculum_start_pct: float = 70.0
     curriculum_end_pct: float = 0.0
+    curriculum_reconstruction_start_weight: float = 1.0
+    curriculum_reconstruction_end_weight: float = 0.0
     hidden_size: int = 512
     layers: int = 2
     dropout: float = 0.1
@@ -100,6 +102,8 @@ class ASRConfig:
             raise ValueError("ASR dimensions and upsample_factor must be positive.")
         if not 0 <= self.curriculum_start_pct <= 100 or not 0 <= self.curriculum_end_pct <= 100:
             raise ValueError("ASR curriculum percentages must be in [0, 100].")
+        if self.curriculum_reconstruction_start_weight < 0 or self.curriculum_reconstruction_end_weight < 0:
+            raise ValueError("ASR curriculum reconstruction weights must be nonnegative.")
         if not 0 <= self.dropout < 1 or self.tokenizer not in {"char", "sentencepiece"}:
             raise ValueError("Invalid ASR dropout or tokenizer.")
         if not self.characters or len(set(self.characters)) != len(self.characters):

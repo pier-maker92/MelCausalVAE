@@ -20,8 +20,8 @@ without a runtime dependency on that repository. For independently sampled noise
 The total loss is the weighted sum of flow MSE, reconstruction L1, reconstruction
 MSE, EMA commitment MSE and BSQ regularization. Each unweighted component is exposed
 in the output dataclass and metrics. Only the applicable quantizer losses are active.
-No continuous features bypass the quantizer. Downstream TTS quality requires
-validation on actual speech tasks.
+No continuous features bypass the quantizer, except for the optional ASR curriculum
+described below. Downstream TTS quality requires validation on actual speech tasks.
 
 Perplexity and `codebook_utilization_pct` pool token IDs over all valid frames of
 the current batch, across sequences, excluding padding. With empirical frequencies
@@ -62,6 +62,18 @@ shared FSQ implementation when the model is built.
 For example, set `type: bsq, codebook_size: 1024` for ten binary dimensions,
 or `type: fsq, codebook_size: 2048` for four scalar dimensions. Unsupported FSQ
 vocabulary sizes fail at configuration loading.
+
+## ASR curriculum
+
+When `model.asr.enabled` and `model.asr.curriculum` are both true, training applies
+a linear batch-level curriculum. A scheduled percentage of batch samples uses the
+encoder output directly for the ASR head instead of the quantized codes; the default
+schedule is `curriculum_start_pct: 70.0` to `curriculum_end_pct: 0.0`. The same
+progress drives a temporary reconstruction objective with
+`curriculum_reconstruction_start_weight: 1.0` to
+`curriculum_reconstruction_end_weight: 0.0`, helping the quantized representation
+retain frame-level information while the ASR head starts learning. Validation and
+non-ASR runs use only quantized codes.
 
 ## Narval Parquet datasets
 

@@ -62,6 +62,7 @@ class SMQuantizerOutput:
     wer_words: int | None = None
     bsq_active: bool = False
     asr_curriculum_pct: float = 0.0
+    asr_curriculum_reconstruction_weight: float = 0.0
 
     def metrics(self) -> dict[str, float]:
         names = ("loss", "flow_loss", "reconstruction_l1", "reconstruction_l2",
@@ -69,6 +70,8 @@ class SMQuantizerOutput:
         metrics = {name: getattr(self, name).detach().item() for name in names}
         if self.asr_curriculum_pct:
             metrics["asr_curriculum_pct"] = self.asr_curriculum_pct
+        if self.asr_curriculum_reconstruction_weight:
+            metrics["asr_curriculum_reconstruction_weight"] = self.asr_curriculum_reconstruction_weight
         if not self.bsq_active:
             metrics.pop("bsq_regularization_loss")
         if self.wer_errors is not None:
