@@ -119,7 +119,7 @@ class Encoder(SigmaVAEEncoder):
         )
 
         hiddens = x.transpose(1, 2)  # [B, T/C, 512]
-        h = self.transformer(hiddens)  # [B, T/C, 512]
+        h = self.transformer(hiddens, pad_mask=padding_mask)  # [B, T/C, 512]
 
         mu = self.mu(h)
         logvar = None

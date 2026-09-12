@@ -122,9 +122,41 @@ class Dicodec(torch.nn.Module):
 
         wavlm_output = extractor(audios_srs, audio_16khz=audio_16khz)
         wavlm_features = wavlm_output.audio_features.to(self.dtype)
+        wavlm_valid = (~wavlm_output.padding_mask).to(
+            device=wavlm_features.device,
+            dtype=wavlm_features.dtype,
+        )
+        wavlm_features = wavlm_features * wavlm_valid.unsqueeze(-1)
         wavlm_features = wavlm_features.repeat_interleave(2, dim=1)
-        wavlm_features = F.interpolate(wavlm_features.float().transpose(1, 2), size=target_length, mode="linear", align_corners=False).transpose(1, 2).to(wavlm_features.dtype)
-        wavlm_padding_mask = F.interpolate(wavlm_output.padding_mask.float().unsqueeze(1), size=target_length, mode="nearest").squeeze(1).bool()
+        wavlm_valid = wavlm_valid.repeat_interleave(2, dim=1)
+        numerator = F.interpolate(
+            wavlm_features.float().transpose(1, 2),
+            size=target_length,
+            mode="linear",
+            align_corners=False,
+        ).transpose(1, 2)
+        denominator = F.interpolate(
+            wavlm_valid.float().unsqueeze(1),
+            size=target_length,
+            mode="linear",
+            align_corners=False,
+        ).squeeze(1)
+        wavlm_padding_mask = ~(
+            F.interpolate(
+                wavlm_valid.float().unsqueeze(1),
+                size=target_length,
+                mode="nearest",
+            )
+            .squeeze(1)
+            .bool()
+        )
+        wavlm_features = (numerator / denominator.clamp_min(1e-6).unsqueeze(-1)).to(
+            wavlm_features.dtype
+        )
+        wavlm_features = wavlm_features.masked_fill(
+            wavlm_padding_mask.unsqueeze(-1),
+            0.0,
+        )
         return wavlm_features, wavlm_padding_mask
 
     @torch.no_grad()
@@ -144,43 +176,9 @@ class Dicodec(torch.nn.Module):
         encoder_output = self.feature_extractor(audios_srs)
         return (encoder_output.audio_features.to(self.dtype), encoder_output.padding_mask, target_features, target_padding_mask)
 
-    def _normalize_ssl_features(
-        self,
-        features: torch.Tensor,
-        eps: float = 1e-8,
-        padding_mask: Optional[torch.BoolTensor] = None,
-    ) -> torch.Tensor:
-        if padding_mask is None:
-            padding_mask = torch.zeros(features.shape[:2], device=features.device, dtype=torch.bool)
-        if padding_mask.shape != features.shape[:2] or padding_mask.dtype != torch.bool:
-            raise ValueError("padding_mask must be boolean with shape [batch, time].")
-        padding = padding_mask.to(device=features.device).unsqueeze(-1)
-        # Accumulate low-precision inputs in fp32; preserve fp64 when supplied.
-        values = features.float() if features.dtype in (torch.float16, torch.bfloat16) else features
-        values = values.masked_fill(padding, 0.0)
-        count = (~padding).sum(dim=1, keepdim=True)
-        mean = values.sum(dim=1, keepdim=True) / count.clamp_min(1)
-        centered = (values - mean).masked_fill(padding, 0.0)
-        # Match torch.std's original correction=1 on valid frames.
-        variance = centered.square().sum(dim=1, keepdim=True) / (count - 1).clamp_min(1)
-        # Avoid sqrt(0)'s undefined gradient for constant/single-frame inputs.
-        positive = variance > 0
-        std = torch.where(positive, variance, torch.ones_like(variance)).sqrt()
-        std = std.masked_fill(~positive, 0.0)
-        normalized = centered / (std + eps)
-        return normalized.masked_fill(padding, 0.0).to(features.dtype)
-
     def encode(self, features, padding_mask, **kwargs):
-        normalize_ssl_features = kwargs.get("normalize_ssl_features")
-        if normalize_ssl_features is None:
-            normalize_ssl_features = self.wavlm_extractor is None
-        encoder_input = (
-            self._normalize_ssl_features(features, padding_mask=padding_mask)
-            if normalize_ssl_features
-            else features
-        )
         encoder_output = self.encoder(
-            x=encoder_input,
+            x=features,
             padding_mask=padding_mask,
             step=kwargs.get("training_step", None),
         )

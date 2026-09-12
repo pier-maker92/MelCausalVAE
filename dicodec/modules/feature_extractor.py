@@ -55,7 +55,7 @@ class FeatureExtractor(nn.Module):
         # mel_spec: (B, T, C), padding_mask: (B, T)
         valid_mel = mel_spec[~padding_mask]
         if valid_mel.numel() > 0:
-            self.std.copy_(self.std * 0.99 + valid_mel.std() * 0.01)
+            self.std.copy_(self.std * 0.99 + valid_mel.std(unbiased=False) * 0.01)
             self.mean.copy_(self.mean * 0.99 + valid_mel.mean() * 0.01)
 
     def forward(self, audios_srs: List[Tuple[torch.FloatTensor, int]], **kwargs):
@@ -133,6 +133,7 @@ class FeatureExtractor(nn.Module):
             mel_spec = (
                 mel_spec - self.mean.to(device=mel_spec.device, dtype=mel_spec.dtype)
             ) / self.std.to(device=mel_spec.device, dtype=mel_spec.dtype)
+        mel_spec = mel_spec.masked_fill(padding_mask.unsqueeze(-1), 0.0)
 
         return FeatureExtractorOutput(
             audio_features=mel_spec,
@@ -177,7 +178,9 @@ class WavLMFeatureExtractor(nn.Module):
     ):
         valid_features = features[~padding_mask]
         if valid_features.numel() > 0:
-            self.std.copy_(self.std * 0.99 + valid_features.std() * 0.01)
+            self.std.copy_(
+                self.std * 0.99 + valid_features.std(unbiased=False) * 0.01
+            )
             self.mean.copy_(self.mean * 0.99 + valid_features.mean() * 0.01)
 
     def forward(
@@ -266,6 +269,7 @@ class WavLMFeatureExtractor(nn.Module):
             features = (
                 features - self.mean.to(device=features.device, dtype=features.dtype)
             ) / self.std.to(device=features.device, dtype=features.dtype)
+        features = features.masked_fill(feat_padding_mask.unsqueeze(-1), 0.0)
 
         return FeatureExtractorOutput(
             audio_features=features,
