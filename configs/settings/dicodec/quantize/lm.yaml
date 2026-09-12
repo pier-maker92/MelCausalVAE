@@ -8,7 +8,7 @@ sm_quantizer:
     encoder:
       type: causal_conv
       hidden_dim: 512
-      layers: 4
+      layers: 6
       kernel_size: 3
       dropout: 0.0
     language_modeling: true
@@ -19,13 +19,13 @@ sm_quantizer:
       layers: 2
       dropout: 0.1
       embedding_dim: 256
-      upsample_factor: 1
+      upsample_factor: 4
       tokenizer: char
       characters: 'abcdefghijklmnopqrstuvwxyz'' '
       tokenizer_model: null
       vocab_size: 1000
     quantizer:
-      type: vq_ema
+      type: fsq
       dim: 64
       codebook_size: 1024
       decay: 0.99
@@ -78,7 +78,7 @@ sm_quantizer:
     learning_rate: 0.0003
     weight_decay: 0.01
     grad_clip: 1.0
-    num_workers: 0
+    num_workers: 4
     seed: 42
     device: cuda
     log_every: 10
@@ -93,5 +93,5 @@ sm_quantizer:
 training:
   dataset_name: librispeech-dicodec-v2-ls-25
   output_dir: outputs/sm_quantizer/lm
-  bf16: true
+  bf16: false
   fp16: false
