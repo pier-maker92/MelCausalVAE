@@ -13,6 +13,29 @@ from .metrics import batch_codebook_metrics
 from .output_dataclasses import QuantizerOutput
 
 
+class LearnedVectorQuantizer(nn.Module):
+    """Nearest-neighbour vector quantizer with a gradient-trained codebook.
+
+    This intentionally has no per-batch code replacement.  Reinitializing every
+    entry that is absent from one CTC batch makes a learned codebook unstable.
+    """
+
+    def __init__(self, dim: int, codebook_size: int):
+        super().__init__()
+        self.dim = dim
+        self.codebook_size = codebook_size
+        self.embedding = nn.Embedding(codebook_size, dim)
+        nn.init.uniform_(self.embedding.weight, -1.0 / codebook_size, 1.0 / codebook_size)
+
+    def forward(self, lats: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        flat = lats.reshape(-1, self.dim)
+        weights = self.embedding.weight
+        distances = (flat.square().sum(-1, keepdim=True) + weights.square().sum(-1)
+                     - 2 * flat @ weights.t())
+        indices = distances.argmin(dim=-1)
+        return indices.view(*lats.shape[:-1]), self.embedding(indices).view_as(lats)
+
+
 class OnlineQuantizer(nn.Module):
     def __init__(self, config: QuantizerConfig):
         super().__init__()
@@ -25,6 +48,8 @@ class OnlineQuantizer(nn.Module):
 
     @staticmethod
     def build_codebook(config: QuantizerConfig) -> nn.Module:
+        if config.type == "vq":
+            return LearnedVectorQuantizer(config.dim, config.codebook_size)
         if config.type == "bsq":
             return BinarySphericalQuantizer(config.codebook_size)
         if config.type == "fsq":
@@ -62,9 +87,13 @@ class OnlineQuantizer(nn.Module):
         indices, centers = self.codebook(source)
         centers = centers.to(frames.dtype)
         commitment = frames.new_zeros(())
+        codebook_loss = frames.new_zeros(())
         regularization = frames.new_zeros(())
         if self.config.type == "vq_ema":
             commitment = F.mse_loss(frames, centers.detach())
+        elif self.config.type == "vq":
+            commitment = F.mse_loss(frames, centers.detach())
+            codebook_loss = F.mse_loss(centers, frames.detach())
         elif self.config.type == "bsq":
             regularization = self.bsq_regularization(frames)
         straight_through = centers if self.config.type == "fsq" else frames + (centers - frames).detach()
@@ -73,4 +102,4 @@ class OnlineQuantizer(nn.Module):
         tokens = torch.full(valid.shape, -1, dtype=torch.long, device=x.device)
         tokens[valid] = indices
         perplexity, utilization = batch_codebook_metrics(indices, self.codebook.codebook_size)
-        return QuantizerOutput(codes, tokens, commitment, regularization, perplexity, utilization)
+        return QuantizerOutput(codes, tokens, commitment, codebook_loss, regularization, perplexity, utilization)

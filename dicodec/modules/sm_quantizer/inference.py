@@ -82,7 +82,7 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Reconstruct audio with the trained SLM semantic quantizer.")
     parser.add_argument("-i", type=Path, default=ROOT / "audio_assets/male.wav", help="Input audio")
     parser.add_argument("-ta", type=Path, default=None, help="Audio providing the decoder speaker embedding")
-    parser.add_argument("--type", choices=("vq_ema", "fsq", "bsq"), default="fsq", help="Quantizer checkpoint type (default: fsq)")
+    parser.add_argument("--type", choices=("vq", "vq_ema", "fsq", "bsq"), default="fsq", help="Quantizer checkpoint type (default: fsq)")
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("-q", action="store_true", help="Decode only q_sem")
     modes.add_argument("-r", action="store_true", help="Decode only the full residual z - q_sem")

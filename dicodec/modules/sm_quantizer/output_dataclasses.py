@@ -29,6 +29,7 @@ class QuantizerOutput:
     codes: torch.Tensor
     indices: torch.Tensor
     commitment_loss: torch.Tensor
+    codebook_loss: torch.Tensor
     bsq_regularization_loss: torch.Tensor
     perplexity: torch.Tensor
     codebook_utilization_pct: torch.Tensor
@@ -48,6 +49,7 @@ class SMQuantizerOutput:
     reconstruction_l1: torch.Tensor
     reconstruction_l2: torch.Tensor
     commitment_loss: torch.Tensor
+    codebook_loss: torch.Tensor
     indices: torch.Tensor
     quantized: torch.Tensor
     reconstruction: torch.Tensor | None
@@ -61,13 +63,17 @@ class SMQuantizerOutput:
     wer_errors: int | None = None
     wer_words: int | None = None
     bsq_active: bool = False
+    vq_active: bool = False
 
     def metrics(self) -> dict[str, float]:
         names = ("loss", "flow_loss", "reconstruction_l1", "reconstruction_l2",
-                 "commitment_loss", "bsq_regularization_loss", "perplexity", "codebook_utilization_pct", "asr_loss")
+                 "commitment_loss", "codebook_loss", "bsq_regularization_loss",
+                 "perplexity", "codebook_utilization_pct", "asr_loss")
         metrics = {name: getattr(self, name).detach().item() for name in names}
         if not self.bsq_active:
             metrics.pop("bsq_regularization_loss")
+        if not self.vq_active:
+            metrics.pop("codebook_loss")
         if self.wer_errors is not None:
             from .wer import word_error_rate
 

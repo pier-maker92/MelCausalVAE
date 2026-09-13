@@ -20,8 +20,8 @@ class QuantizerConfig:
     entropy_temperature: float = 100.0
 
     def __post_init__(self):
-        if self.type not in {"vq_ema", "bsq", "fsq"}:
-            raise ValueError("quantizer.type must be vq_ema, bsq or fsq.")
+        if self.type not in {"vq", "vq_ema", "bsq", "fsq"}:
+            raise ValueError("quantizer.type must be vq, vq_ema, bsq or fsq.")
         if self.entropy_temperature <= 0:
             raise ValueError("entropy_temperature must be positive.")
         if self.type == "bsq" and (self.codebook_size < 2 or self.codebook_size & (self.codebook_size - 1)):
@@ -109,6 +109,7 @@ class LossConfig:
     reconstruction_l1: float = 1.0
     reconstruction_l2: float = 1.0
     commitment: float = 0.25
+    codebook: float = 1.0
     bsq_regularization: float = 0.1
     asr: float = 1.0
 

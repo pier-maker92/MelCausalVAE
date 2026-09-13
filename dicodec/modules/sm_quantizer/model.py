@@ -112,13 +112,15 @@ class SMQuantizer(nn.Module):
         loss = (weights.flow * flow_loss
                 + weights.reconstruction_l1 * l1 + weights.reconstruction_l2 * l2
                 + weights.commitment * quantized.commitment_loss
+                + weights.codebook * quantized.codebook_loss
                 + weights.bsq_regularization * quantized.bsq_regularization_loss + weights.asr * asr_loss)
         return SMQuantizerOutput(
-            loss, flow_loss, l1, l2, quantized.commitment_loss, quantized.indices,
-            quantized.codes, reconstruction, context, pairs,
+            loss, flow_loss, l1, l2, quantized.commitment_loss, quantized.codebook_loss,
+            quantized.indices, quantized.codes, reconstruction, context, pairs,
             quantized.bsq_regularization_loss,
             quantized.perplexity, quantized.codebook_utilization_pct,
             asr_loss, asr_logits, wer_errors, wer_words, self.config.quantizer.type == "bsq",
+            self.config.quantizer.type == "vq",
         )
 
     @torch.no_grad()

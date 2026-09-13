@@ -53,6 +53,7 @@ sm_quantizer:
       reconstruction_l1: 0.0
       reconstruction_l2: 0.0
       commitment: 0.25
+      codebook: 1.0
       bsq_regularization: 0.1
       asr: 1.0
   data:

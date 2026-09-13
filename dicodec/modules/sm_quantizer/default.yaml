@@ -21,7 +21,7 @@ model:
     tokenizer_model: null
     vocab_size: 1000  # SentencePiece vocabulary, excluding CTC blank
   quantizer:
-    type: vq_ema  # vq_ema | bsq | fsq
+    type: vq_ema  # vq | vq_ema | bsq | fsq
     dim: 64
     codebook_size: 1024
     decay: 0.99
@@ -49,6 +49,7 @@ model:
     reconstruction_l1: 1.0
     reconstruction_l2: 1.0
     commitment: 0.25
+    codebook: 1.0  # standard VQ only
     bsq_regularization: 0.1
 data:
   text_key: transcript

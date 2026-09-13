@@ -70,7 +70,7 @@ def train_step(
 def validate(model, loader, device) -> dict[str, float]:
     model.eval()
     sums = {name: 0.0 for name in ("flow_loss", "reconstruction_l1", "reconstruction_l2",
-                                  "commitment_loss", "bsq_regularization_loss", "asr_loss")}
+                                  "commitment_loss", "codebook_loss", "bsq_regularization_loss", "asr_loss")}
     frames = pairs = 0
     batch_statistics = {"perplexity": 0.0, "codebook_utilization_pct": 0.0}
     num_batches = 0
@@ -104,10 +104,13 @@ def validate(model, loader, device) -> dict[str, float]:
                        + weights.reconstruction_l1 * metrics["reconstruction_l1"]
                        + weights.reconstruction_l2 * metrics["reconstruction_l2"]
                        + weights.commitment * metrics["commitment_loss"]
+                       + weights.codebook * metrics["codebook_loss"]
                        + weights.bsq_regularization * metrics["bsq_regularization_loss"]
                        + weights.asr * metrics["asr_loss"])
     if model.config.quantizer.type != "bsq":
         metrics.pop("bsq_regularization_loss")
+    if model.config.quantizer.type != "vq":
+        metrics.pop("codebook_loss")
     return metrics
 
 
