@@ -33,6 +33,18 @@ class SMQuantizer(nn.Module):
                                if config.language_modeling else None)
         self.asr_head = ASRHead(quant_dim, config.asr) if config.asr.enabled else None
 
+        if config.from_pretrained is not None:
+            import logging
+            logging.info(f"Loading pretrained weights from {config.from_pretrained}")
+            state_dict = torch.load(config.from_pretrained, map_location="cpu")
+            if "model" in state_dict:
+                state_dict = state_dict["model"]
+            elif "state_dict" in state_dict:
+                state_dict = state_dict["state_dict"]
+            missing, unexpected = self.load_state_dict(state_dict, strict=False)
+            logging.info(f"Missing keys: {missing}")
+            logging.info(f"Unexpected keys: {unexpected}")
+
     def validate_input(self, z: torch.Tensor, valid_mask: torch.Tensor | None) -> torch.Tensor:
         if z.ndim != 3 or z.shape[-1] != self.config.latent_dim or min(z.shape[:2]) < 1:
             raise ValueError("Expected nonempty latents [B, T, latent_dim].")

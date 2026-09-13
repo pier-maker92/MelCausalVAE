@@ -125,6 +125,7 @@ class ModelConfig:
     transformer: TransformerConfig = field(default_factory=TransformerConfig)
     diffusion: DiffusionConfig = field(default_factory=DiffusionConfig)
     loss: LossConfig = field(default_factory=LossConfig)
+    from_pretrained: str | None = None
 
     @property
     def reconstruction_enabled(self) -> bool:
