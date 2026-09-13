@@ -44,50 +44,18 @@ def make_loader(dataset, config: Config, epoch: int, shuffle: bool) -> DataLoade
     )
 
 
-def asr_curriculum_ratio(config: Config, epoch: int, batch_index: int, batches_per_epoch: int) -> float:
-    asr = config.model.asr
-    if not asr.enabled or not asr.curriculum:
-        return 0.0
-    progress = asr_curriculum_progress(config, epoch, batch_index, batches_per_epoch)
-    start = asr.curriculum_start_pct / 100.0
-    end = asr.curriculum_end_pct / 100.0
-    return start + (end - start) * progress
-
-
-def asr_curriculum_reconstruction_weight(config: Config, epoch: int, batch_index: int, batches_per_epoch: int) -> float:
-    asr = config.model.asr
-    if not config.model.reconstruction_enabled:
-        return 0.0
-    if not asr.enabled:
-        return 1.0
-    progress = asr_curriculum_progress(config, epoch, batch_index, batches_per_epoch)
-    start = asr.curriculum_reconstruction_start_weight
-    end = asr.curriculum_reconstruction_end_weight
-    return start + (end - start) * progress
-
-
-def asr_curriculum_progress(config: Config, epoch: int, batch_index: int, batches_per_epoch: int) -> float:
-    total_batches = max(1, config.training.epochs * batches_per_epoch)
-    current_batch = min(total_batches - 1, max(0, epoch * batches_per_epoch + batch_index))
-    return 1.0 if total_batches == 1 else current_batch / (total_batches - 1)
-
-
 def train_step(
     model,
     optimizer,
     batch,
     device,
     grad_clip: float,
-    asr_curriculum_ratio_value: float = 0.0,
-    asr_curriculum_reconstruction_weight_value: float | None = None,
 ):
     model.train()
     optimizer.zero_grad(set_to_none=True)
     batch = batch.to(device)
     output = model(batch.inputs, batch.valid_mask, target=batch.targets,
-                   text_targets=batch.text_targets, text_lengths=batch.text_lengths,
-                   asr_curriculum_ratio=asr_curriculum_ratio_value,
-                   asr_curriculum_reconstruction_weight=asr_curriculum_reconstruction_weight_value)
+                   text_targets=batch.text_targets, text_lengths=batch.text_lengths)
     if not torch.isfinite(output.loss):
         raise FloatingPointError("Nonfinite training loss.")
     output.loss.backward()
@@ -99,9 +67,8 @@ def train_step(
 
 
 @torch.no_grad()
-def validate(model, loader, device, asr_curriculum_reconstruction_weight_value: float | None = None) -> dict[str, float]:
+def validate(model, loader, device) -> dict[str, float]:
     model.eval()
-    reconstruction_weight = model.reconstruction_weight(asr_curriculum_reconstruction_weight_value)
     sums = {name: 0.0 for name in ("flow_loss", "reconstruction_l1", "reconstruction_l2",
                                   "commitment_loss", "bsq_regularization_loss", "asr_loss")}
     frames = pairs = 0
@@ -112,8 +79,7 @@ def validate(model, loader, device, asr_curriculum_reconstruction_weight_value: 
     for batch in loader:
         batch = batch.to(device)
         output = model(batch.inputs, batch.valid_mask, target=batch.targets,
-                       text_targets=batch.text_targets, text_lengths=batch.text_lengths,
-                       asr_curriculum_reconstruction_weight=reconstruction_weight)
+                       text_targets=batch.text_targets, text_lengths=batch.text_lengths)
         examples += batch.inputs.shape[0]
         if output.wer_errors is not None:
             wer_errors += output.wer_errors
@@ -135,12 +101,11 @@ def validate(model, loader, device, asr_curriculum_reconstruction_weight_value: 
         metrics["wer"] = word_error_rate(wer_errors, wer_words)
     weights = model.config.loss
     metrics["loss"] = (weights.flow * metrics["flow_loss"]
-                       + reconstruction_weight * (weights.reconstruction_l1 * metrics["reconstruction_l1"]
-                                                  + weights.reconstruction_l2 * metrics["reconstruction_l2"])
+                       + weights.reconstruction_l1 * metrics["reconstruction_l1"]
+                       + weights.reconstruction_l2 * metrics["reconstruction_l2"]
                        + weights.commitment * metrics["commitment_loss"]
                        + weights.bsq_regularization * metrics["bsq_regularization_loss"]
                        + weights.asr * metrics["asr_loss"])
-    metrics["asr_curriculum_reconstruction_weight"] = reconstruction_weight
     if model.config.quantizer.type != "bsq":
         metrics.pop("bsq_regularization_loss")
     return metrics
@@ -226,9 +191,7 @@ def train(config: Config):
             for index, batch in enumerate(loader):
                 if current_epoch == epoch and index < batch_index:
                     continue
-                ratio = asr_curriculum_ratio(config, current_epoch, index, len(loader))
-                reconstruction_weight = asr_curriculum_reconstruction_weight(config, current_epoch, index, len(loader))
-                metrics = train_step(model, optimizer, batch, device, settings.grad_clip, ratio, reconstruction_weight)
+                metrics = train_step(model, optimizer, batch, device, settings.grad_clip)
                 metrics["epoch"] = current_epoch + 1
                 metrics["total_epochs"] = settings.epochs
                 step += 1
@@ -245,9 +208,7 @@ def train(config: Config):
                     return
             if validation_data is not None:
                 validation_loader = make_loader(validation_data, config, current_epoch, shuffle=False)
-                reconstruction_weight = asr_curriculum_reconstruction_weight(
-                    config, current_epoch, len(loader) - 1, len(loader))
-                metrics = validate(model, validation_loader, device, reconstruction_weight)
+                metrics = validate(model, validation_loader, device)
                 metrics["epoch"] = current_epoch + 1
                 metrics["total_epochs"] = settings.epochs
                 log_metrics(metrics_path, "validation", step, metrics, run)

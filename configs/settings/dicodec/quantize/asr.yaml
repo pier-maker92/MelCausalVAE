@@ -15,11 +15,6 @@ sm_quantizer:
     simple_reconstruction: true  # false disables reconstruction without changing ASR
     asr:
       enabled: true
-      curriculum: false  # optional continuous-code bypass; independent of recon decay
-      curriculum_start_pct: 70.0
-      curriculum_end_pct: 0.0
-      curriculum_reconstruction_start_weight: 1.0  # linear L1/L2 multiplier over training epochs
-      curriculum_reconstruction_end_weight: 0.0
       hidden_size: 512
       layers: 2
       dropout: 0.1

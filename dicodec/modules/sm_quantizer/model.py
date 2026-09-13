@@ -53,30 +53,9 @@ class SMQuantizer(nn.Module):
         z = z.detach().masked_fill(~valid.unsqueeze(-1), 0)
         return self.quantizer(self.encoder(z), valid)
 
-    def _asr_curriculum_codes(
-        self,
-        encoded: torch.Tensor,
-        quantized: torch.Tensor,
-        ratio: float,
-    ) -> tuple[torch.Tensor, float]:
-        if self.asr_head is None or not self.config.asr.curriculum or ratio <= 0:
-            return quantized, 0.0
-        ratio = min(max(float(ratio), 0.0), 1.0)
-        batch_size = encoded.shape[0]
-        num_bypass = min(batch_size, max(0, int(batch_size * ratio + 0.5)))
-        if num_bypass == 0:
-            return quantized, 0.0
-        selected = torch.randperm(batch_size, device=encoded.device)[:num_bypass]
-        sample_mask = torch.zeros(batch_size, dtype=torch.bool, device=encoded.device)
-        sample_mask[selected] = True
-        codes = torch.where(sample_mask[:, None, None], encoded, quantized)
-        return codes, 100.0 * num_bypass / batch_size
-
     def forward(self, z: torch.Tensor, valid_mask: torch.Tensor | None = None,
                 *, target: torch.Tensor | None = None, text_targets: torch.Tensor | None = None,
-                text_lengths: torch.Tensor | None = None,
-                asr_curriculum_ratio: float = 0.0,
-                asr_curriculum_reconstruction_weight: float | None = None) -> SMQuantizerOutput:
+                text_lengths: torch.Tensor | None = None) -> SMQuantizerOutput:
         valid = self.validate_input(z, valid_mask)
         target = z if target is None else target
         if target.shape != z.shape or target.device != z.device or target.dtype != z.dtype:
@@ -95,7 +74,6 @@ class SMQuantizer(nn.Module):
         quantized = self.quantizer(encoded, valid)
         reconstruction = None
         l1, l2 = z.new_zeros(()), z.new_zeros(())
-        reconstruction_weight = self.reconstruction_weight(asr_curriculum_reconstruction_weight)
         if self.reconstruction_head is not None:
             reconstruction = self.reconstruction_head(quantized.codes)
             if self.config.loss.reconstruction_l1 > 0:
@@ -112,19 +90,15 @@ class SMQuantizer(nn.Module):
         asr_loss = z.new_zeros(())
         asr_logits = None
         wer_errors = wer_words = None
-        asr_curriculum_pct = 0.0
         if self.asr_head is not None:
-            asr_codes, asr_curriculum_pct = self._asr_curriculum_codes(
-                encoded, quantized.codes, asr_curriculum_ratio,
-            )
-            asr = self.asr_head(asr_codes, valid, text_targets, text_lengths)
+            asr = self.asr_head(quantized.codes, valid, text_targets, text_lengths)
             asr_loss, asr_logits = asr.loss, asr.logits
             if self.config.loss.asr > 0:
                 wer_errors, wer_words = self.asr_head.word_error_counts(
                     asr.logits, asr.input_lengths, text_targets, text_lengths)
         weights = self.config.loss
         loss = (weights.flow * flow_loss
-                + reconstruction_weight * (weights.reconstruction_l1 * l1 + weights.reconstruction_l2 * l2)
+                + weights.reconstruction_l1 * l1 + weights.reconstruction_l2 * l2
                 + weights.commitment * quantized.commitment_loss
                 + weights.bsq_regularization * quantized.bsq_regularization_loss + weights.asr * asr_loss)
         return SMQuantizerOutput(
@@ -133,17 +107,7 @@ class SMQuantizer(nn.Module):
             quantized.bsq_regularization_loss,
             quantized.perplexity, quantized.codebook_utilization_pct,
             asr_loss, asr_logits, wer_errors, wer_words, self.config.quantizer.type == "bsq",
-            asr_curriculum_pct,
-            reconstruction_weight,
         )
-
-    def reconstruction_weight(self, scheduled_weight: float | None = None) -> float:
-        if self.reconstruction_head is None:
-            return 0.0
-        if not self.config.asr.enabled:
-            return 1.0
-        return (self.config.asr.curriculum_reconstruction_start_weight
-                if scheduled_weight is None else scheduled_weight)
 
     @torch.no_grad()
     def predict_next(self, z: torch.Tensor, valid_mask: torch.Tensor | None = None, **sampling_kwargs) -> torch.Tensor:

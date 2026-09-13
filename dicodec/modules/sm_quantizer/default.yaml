@@ -11,11 +11,6 @@ model:
   language_modeling: true
   asr:
     enabled: false
-    curriculum: false
-    curriculum_start_pct: 70.0
-    curriculum_end_pct: 0.0
-    curriculum_reconstruction_start_weight: 1.0  # recon multiplier, independent of curriculum bypass
-    curriculum_reconstruction_end_weight: 0.0
     embedding_dim: 256
     hidden_size: 512
     layers: 2
