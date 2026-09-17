@@ -1,0 +1,37 @@
+# Narval: sh /scratch/piermel/scripts/run_job.sh dicodec/quantize/6.25/asr_transformer
+# Dataset: /scratch/piermel/datasets/dicodec/librispeech-dicodec-v2-ls-6.25
+# dicodec_checkpoint is provenance only: SM training reads pre-encoded latents.
+job_name: sm-asr-tf-ls625
+time: '9:00:00'
+gpu_mem: '10'
+num_gpus: 1
+ntasks: 1
+cpus_per_task: 8
+mem: 16G
+account: rrg-ravanelm
+
+repo_path: MelCausalVAE
+train_script: scripts/train_sm_quantizer.py
+hydra_settings:
+- dicodec/quantize/asr_transformer
+extra_args: ''
+sweep:
+  sm_quantizer.model.quantizer.type:
+  - vq_ema
+  - fsq
+  - bsq
+
+dataset_name: librispeech-dicodec-v2-ls-6.25
+dataset_source: scratch
+dataset_extension: parquet
+dataset_path: dicodec/librispeech-dicodec-v2-ls-6.25
+dataset_filter: ''
+dataset_partitions:
+- train_clean_100
+- train_clean_360
+venv_path: /home/piermel/envs/vae
+training:
+  bf16: true
+  fp16: false
+email: pierfrancesco.melucci@gmail.com
+dicodec_checkpoint: /scratch/piermel/MelCausalVAE/checkpoints/paper/v2/ls/6.25

@@ -48,3 +48,9 @@ lab/
 *.out
 *.err
 *.sh
+*.pptx
+*.pdf
+*.ndjson
+*.ndijson
+node_modules/
+*.mjs

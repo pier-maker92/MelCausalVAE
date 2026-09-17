@@ -3,6 +3,8 @@ from torch import nn
 from torch.nn import functional as F
 
 from .configs import ModelConfig
+from .asr_gru import GRUASRHead
+from .asr_seq2seq import AutoregressiveASRHead
 from .asr import ASRHead
 from .asr_transformer import AudioTransformer, Seq2SeqASRHead
 from .encoder import build_encoder
@@ -37,7 +39,7 @@ class SMQuantizer(nn.Module):
         self.decoder = CausalDecoder(quant_dim, config.transformer) if config.language_modeling else None
         self.diffusion_head = (DiffusionHead(config.latent_dim, config.transformer.dim, config.diffusion)
                                if config.language_modeling else None)
-        asr_class = Seq2SeqASRHead if config.asr.type == "seq2seq" else ASRHead
+        asr_class = {"ctc": ASRHead, "seq2seq": Seq2SeqASRHead, "gru": GRUASRHead}[config.asr.type]
         self.asr_head = asr_class(quant_dim, config.asr) if config.asr.enabled else None
 
         if config.from_pretrained is not None:
@@ -94,7 +96,7 @@ class SMQuantizer(nn.Module):
         if self.asr_head is not None:
             # Fail before quantization to avoid updating EMA on an invalid batch.
             self.asr_head.validate_targets(text_targets, text_lengths, valid.sum(1) * self.config.asr.upsample_factor)
-        if self.config.asr.enabled and self.config.asr.type == "seq2seq" and z.shape[1] > self.config.asr.max_audio_length:
+        if self.config.asr.enabled and self.config.asr.type in {"seq2seq", "gru"} and z.shape[1] > self.config.asr.max_audio_length:
             raise ValueError("Audio exceeds asr.max_audio_length.")
         encoded = self.encode_features(z, valid)
         quantized = self.quantizer(encoded, valid)
@@ -120,7 +122,7 @@ class SMQuantizer(nn.Module):
             asr = self.asr_head(quantized.codes, valid, text_targets, text_lengths)
             asr_loss, asr_logits = asr.loss, asr.logits
             if self.config.loss.asr > 0 and compute_wer:
-                features, lengths = ((quantized.codes, valid) if self.config.asr.type == "seq2seq"
+                features, lengths = ((quantized.codes, valid) if self.config.asr.type in {"seq2seq", "gru"}
                                      else (asr.logits, asr.input_lengths))
                 wer_errors, wer_words = self.asr_head.word_error_counts(
                     features, lengths, text_targets, text_lengths)
@@ -144,8 +146,8 @@ class SMQuantizer(nn.Module):
         """Greedy text decoding from latents, without teacher forcing or EMA updates."""
         if self.training:
             raise RuntimeError("Call eval() before transcription.")
-        if not isinstance(self.asr_head, Seq2SeqASRHead):
-            raise RuntimeError("transcribe requires seq2seq ASR.")
+        if not isinstance(self.asr_head, AutoregressiveASRHead):
+            raise RuntimeError("transcribe requires seq2seq or gru ASR.")
         valid = self.validate_input(z, valid_mask)
         codes = self.encode(z, valid).codes
         tokens = self.asr_head.generate(codes, valid, max_length)

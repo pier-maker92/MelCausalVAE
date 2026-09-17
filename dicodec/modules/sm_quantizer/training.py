@@ -84,7 +84,7 @@ def validate(model, loader, device) -> dict[str, float]:
                        text_targets=batch.text_targets, text_lengths=batch.text_lengths)
         examples += batch.inputs.shape[0]
         batch_asr_units = (int((batch.text_lengths + 1).sum()) if model.config.asr.enabled
-                           and model.config.asr.type == "seq2seq" else batch.inputs.shape[0])
+                           and model.config.asr.type in {"seq2seq", "gru"} else batch.inputs.shape[0])
         asr_units += batch_asr_units
         if output.wer_errors is not None:
             wer_errors += output.wer_errors

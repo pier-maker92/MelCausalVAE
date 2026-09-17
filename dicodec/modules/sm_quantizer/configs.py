@@ -78,8 +78,8 @@ class EncoderConfig:
 @dataclass
 class ASRConfig:
     enabled: bool = False
-    type: str = "ctc"  # ctc | seq2seq; legacy checkpoints keep CTC
-    quantizer_position: str = "before_transformer"  # before_transformer | after_transformer
+    type: str = "ctc"  # ctc | seq2seq | gru; legacy checkpoints keep CTC
+    quantizer_position: str = "before_transformer"  # Transformer: before/after_transformer; GRU: before_encoder
     transformer_dim: int = 256
     transformer_heads: int = 4
     encoder_layers: int = 4
@@ -90,6 +90,13 @@ class ASRConfig:
     max_text_length: int = 1024  # includes EOS
     max_decode_length: int = 512
     label_smoothing: float = 0.0
+    encoder_hidden_size: int = 512  # GRU ASR: BiLSTM width per direction
+    decoder_hidden_size: int = 512
+    decoder_embedding_dim: int = 256
+    attention_dim: int = 256
+    attention_channels: int = 10
+    attention_kernel_size: int = 100  # radius: convolution width = 2 * radius + 1
+    attention_scaling: float = 1.0
     hidden_size: int = 512
     layers: int = 2
     dropout: float = 0.1
@@ -105,9 +112,12 @@ class ASRConfig:
         return len(self.characters) if self.tokenizer == "char" else self.vocab_size
 
     def __post_init__(self):
-        if self.type not in {"ctc", "seq2seq"}:
-            raise ValueError("asr.type must be ctc or seq2seq.")
-        if self.quantizer_position not in {"before_transformer", "after_transformer"}:
+        if self.type not in {"ctc", "seq2seq", "gru"}:
+            raise ValueError("asr.type must be ctc, seq2seq or gru.")
+        if self.type == "gru" and self.quantizer_position != "before_encoder":
+            raise ValueError("GRU ASR requires quantizer_position=before_encoder (quantizer -> BiLSTM).")
+        positions = {"before_encoder"} if self.type == "gru" else {"before_transformer", "after_transformer"}
+        if self.quantizer_position not in positions:
             raise ValueError("Invalid ASR quantizer_position.")
         if min(self.transformer_dim, self.transformer_heads, self.encoder_layers,
                self.decoder_layers, self.transformer_ff_dim, self.max_audio_length,
@@ -115,6 +125,11 @@ class ASRConfig:
             raise ValueError("ASR Transformer dimensions and lengths must be positive.")
         if self.transformer_dim % self.transformer_heads or not 0 <= self.label_smoothing < 1:
             raise ValueError("Invalid ASR Transformer heads or label smoothing.")
+        if min(self.encoder_hidden_size, self.decoder_hidden_size, self.decoder_embedding_dim,
+               self.attention_dim, self.attention_channels, self.attention_kernel_size) < 1:
+            raise ValueError("ASR recurrent and attention dimensions must be positive.")
+        if self.attention_scaling <= 0:
+            raise ValueError("attention_scaling must be positive.")
         if self.max_decode_length > self.max_text_length:
             raise ValueError("max_decode_length must not exceed max_text_length.")
         if min(self.hidden_size, self.layers, self.embedding_dim, self.upsample_factor, self.vocab_size) < 1:
