@@ -4,6 +4,7 @@ from torch.nn import functional as F
 
 from .configs import ModelConfig
 from .asr import ASRHead
+from .asr_transformer import AudioTransformer, Seq2SeqASRHead
 from .encoder import build_encoder
 from .diffusion import DiffusionHead
 from .output_dataclasses import QuantizerOutput, SMQuantizerOutput
@@ -22,7 +23,12 @@ class SMQuantizer(nn.Module):
         # Resolve fixed BSQ/FSQ dimensions before constructing any projections.
         # Keep EMA's parameter initialization order compatible with old runs.
         quant_dim = config.quantizer.resolved_dim
-        self.encoder = build_encoder(config.latent_dim, quant_dim, config.projection_hidden_dim, config.encoder)
+        pre_transformer = (config.asr.enabled and config.asr.type == "seq2seq"
+                           and config.asr.quantizer_position == "after_transformer")
+        encoder_dim = config.asr.transformer_dim if pre_transformer else quant_dim
+        self.encoder = build_encoder(config.latent_dim, encoder_dim, config.projection_hidden_dim, config.encoder)
+        self.pre_quantization_transformer = (
+            AudioTransformer(encoder_dim, quant_dim, config.asr) if pre_transformer else None)
         self.quantizer = OnlineQuantizer(config.quantizer)
         self.reconstruction_head = (
             projection(quant_dim, config.projection_hidden_dim, config.latent_dim)
@@ -31,7 +37,8 @@ class SMQuantizer(nn.Module):
         self.decoder = CausalDecoder(quant_dim, config.transformer) if config.language_modeling else None
         self.diffusion_head = (DiffusionHead(config.latent_dim, config.transformer.dim, config.diffusion)
                                if config.language_modeling else None)
-        self.asr_head = ASRHead(quant_dim, config.asr) if config.asr.enabled else None
+        asr_class = Seq2SeqASRHead if config.asr.type == "seq2seq" else ASRHead
+        self.asr_head = asr_class(quant_dim, config.asr) if config.asr.enabled else None
 
         if config.from_pretrained is not None:
             import logging
@@ -62,12 +69,18 @@ class SMQuantizer(nn.Module):
 
     def encode(self, z: torch.Tensor, valid_mask: torch.Tensor | None = None) -> QuantizerOutput:
         valid = self.validate_input(z, valid_mask)
+        return self.quantizer(self.encode_features(z, valid), valid)
+
+    def encode_features(self, z, valid):
         z = z.detach().masked_fill(~valid.unsqueeze(-1), 0)
-        return self.quantizer(self.encoder(z), valid)
+        hidden = self.encoder(z)
+        if self.pre_quantization_transformer is not None:
+            hidden = self.pre_quantization_transformer(hidden, valid)
+        return hidden
 
     def forward(self, z: torch.Tensor, valid_mask: torch.Tensor | None = None,
                 *, target: torch.Tensor | None = None, text_targets: torch.Tensor | None = None,
-                text_lengths: torch.Tensor | None = None) -> SMQuantizerOutput:
+                text_lengths: torch.Tensor | None = None, compute_wer: bool = True) -> SMQuantizerOutput:
         valid = self.validate_input(z, valid_mask)
         target = z if target is None else target
         if target.shape != z.shape or target.device != z.device or target.dtype != z.dtype:
@@ -81,8 +94,9 @@ class SMQuantizer(nn.Module):
         if self.asr_head is not None:
             # Fail before quantization to avoid updating EMA on an invalid batch.
             self.asr_head.validate_targets(text_targets, text_lengths, valid.sum(1) * self.config.asr.upsample_factor)
-        encoder_input = z.detach().masked_fill(~valid.unsqueeze(-1), 0)
-        encoded = self.encoder(encoder_input)
+        if self.config.asr.enabled and self.config.asr.type == "seq2seq" and z.shape[1] > self.config.asr.max_audio_length:
+            raise ValueError("Audio exceeds asr.max_audio_length.")
+        encoded = self.encode_features(z, valid)
         quantized = self.quantizer(encoded, valid)
         reconstruction = None
         l1, l2 = z.new_zeros(()), z.new_zeros(())
@@ -105,9 +119,11 @@ class SMQuantizer(nn.Module):
         if self.asr_head is not None:
             asr = self.asr_head(quantized.codes, valid, text_targets, text_lengths)
             asr_loss, asr_logits = asr.loss, asr.logits
-            if self.config.loss.asr > 0:
+            if self.config.loss.asr > 0 and compute_wer:
+                features, lengths = ((quantized.codes, valid) if self.config.asr.type == "seq2seq"
+                                     else (asr.logits, asr.input_lengths))
                 wer_errors, wer_words = self.asr_head.word_error_counts(
-                    asr.logits, asr.input_lengths, text_targets, text_lengths)
+                    features, lengths, text_targets, text_lengths)
         weights = self.config.loss
         loss = (weights.flow * flow_loss
                 + weights.reconstruction_l1 * l1 + weights.reconstruction_l2 * l2
@@ -122,6 +138,18 @@ class SMQuantizer(nn.Module):
             asr_loss, asr_logits, wer_errors, wer_words, self.config.quantizer.type == "bsq",
             self.config.quantizer.type == "vq",
         )
+
+    @torch.no_grad()
+    def transcribe(self, z, valid_mask=None, max_length=None):
+        """Greedy text decoding from latents, without teacher forcing or EMA updates."""
+        if self.training:
+            raise RuntimeError("Call eval() before transcription.")
+        if not isinstance(self.asr_head, Seq2SeqASRHead):
+            raise RuntimeError("transcribe requires seq2seq ASR.")
+        valid = self.validate_input(z, valid_mask)
+        codes = self.encode(z, valid).codes
+        tokens = self.asr_head.generate(codes, valid, max_length)
+        return [self.asr_head.tokenizer.decode(row) for row in tokens]
 
     @torch.no_grad()
     def predict_next(self, z: torch.Tensor, valid_mask: torch.Tensor | None = None, **sampling_kwargs) -> torch.Tensor:

@@ -11,6 +11,18 @@ model:
   language_modeling: true
   asr:
     enabled: false
+    type: ctc  # ctc | seq2seq
+    quantizer_position: after_transformer
+    transformer_dim: 256
+    transformer_heads: 4
+    encoder_layers: 4
+    decoder_layers: 2
+    transformer_ff_dim: 1024
+    encoder_causal: true
+    max_audio_length: 2048
+    max_text_length: 1024
+    max_decode_length: 512
+    label_smoothing: 0.0
     embedding_dim: 256
     hidden_size: 512
     layers: 2

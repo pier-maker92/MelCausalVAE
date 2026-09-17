@@ -50,12 +50,13 @@ def train_step(
     batch,
     device,
     grad_clip: float,
+    compute_wer: bool = True,
 ):
     model.train()
     optimizer.zero_grad(set_to_none=True)
     batch = batch.to(device)
     output = model(batch.inputs, batch.valid_mask, target=batch.targets,
-                   text_targets=batch.text_targets, text_lengths=batch.text_lengths)
+                   text_targets=batch.text_targets, text_lengths=batch.text_lengths, compute_wer=compute_wer)
     if not torch.isfinite(output.loss):
         raise FloatingPointError("Nonfinite training loss.")
     output.loss.backward()
@@ -75,12 +76,16 @@ def validate(model, loader, device) -> dict[str, float]:
     batch_statistics = {"perplexity": 0.0, "codebook_utilization_pct": 0.0}
     num_batches = 0
     examples = 0
+    asr_units = 0
     wer_errors = wer_words = 0
     for batch in loader:
         batch = batch.to(device)
         output = model(batch.inputs, batch.valid_mask, target=batch.targets,
                        text_targets=batch.text_targets, text_lengths=batch.text_lengths)
         examples += batch.inputs.shape[0]
+        batch_asr_units = (int((batch.text_lengths + 1).sum()) if model.config.asr.enabled
+                           and model.config.asr.type == "seq2seq" else batch.inputs.shape[0])
+        asr_units += batch_asr_units
         if output.wer_errors is not None:
             wer_errors += output.wer_errors
             wer_words += output.wer_words
@@ -91,9 +96,9 @@ def validate(model, loader, device) -> dict[str, float]:
         frames += n_frames
         pairs += n_pairs
         for name in sums:
-            count = batch.inputs.shape[0] if name == "asr_loss" else n_pairs if name == "flow_loss" else n_frames
+            count = batch_asr_units if name == "asr_loss" else n_pairs if name == "flow_loss" else n_frames
             sums[name] += getattr(output, name).item() * count
-    metrics = {name: total / max(1, examples if name == "asr_loss" else pairs if name == "flow_loss" else frames)
+    metrics = {name: total / max(1, asr_units if name == "asr_loss" else pairs if name == "flow_loss" else frames)
                for name, total in sums.items()}
     # Epoch summary is the mean of batch metrics, not a dataset-wide histogram.
     metrics.update({name: total / num_batches for name, total in batch_statistics.items()})
@@ -194,7 +199,9 @@ def train(config: Config):
             for index, batch in enumerate(loader):
                 if current_epoch == epoch and index < batch_index:
                     continue
-                metrics = train_step(model, optimizer, batch, device, settings.grad_clip)
+                logging_step = (index == 0 or (current_epoch == epoch and index == batch_index)
+                                or (step + 1) % settings.log_every == 0)
+                metrics = train_step(model, optimizer, batch, device, settings.grad_clip, compute_wer=logging_step)
                 metrics["epoch"] = current_epoch + 1
                 metrics["total_epochs"] = settings.epochs
                 step += 1

@@ -78,6 +78,18 @@ class EncoderConfig:
 @dataclass
 class ASRConfig:
     enabled: bool = False
+    type: str = "ctc"  # ctc | seq2seq; legacy checkpoints keep CTC
+    quantizer_position: str = "before_transformer"  # before_transformer | after_transformer
+    transformer_dim: int = 256
+    transformer_heads: int = 4
+    encoder_layers: int = 4
+    decoder_layers: int = 2
+    transformer_ff_dim: int = 1024
+    encoder_causal: bool = True
+    max_audio_length: int = 2048
+    max_text_length: int = 1024  # includes EOS
+    max_decode_length: int = 512
+    label_smoothing: float = 0.0
     hidden_size: int = 512
     layers: int = 2
     dropout: float = 0.1
@@ -93,6 +105,18 @@ class ASRConfig:
         return len(self.characters) if self.tokenizer == "char" else self.vocab_size
 
     def __post_init__(self):
+        if self.type not in {"ctc", "seq2seq"}:
+            raise ValueError("asr.type must be ctc or seq2seq.")
+        if self.quantizer_position not in {"before_transformer", "after_transformer"}:
+            raise ValueError("Invalid ASR quantizer_position.")
+        if min(self.transformer_dim, self.transformer_heads, self.encoder_layers,
+               self.decoder_layers, self.transformer_ff_dim, self.max_audio_length,
+               self.max_text_length, self.max_decode_length) < 1:
+            raise ValueError("ASR Transformer dimensions and lengths must be positive.")
+        if self.transformer_dim % self.transformer_heads or not 0 <= self.label_smoothing < 1:
+            raise ValueError("Invalid ASR Transformer heads or label smoothing.")
+        if self.max_decode_length > self.max_text_length:
+            raise ValueError("max_decode_length must not exceed max_text_length.")
         if min(self.hidden_size, self.layers, self.embedding_dim, self.upsample_factor, self.vocab_size) < 1:
             raise ValueError("ASR dimensions and upsample_factor must be positive.")
         if not 0 <= self.dropout < 1 or self.tokenizer not in {"char", "sentencepiece"}:
@@ -136,6 +160,9 @@ class ModelConfig:
         )
 
     def __post_init__(self):
+        if (self.asr.enabled and self.asr.type == "seq2seq" and self.language_modeling
+                and self.asr.quantizer_position == "after_transformer" and not self.asr.encoder_causal):
+            raise ValueError("Next-frame LM requires a causal pre-quantization Transformer.")
         positive = [
             self.latent_dim,
             self.projection_hidden_dim,
